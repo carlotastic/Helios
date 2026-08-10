@@ -36,12 +36,21 @@ bool OptiX8Backend::probe() noexcept {
     try {
         int device_count = 0;
         cudaError_t rc = cudaGetDeviceCount(&device_count);
+
+        std::cout << "cudaGetDeviceCount rc = "
+                  << cudaGetErrorString(rc)
+                  << ", devices = " << device_count << std::endl;
+
         if (rc != cudaSuccess || device_count == 0) {
             return false;
         }
+
         OptixResult optix_rc = optixInit();
+        std::cout << "optixInit() = " << optix_rc << std::endl;
+
         return (optix_rc == OPTIX_SUCCESS);
     } catch (...) {
+        std::cout << "Exception in OptiX8Backend::probe()" << std::endl;
         return false;
     }
 }

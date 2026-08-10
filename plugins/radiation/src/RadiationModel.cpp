@@ -186,6 +186,11 @@ void RadiationModel::setDiffuseRayCount(const std::string &label, size_t N) {
     radiation_bands.at(label).diffuseRayCount = N;
 }
 
+void RadiationModel::seedRandomGenerator(uint seed) {
+    radiation_random_seed = seed;
+    radiation_random_seed_set = true;
+}
+
 void RadiationModel::setDiffuseRadiationFlux(const std::string &label, float flux) {
     if (!doesBandExist(label)) {
         helios_runtime_error("ERROR (RadiationModel::setDiffuseRadiationFlux): Cannot set flux value for band '" + label + "' because it is not a valid band.");
@@ -3934,7 +3939,7 @@ void RadiationModel::runBand(const std::vector<std::string> &label) {
         params.launch_offset = 0;
         params.launch_count = Nprimitives; // Launch all primitives at once
         params.rays_per_primitive = directRayCount;
-        params.random_seed = std::chrono::system_clock::now().time_since_epoch().count();
+        params.random_seed = radiation_random_seed_set ? radiation_random_seed : std::chrono::system_clock::now().time_since_epoch().count();
         params.num_bands_global = Nbands_global;
         params.num_bands_launch = Nbands_launch;
         params.specular_reflection_enabled = specular_reflection_mode;
@@ -4133,7 +4138,7 @@ void RadiationModel::runBand(const std::vector<std::string> &label) {
         params.launch_offset = 0;
         params.launch_count = Nprimitives; // Launch all primitives at once (backend handles batching if needed)
         params.rays_per_primitive = rays_per_primitive;
-        params.random_seed = std::chrono::system_clock::now().time_since_epoch().count();
+        params.random_seed = radiation_random_seed_set ? radiation_random_seed : std::chrono::system_clock::now().time_since_epoch().count();
         params.current_band = 0;
         params.num_bands_global = Nbands_global;
         params.num_bands_launch = Nbands_launch;
@@ -4256,7 +4261,7 @@ void RadiationModel::runBand(const std::vector<std::string> &label) {
             params.launch_offset = 0;
             params.launch_count = Nprimitives;
             params.rays_per_primitive = rays_per_primitive;
-            params.random_seed = std::chrono::system_clock::now().time_since_epoch().count();
+            params.random_seed = radiation_random_seed_set ? radiation_random_seed : std::chrono::system_clock::now().time_since_epoch().count();
             params.current_band = 0;
             params.num_bands_global = Nbands_global;
             params.num_bands_launch = Nbands_launch;
@@ -4442,7 +4447,7 @@ void RadiationModel::runBand(const std::vector<std::string> &label) {
                     // Set band parameters (CRITICAL for materials!)
                     params.num_bands_launch = Nbands_launch;
                     params.num_bands_global = Nbands_global;
-                    params.random_seed = std::chrono::system_clock::now().time_since_epoch().count();
+                    params.random_seed = radiation_random_seed_set ? radiation_random_seed : std::chrono::system_clock::now().time_since_epoch().count();
                     std::vector<bool> band_flags(band_launch_flag.begin(), band_launch_flag.end());
                     params.band_launch_flag = band_flags;
 

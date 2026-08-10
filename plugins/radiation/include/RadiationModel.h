@@ -759,6 +759,13 @@ public:
      */
     void setDiffuseRayCount(const std::string &label, size_t N);
 
+    //! Seed the radiation model's random number generator.
+    /**
+     * \param[in] seed Random seed for radiation ray generation.
+     * \note If not set, radiation ray launches use the current system time to seed each launch.
+     */
+    void seedRandomGenerator(uint seed);
+
     //! Diffuse (ambient) radiation flux
     /**
      * Diffuse component of radiation incident on a horizontal surface above all geometry in the domain.
@@ -2018,6 +2025,12 @@ private:
 protected:
     //! Flag to determine if status messages are output to the screen
     bool message_flag;
+
+    //! Random seed for radiation ray generation
+    uint radiation_random_seed = 0;
+
+    //! Whether a user seed was explicitly set for radiation ray generation
+    bool radiation_random_seed_set = false;
 
     //! Specular reflection mode: 0=disabled, 1=default scale (0.25), 2=user scale
     uint specular_reflection_mode = 0;
