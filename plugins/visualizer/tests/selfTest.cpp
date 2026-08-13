@@ -7,6 +7,90 @@
 
 using namespace helios;
 
+//! Test-only accessor for Visualizer's private tick-generation helpers and colorbar state
+/**
+ * Declared a friend of Visualizer (see Visualizer.h) and defined only here, so none of this is
+ * exposed to users of the library. The tick helpers are pure functions of their arguments and need
+ * no GL context; the colorbar_min/colorbar_max accessors exist because setColorbarTicks() mutates
+ * that state and there is no public getter to observe it.
+ */
+class VisualizerTestHelper {
+public:
+    static double niceNumber(double value, bool round) {
+        return Visualizer::niceNumber(value, round);
+    }
+
+    static std::string formatTickLabel(double value, double spacing, bool isIntegerData) {
+        return Visualizer::formatTickLabel(value, spacing, isIntegerData);
+    }
+
+    static std::vector<float> generateNiceTicks(float dataMin, float dataMax, bool isIntegerData, int targetTicks = 5) {
+        return Visualizer::generateNiceTicks(dataMin, dataMax, isIntegerData, targetTicks);
+    }
+
+    static std::vector<float> generateColorbarTicks(float cmin, float cmax, bool isIntegerData, int targetTicks, double *tick_spacing_out = nullptr) {
+        return Visualizer::generateColorbarTicks(cmin, cmax, isIntegerData, targetTicks, tick_spacing_out);
+    }
+
+    static float getColorbarMin(const Visualizer &visualizer) {
+        return visualizer.colorbar_min;
+    }
+
+    static float getColorbarMax(const Visualizer &visualizer) {
+        return visualizer.colorbar_max;
+    }
+
+    static bool getColorbarRangeSet(const Visualizer &visualizer) {
+        return visualizer.colorbar_range_set;
+    }
+
+    static size_t getColorbarGeometryCount(const Visualizer &visualizer) {
+        return visualizer.colorbar_IDs.size();
+    }
+
+    //! Total geometry currently live in the visualizer, excluding entries already deleted
+    static size_t getLiveGeometryCount(const Visualizer &visualizer) {
+        return visualizer.geometry_handler.getPrimitiveCount(false);
+    }
+
+    static void updateColorbar(Visualizer &visualizer) {
+        visualizer.updateColorbar();
+    }
+
+    //! Force the framebuffer dimensions independently of the window dimensions
+    /**
+     * Headless mode always initializes the framebuffer to match the window, so the high-DPI case
+     * where the two differ is otherwise unreachable from a test.
+     */
+    static void setFrameBufferSize(Visualizer &visualizer, int width, int height) {
+        visualizer.setFrameBufferSize(width, height);
+    }
+
+    static float getDPIScale(const Visualizer &visualizer) {
+        return visualizer.getDPIScale();
+    }
+
+    //! Resolution in texels of the bitmap backing a registered texture
+    static helios::uint2 getTextureResolution(const Visualizer &visualizer, uint textureID) {
+        return visualizer.getTextureResolution(textureID);
+    }
+
+    //! ID of the most recently registered texture. Glyphs are registered one texture per letter.
+    static uint getLastRegisteredTextureID(const Visualizer &visualizer) {
+        return static_cast<uint>(visualizer.texture_manager.size()) - 1u;
+    }
+
+    //! Dimensions every layer of the texture array is allocated at
+    static helios::uint2 getTextureArrayLayerSize(const Visualizer &visualizer) {
+        return visualizer.texture_array_layer_size;
+    }
+
+    static helios::uint2 getMaximumTextureSize(const Visualizer &visualizer) {
+        return visualizer.maximum_texture_size;
+    }
+
+};
+
 TEST_CASE("Visualizer::disableMessages") {
     Visualizer visualizer(1000, 800, 16, false, true);
 
@@ -101,12 +185,212 @@ TEST_CASE("Visualizer::setColorbarTicks") {
     DOCTEST_CHECK_THROWS_AS(visualizer.setColorbarTicks({0.f, 0.5f, 0.4f}), std::runtime_error);
 }
 
+DOCTEST_TEST_CASE("Visualizer::setColorbarTicks - out-of-range ticks expand the range") {
+    // The documented contract (see Visualizer.h) is that out-of-range ticks widen the colorbar
+    // range. That widening also moves the colormap limits, so it changes the colors shown and not
+    // just the labels - it must therefore be announced rather than applied silently.
+
+    // Ticks entirely inside the range leave it untouched and say nothing.
+    {
+        Visualizer visualizer(1000, 800, 16, true, true);
+        visualizer.enableMessages();
+        visualizer.setColorbarRange(0.f, 10.f);
+        std::string output;
+        {
+            capture_cerr cerr_buffer;
+            visualizer.setColorbarTicks({2.f, 5.f, 8.f});
+            output = cerr_buffer.get_captured_output();
+        }
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMin(visualizer) == doctest::Approx(0.f));
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMax(visualizer) == doctest::Approx(10.f));
+        DOCTEST_CHECK_MESSAGE(output.empty(), "in-range ticks should not warn, but got: " << output);
+    }
+
+    // A tick below the range lowers colorbar_min and warns.
+    {
+        Visualizer visualizer(1000, 800, 16, true, true);
+        visualizer.enableMessages();
+        visualizer.setColorbarRange(0.f, 10.f);
+        std::string output;
+        {
+            capture_cerr cerr_buffer;
+            visualizer.setColorbarTicks({-5.f, 5.f});
+            output = cerr_buffer.get_captured_output();
+        }
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMin(visualizer) == doctest::Approx(-5.f));
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMax(visualizer) == doctest::Approx(10.f));
+        DOCTEST_CHECK_MESSAGE(!output.empty(), "silently widened the colorbar range for a tick below it");
+    }
+
+    // A tick above the range raises colorbar_max and warns.
+    {
+        Visualizer visualizer(1000, 800, 16, true, true);
+        visualizer.enableMessages();
+        visualizer.setColorbarRange(0.f, 10.f);
+        std::string output;
+        {
+            capture_cerr cerr_buffer;
+            visualizer.setColorbarTicks({5.f, 25.f});
+            output = cerr_buffer.get_captured_output();
+        }
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMin(visualizer) == doctest::Approx(0.f));
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMax(visualizer) == doctest::Approx(25.f));
+        DOCTEST_CHECK_MESSAGE(!output.empty(), "silently widened the colorbar range for a tick above it");
+    }
+
+    // Ticks straddling the range widen both ends.
+    {
+        Visualizer visualizer(1000, 800, 16, true, true);
+        visualizer.enableMessages();
+        visualizer.setColorbarRange(0.f, 10.f);
+        std::string output;
+        {
+            capture_cerr cerr_buffer;
+            visualizer.setColorbarTicks({-5.f, 5.f, 25.f});
+            output = cerr_buffer.get_captured_output();
+        }
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMin(visualizer) == doctest::Approx(-5.f));
+        DOCTEST_CHECK(VisualizerTestHelper::getColorbarMax(visualizer) == doctest::Approx(25.f));
+        DOCTEST_CHECK_MESSAGE(!output.empty(), "silently widened the colorbar range for ticks on both sides");
+    }
+}
+
+DOCTEST_TEST_CASE("Visualizer::setColorbarTicks - call ordering is documented and consistent") {
+    // setColorbarRange() is last-writer-wins: calling it after setColorbarTicks() restores the
+    // explicit range, so a caller who wants their range respected has a way to get it.
+    const std::vector<float> ticks{-5.f, 5.f, 25.f};
+
+    Visualizer ticks_first(1000, 800, 16, true, true);
+    ticks_first.setColorbarTicks(ticks);
+    ticks_first.setColorbarRange(0.f, 10.f);
+
+    DOCTEST_CHECK(VisualizerTestHelper::getColorbarMin(ticks_first) == doctest::Approx(0.f));
+    DOCTEST_CHECK(VisualizerTestHelper::getColorbarMax(ticks_first) == doctest::Approx(10.f));
+
+    // In the reverse order the ticks widen the range, per the documented contract.
+    Visualizer range_first(1000, 800, 16, true, true);
+    range_first.setColorbarRange(0.f, 10.f);
+    range_first.setColorbarTicks(ticks);
+
+    DOCTEST_CHECK(VisualizerTestHelper::getColorbarMin(range_first) == doctest::Approx(-5.f));
+    DOCTEST_CHECK(VisualizerTestHelper::getColorbarMax(range_first) == doctest::Approx(25.f));
+}
+
+DOCTEST_TEST_CASE("Visualizer::setColorbarRange - an explicit zero range survives auto-ranging") {
+    // "Range not set by the user" used to be inferred from colorbar_min == 0 && colorbar_max == 0,
+    // which is indistinguishable from a deliberate setColorbarRange(0, 0). Such a range was
+    // silently discarded and replaced by the data's own range.
+    Context context;
+    for (uint i = 0; i < 8; i++) {
+        uint UUID = context.addPatch(make_vec3(float(i) * 0.1f, 0, 0), make_vec2(0.09f, 1.f));
+        context.setPrimitiveData(UUID, "testdata", 100.f + float(i));
+    }
+
+    Visualizer visualizer(400, 300, 0, true, true);
+    visualizer.disableMessages();
+    visualizer.setColorbarRange(0.f, 0.f);
+    DOCTEST_CHECK(VisualizerTestHelper::getColorbarRangeSet(visualizer));
+
+    visualizer.buildContextGeometry(&context);
+    visualizer.colorContextPrimitivesByData("testdata");
+    visualizer.plotUpdate(true);
+
+    DOCTEST_CHECK_MESSAGE(VisualizerTestHelper::getColorbarMin(visualizer) == doctest::Approx(0.f), "an explicit setColorbarRange(0,0) was overwritten by auto-ranging");
+    DOCTEST_CHECK_MESSAGE(VisualizerTestHelper::getColorbarMax(visualizer) == doctest::Approx(0.f), "an explicit setColorbarRange(0,0) was overwritten by auto-ranging");
+}
+
+DOCTEST_TEST_CASE("Visualizer colorbar auto-range - no data values found") {
+    // The scan seeds its accumulators with FLT_MAX and lowest(), both finite, so the old
+    // !isinf(min) && !isinf(max) guard could not detect a scan that matched nothing. It therefore
+    // published the inverted sentinel pair [FLT_MAX, -FLT_MAX] as the colormap range, which then
+    // reached tick generation and the colorbar's value-to-position mapping.
+    //
+    // Reaching the empty scan takes some care. Coloring by a label no primitive carries does NOT
+    // do it: primitives missing the label fall through to colorValue = 0, so the scan finds values
+    // and settles on a valid [0, 0]. The value stays at its -9999 "nothing here" marker only for a
+    // primitive absent from colorPrimitives_UUIDs, so this coloring restricts the set to UUIDs
+    // that are not part of the built geometry.
+    Context context;
+    std::vector<uint> built_UUIDs;
+    for (uint i = 0; i < 5; i++) {
+        built_UUIDs.push_back(context.addPatch(make_vec3(float(i) * 0.1f, 0, 0), make_vec2(0.09f, 1.f)));
+    }
+    // Separate primitives, carrying the data label, that are deliberately never built.
+    std::vector<uint> unbuilt_UUIDs;
+    for (uint i = 0; i < 3; i++) {
+        uint UUID = context.addPatch(make_vec3(float(i) * 0.1f, 5.f, 0), make_vec2(0.09f, 1.f));
+        context.setPrimitiveData(UUID, "testdata", 42.f);
+        unbuilt_UUIDs.push_back(UUID);
+    }
+
+    Visualizer visualizer(400, 300, 0, true, true);
+    visualizer.disableMessages();
+    visualizer.buildContextGeometry(&context, built_UUIDs);
+    visualizer.colorContextPrimitivesByData("testdata", unbuilt_UUIDs);
+    DOCTEST_CHECK_NOTHROW(visualizer.plotUpdate(true));
+
+    const float range_min = VisualizerTestHelper::getColorbarMin(visualizer);
+    const float range_max = VisualizerTestHelper::getColorbarMax(visualizer);
+    DOCTEST_CHECK_MESSAGE(range_min <= range_max, "an empty data scan published an inverted range [" << range_min << ", " << range_max << "]");
+    DOCTEST_CHECK_MESSAGE(range_min < 1e30f, "colorbar_min was left at its FLT_MAX sentinel");
+    DOCTEST_CHECK_MESSAGE(range_max > -1e30f, "colorbar_max was left at its lowest() sentinel");
+}
+
+DOCTEST_TEST_CASE("Visualizer colorbar geometry does not accumulate across refreshes") {
+    // updateColorbar() deletes the previous colorbar by iterating colorbar_IDs, so every piece of
+    // geometry it creates has to be recorded there. The lower tick-mark line's UUID was discarded,
+    // leaving those lines undeletable and accumulating on every refresh.
+    Context context;
+    for (uint i = 0; i < 12; i++) {
+        uint UUID = context.addPatch(make_vec3(float(i) * 0.1f, 0, 0), make_vec2(0.09f, 1.f));
+        context.setPrimitiveData(UUID, "testdata", 305.5f + 0.5f * float(i));
+    }
+
+    Visualizer visualizer(800, 600, 0, true, true);
+    visualizer.disableMessages();
+    visualizer.buildContextGeometry(&context);
+    visualizer.colorContextPrimitivesByData("testdata");
+    visualizer.enableColorbar();
+    visualizer.plotUpdate(true);
+
+    DOCTEST_REQUIRE(VisualizerTestHelper::getColorbarGeometryCount(visualizer) > 0);
+
+    // Measure the total live geometry rather than the tracked-ID count: leaked geometry is by
+    // definition the geometry that is NOT in colorbar_IDs, so counting that list cannot detect it.
+    VisualizerTestHelper::updateColorbar(visualizer);
+    const size_t live_geometry_baseline = VisualizerTestHelper::getLiveGeometryCount(visualizer);
+
+    const int refresh_count = 8;
+    for (int refresh = 0; refresh < refresh_count; refresh++) {
+        VisualizerTestHelper::updateColorbar(visualizer);
+    }
+    const size_t live_geometry_after = VisualizerTestHelper::getLiveGeometryCount(visualizer);
+
+    DOCTEST_CHECK_MESSAGE(live_geometry_after == live_geometry_baseline, "colorbar geometry accumulated across " << refresh_count << " refreshes (" << live_geometry_baseline << " -> " << live_geometry_after << "); geometry created by addColorbarByCenter() is not being tracked for deletion");
+}
+
+DOCTEST_TEST_CASE("Visualizer::setColorbarRange - rejects an inverted range regardless of messages") {
+    // The guard used to read `message_flag && cmin > cmax`, so with messages disabled - the
+    // default - an inverted range was silently accepted and fed straight into tick generation.
+    Visualizer visualizer(1000, 800, 16, true, true);
+    visualizer.setColorbarRange(0.f, 10.f);
+    visualizer.disableMessages();
+
+    {
+        capture_cerr cerr_buffer;
+        visualizer.setColorbarRange(20.f, 10.f);
+    }
+
+    DOCTEST_CHECK_MESSAGE(VisualizerTestHelper::getColorbarMin(visualizer) == doctest::Approx(0.f), "inverted range was accepted while messages were disabled");
+    DOCTEST_CHECK_MESSAGE(VisualizerTestHelper::getColorbarMax(visualizer) == doctest::Approx(10.f), "inverted range was accepted while messages were disabled");
+}
+
 TEST_CASE("Visualizer::generateNiceTicks - Float data") {
     // Test various ranges for float data
     std::vector<float> ticks;
 
     // Test range 0 to 1
-    ticks = Visualizer::generateNiceTicks(0.0f, 1.0f, false, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 1.0f, false, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     DOCTEST_CHECK(ticks.front() <= 0.0f);
     DOCTEST_CHECK(ticks.back() >= 1.0f);
@@ -116,30 +400,30 @@ TEST_CASE("Visualizer::generateNiceTicks - Float data") {
     }
 
     // Test range 0 to 100
-    ticks = Visualizer::generateNiceTicks(0.0f, 100.0f, false, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 100.0f, false, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     DOCTEST_CHECK(ticks.front() <= 0.0f);
     DOCTEST_CHECK(ticks.back() >= 100.0f);
 
     // Test range 0 to 48.3
-    ticks = Visualizer::generateNiceTicks(0.0f, 48.3f, false, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 48.3f, false, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     DOCTEST_CHECK(ticks.front() <= 0.0f);
     DOCTEST_CHECK(ticks.back() >= 48.3f);
     // Should generate ticks like 0, 25, 50 or similar nice numbers
 
     // Test very small range
-    ticks = Visualizer::generateNiceTicks(0.0f, 0.1f, false, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 0.1f, false, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
 
     // Test negative range
-    ticks = Visualizer::generateNiceTicks(-10.0f, 10.0f, false, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(-10.0f, 10.0f, false, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     DOCTEST_CHECK(ticks.front() <= -10.0f);
     DOCTEST_CHECK(ticks.back() >= 10.0f);
 
     // Test very large range
-    ticks = Visualizer::generateNiceTicks(0.0f, 1e6f, false, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 1e6f, false, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
 }
 
@@ -147,7 +431,7 @@ TEST_CASE("Visualizer::generateNiceTicks - Integer data") {
     std::vector<float> ticks;
 
     // Test range 0 to 20 (integer)
-    ticks = Visualizer::generateNiceTicks(0.0f, 20.0f, true, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 20.0f, true, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     // All ticks should be integers
     for (float tick: ticks) {
@@ -155,14 +439,14 @@ TEST_CASE("Visualizer::generateNiceTicks - Integer data") {
     }
 
     // Test range 0 to 7 (integer)
-    ticks = Visualizer::generateNiceTicks(0.0f, 7.0f, true, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 7.0f, true, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     for (float tick: ticks) {
         DOCTEST_CHECK(std::fabs(tick - std::round(tick)) < 1e-6);
     }
 
     // Test range 0 to 100 (integer)
-    ticks = Visualizer::generateNiceTicks(0.0f, 100.0f, true, 5);
+    ticks = VisualizerTestHelper::generateNiceTicks(0.0f, 100.0f, true, 5);
     DOCTEST_CHECK(ticks.size() >= 2);
     for (float tick: ticks) {
         DOCTEST_CHECK(std::fabs(tick - std::round(tick)) < 1e-6);
@@ -173,36 +457,36 @@ TEST_CASE("Visualizer::formatTickLabel - Float data") {
     std::string label;
 
     // Test formatting with spacing = 0.2 (nice number spacing, should show 1 decimal place)
-    label = Visualizer::formatTickLabel(0.0, 0.2, false);
+    label = VisualizerTestHelper::formatTickLabel(0.0, 0.2, false);
     DOCTEST_CHECK(label == "0.0");
 
-    label = Visualizer::formatTickLabel(0.4, 0.2, false);
+    label = VisualizerTestHelper::formatTickLabel(0.4, 0.2, false);
     DOCTEST_CHECK(label == "0.4");
 
-    label = Visualizer::formatTickLabel(1.0, 0.2, false);
+    label = VisualizerTestHelper::formatTickLabel(1.0, 0.2, false);
     DOCTEST_CHECK(label == "1.0");
 
     // Test formatting with spacing = 1.0 (should show 0 decimal places)
-    label = Visualizer::formatTickLabel(0.0, 1.0, false);
+    label = VisualizerTestHelper::formatTickLabel(0.0, 1.0, false);
     DOCTEST_CHECK(label == "0");
 
-    label = Visualizer::formatTickLabel(10.0, 1.0, false);
+    label = VisualizerTestHelper::formatTickLabel(10.0, 1.0, false);
     DOCTEST_CHECK(label == "10");
 
     // Test formatting with spacing = 0.1
-    label = Visualizer::formatTickLabel(0.5, 0.1, false);
+    label = VisualizerTestHelper::formatTickLabel(0.5, 0.1, false);
     DOCTEST_CHECK(label == "0.5");
 
     // Test very small value (should use scientific notation)
-    label = Visualizer::formatTickLabel(1e-6, 1e-6, false);
+    label = VisualizerTestHelper::formatTickLabel(1e-6, 1e-6, false);
     DOCTEST_CHECK(label.find("e") != std::string::npos); // Should contain 'e' for scientific notation
 
     // Test large value (should use scientific notation at 10,000+)
-    label = Visualizer::formatTickLabel(15000.0, 1000.0, false);
+    label = VisualizerTestHelper::formatTickLabel(15000.0, 1000.0, false);
     DOCTEST_CHECK(label.find("e") != std::string::npos);
 
     // Test value below scientific notation threshold
-    label = Visualizer::formatTickLabel(9000.0, 1000.0, false);
+    label = VisualizerTestHelper::formatTickLabel(9000.0, 1000.0, false);
     DOCTEST_CHECK(label.find("e") == std::string::npos); // Should NOT use scientific notation
 }
 
@@ -210,56 +494,243 @@ TEST_CASE("Visualizer::formatTickLabel - Integer data") {
     std::string label;
 
     // Test integer formatting
-    label = Visualizer::formatTickLabel(0.0, 1.0, true);
+    label = VisualizerTestHelper::formatTickLabel(0.0, 1.0, true);
     DOCTEST_CHECK(label == "0");
 
-    label = Visualizer::formatTickLabel(5.0, 1.0, true);
+    label = VisualizerTestHelper::formatTickLabel(5.0, 1.0, true);
     DOCTEST_CHECK(label == "5");
 
-    label = Visualizer::formatTickLabel(100.0, 10.0, true);
+    label = VisualizerTestHelper::formatTickLabel(100.0, 10.0, true);
     DOCTEST_CHECK(label == "100");
 
     // Test rounding for integer data
-    label = Visualizer::formatTickLabel(5.4, 1.0, true);
+    label = VisualizerTestHelper::formatTickLabel(5.4, 1.0, true);
     DOCTEST_CHECK(label == "5");
 
-    label = Visualizer::formatTickLabel(5.6, 1.0, true);
+    label = VisualizerTestHelper::formatTickLabel(5.6, 1.0, true);
     DOCTEST_CHECK(label == "6");
 
     // Test large integer values (should use scientific notation at 10,000+)
-    label = Visualizer::formatTickLabel(15000.0, 1000.0, true);
+    label = VisualizerTestHelper::formatTickLabel(15000.0, 1000.0, true);
     DOCTEST_CHECK(label.find("e") != std::string::npos);
 
     // Test integer value below scientific notation threshold
-    label = Visualizer::formatTickLabel(9000.0, 1000.0, true);
+    label = VisualizerTestHelper::formatTickLabel(9000.0, 1000.0, true);
     DOCTEST_CHECK(label == "9000");
+}
+
+DOCTEST_TEST_CASE("Visualizer::formatTickLabel - decimals must not misstate the value") {
+    // Decimal places were chosen from the spacing alone, so a tick value carrying more precision
+    // than the spacing was rendered as a different number rather than a rounded one.
+
+    // spacing >= 1.0 forced zero decimals, printing 2.5 as "2".
+    std::string label = VisualizerTestHelper::formatTickLabel(2.5, 1.0, false);
+    DOCTEST_CHECK_MESSAGE(label != "2", "2.5 rendered as \"2\" - the label states a different value than the tick");
+    DOCTEST_CHECK(std::fabs(std::stod(label) - 2.5) < 1e-9);
+
+    // -floor(log10(0.25)) yields 1 decimal, printing 0.25 as "0.2" and 0.75 as "0.8".
+    label = VisualizerTestHelper::formatTickLabel(0.25, 0.25, false);
+    DOCTEST_CHECK_MESSAGE(label != "0.2", "0.25 rendered as \"0.2\"");
+    DOCTEST_CHECK(std::fabs(std::stod(label) - 0.25) < 1e-9);
+
+    label = VisualizerTestHelper::formatTickLabel(0.75, 0.25, false);
+    DOCTEST_CHECK_MESSAGE(label != "0.8", "0.75 rendered as \"0.8\"");
+    DOCTEST_CHECK(std::fabs(std::stod(label) - 0.75) < 1e-9);
+
+    // A zero spacing must not reach log10(): the cast of the resulting infinity is undefined.
+    DOCTEST_CHECK_NOTHROW(label = VisualizerTestHelper::formatTickLabel(1.5, 0.0, false));
+    DOCTEST_CHECK(!label.empty());
 }
 
 TEST_CASE("Visualizer::niceNumber") {
     // Test rounding up (round = false)
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(0.72, false) - 1.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(1.5, false) - 2.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(3.2, false) - 5.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(7.5, false) - 10.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(0.72, false) - 1.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(1.5, false) - 2.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(3.2, false) - 5.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(7.5, false) - 10.0) < 1e-6);
 
     // Test rounding to nearest (round = true)
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(1.2, true) - 1.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(1.6, true) - 2.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(3.5, true) - 5.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(6.0, true) - 5.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(1.2, true) - 1.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(1.6, true) - 2.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(3.5, true) - 5.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(6.0, true) - 5.0) < 1e-6);
 
     // Test with different magnitudes
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(12.0, true) - 10.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(120.0, true) - 100.0) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(0.12, true) - 0.1) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(12.0, true) - 10.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(120.0, true) - 100.0) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(0.12, true) - 0.1) < 1e-6);
 
     // Test zero
-    DOCTEST_CHECK(Visualizer::niceNumber(0.0, true) == 0.0);
-    DOCTEST_CHECK(Visualizer::niceNumber(0.0, false) == 0.0);
+    DOCTEST_CHECK(VisualizerTestHelper::niceNumber(0.0, true) == 0.0);
+    DOCTEST_CHECK(VisualizerTestHelper::niceNumber(0.0, false) == 0.0);
 
     // Test negative values (should preserve sign)
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(-1.5, true) - (-2.0)) < 1e-6);
-    DOCTEST_CHECK(std::fabs(Visualizer::niceNumber(-3.2, true) - (-5.0)) < 1e-6); // -3.2 rounds to -5.0, not -2.0
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(-1.5, true) - (-2.0)) < 1e-6);
+    DOCTEST_CHECK(std::fabs(VisualizerTestHelper::niceNumber(-3.2, true) - (-5.0)) < 1e-6); // -3.2 rounds to -5.0, not -2.0
+}
+
+// Tolerance used by addColorbarByCenter() when deciding whether a tick lies on the bar.
+static float colorbarRangeEpsilon(float cmin, float cmax) {
+    return 1e-4f * std::max(std::fabs(cmax - cmin), 1.0f);
+}
+
+DOCTEST_TEST_CASE("Visualizer::generateColorbarTicks - reported single-tick collapse") {
+    // Regression: an auto-ranged colorbar over surface-temperature data (~305-312 K) rendered a
+    // single tick label, "310". generateNiceTicks() extends outward to the next nice number past
+    // the data, and addColorbarByCenter() then deleted every tick outside [cmin, cmax] - which is
+    // exactly the two extended endpoints. The default colorbar size and font size yield
+    // targetTicks=3, so [below_min, middle, above_max] collapsed to one surviving tick.
+    const std::vector<std::pair<float, float>> reported_ranges = {{305.5f, 311.5f}, {308.3f, 311.3f}, {302.0f, 316.0f}, {300.1f, 306.1f}};
+
+    for (const auto &range: reported_ranges) {
+        const float cmin = range.first;
+        const float cmax = range.second;
+        std::vector<float> ticks = VisualizerTestHelper::generateColorbarTicks(cmin, cmax, false, 3);
+
+        DOCTEST_CHECK_MESSAGE(ticks.size() >= 2, "range [" << cmin << ", " << cmax << "] produced " << ticks.size() << " tick(s); a colorbar needs at least 2 to convey scale");
+
+        const float epsilon = colorbarRangeEpsilon(cmin, cmax);
+        for (float tick: ticks) {
+            DOCTEST_CHECK_MESSAGE(tick >= cmin - epsilon, "tick " << tick << " lies below the colorbar range [" << cmin << ", " << cmax << "]");
+            DOCTEST_CHECK_MESSAGE(tick <= cmax + epsilon, "tick " << tick << " lies above the colorbar range [" << cmin << ", " << cmax << "]");
+        }
+    }
+}
+
+DOCTEST_TEST_CASE("Visualizer::generateColorbarTicks - narrow-range sweep") {
+    // The collapse is not an edge case: it fires for any auto-ranged colorbar whose data does not
+    // land on nice boundaries. This sweep reproduced 203 collapsing cases against the pre-fix
+    // generate-then-delete path. It is run at targetTicks=3 - the value the default colorbar size
+    // and font size actually produce - so that merely raising the max_ticks floor would not make
+    // it pass.
+    const std::vector<float> widths = {0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 5.0f, 8.0f};
+
+    size_t collapsed_count = 0;
+    size_t out_of_range_count = 0;
+    size_t non_monotonic_count = 0;
+    float first_collapsed_min = 0.f;
+    float first_collapsed_max = 0.f;
+
+    for (int step = 0; step <= 160; ++step) {
+        const float cmin = 300.0f + 0.1f * float(step);
+        for (float width: widths) {
+            const float cmax = cmin + width;
+            std::vector<float> ticks = VisualizerTestHelper::generateColorbarTicks(cmin, cmax, false, 3);
+
+            if (ticks.size() < 2) {
+                if (collapsed_count == 0) {
+                    first_collapsed_min = cmin;
+                    first_collapsed_max = cmax;
+                }
+                collapsed_count++;
+                continue;
+            }
+
+            const float epsilon = colorbarRangeEpsilon(cmin, cmax);
+            for (float tick: ticks) {
+                if (tick < cmin - epsilon || tick > cmax + epsilon) {
+                    out_of_range_count++;
+                }
+            }
+            for (size_t i = 1; i < ticks.size(); ++i) {
+                if (ticks.at(i) <= ticks.at(i - 1)) {
+                    non_monotonic_count++;
+                }
+            }
+        }
+    }
+
+    DOCTEST_CHECK_MESSAGE(collapsed_count == 0, collapsed_count << " narrow ranges collapsed to fewer than 2 ticks; first was [" << first_collapsed_min << ", " << first_collapsed_max << "]");
+    DOCTEST_CHECK_MESSAGE(out_of_range_count == 0, out_of_range_count << " ticks fell outside their colorbar range (orphaned off-bar labels)");
+    DOCTEST_CHECK_MESSAGE(non_monotonic_count == 0, non_monotonic_count << " tick sequences were not strictly increasing");
+}
+
+DOCTEST_TEST_CASE("Visualizer::generateColorbarTicks - nice-boundary ranges") {
+    // Ranges that already land on nice boundaries worked before the fix and must keep working.
+    // These are the cases that mask the bug during casual testing.
+    const std::vector<std::pair<float, float>> nice_ranges = {{300.0f, 320.0f}, {0.0f, 1.0f}, {295.0f, 330.0f}};
+
+    for (const auto &range: nice_ranges) {
+        const float cmin = range.first;
+        const float cmax = range.second;
+        std::vector<float> ticks = VisualizerTestHelper::generateColorbarTicks(cmin, cmax, false, 3);
+
+        DOCTEST_CHECK_MESSAGE(ticks.size() >= 2, "nice range [" << cmin << ", " << cmax << "] produced " << ticks.size() << " tick(s)");
+
+        const float epsilon = colorbarRangeEpsilon(cmin, cmax);
+        DOCTEST_CHECK(ticks.front() >= cmin - epsilon);
+        DOCTEST_CHECK(ticks.back() <= cmax + epsilon);
+        for (size_t i = 1; i < ticks.size(); ++i) {
+            DOCTEST_CHECK(ticks.at(i) > ticks.at(i - 1));
+        }
+    }
+}
+
+DOCTEST_TEST_CASE("Visualizer::generateColorbarTicks - integer data") {
+    std::vector<float> ticks = VisualizerTestHelper::generateColorbarTicks(0.0f, 20.0f, true, 3);
+    DOCTEST_CHECK(ticks.size() >= 2);
+    for (float tick: ticks) {
+        DOCTEST_CHECK(std::fabs(tick - std::round(tick)) < 1e-6f);
+    }
+    for (size_t i = 1; i < ticks.size(); ++i) {
+        DOCTEST_CHECK(ticks.at(i) - ticks.at(i - 1) >= 1.0f - 1e-6f);
+    }
+
+    // Integer spacing must never drop below 1 even when the range is narrow.
+    ticks = VisualizerTestHelper::generateColorbarTicks(0.0f, 3.0f, true, 5);
+    DOCTEST_CHECK(ticks.size() >= 2);
+    for (size_t i = 1; i < ticks.size(); ++i) {
+        DOCTEST_CHECK(ticks.at(i) - ticks.at(i - 1) >= 1.0f - 1e-6f);
+    }
+
+    // A range containing no integer at all cannot produce integral ticks. Returning a single tick
+    // is correct here; inventing fractional ones would violate the integer-data contract.
+    ticks = VisualizerTestHelper::generateColorbarTicks(5.2f, 5.8f, true, 3);
+    for (float tick: ticks) {
+        DOCTEST_CHECK(std::fabs(tick - std::round(tick)) < 1e-6f);
+    }
+}
+
+DOCTEST_TEST_CASE("Visualizer::generateColorbarTicks - reports the generating spacing") {
+    // tick_spacing feeds formatTickLabel()'s decimal-place selection. Deriving it from the
+    // returned vector (as addColorbarByCenter used to) leaves it at a default of 1.0 whenever
+    // filtering left fewer than 2 ticks, which is why the reported label rendered as "310" rather
+    // than "310.0".
+    double spacing = -1.0;
+    std::vector<float> ticks = VisualizerTestHelper::generateColorbarTicks(305.5f, 311.5f, false, 3, &spacing);
+    DOCTEST_REQUIRE(ticks.size() >= 2);
+    DOCTEST_CHECK_MESSAGE(spacing > 0.0, "generating spacing was not written to the out-parameter");
+    DOCTEST_CHECK_MESSAGE(std::fabs(spacing - double(ticks.at(1) - ticks.at(0))) < 1e-4, "reported spacing " << spacing << " disagrees with the actual tick step " << (ticks.at(1) - ticks.at(0)));
+
+    // A null out-parameter must be accepted.
+    DOCTEST_CHECK_NOTHROW(VisualizerTestHelper::generateColorbarTicks(0.0f, 1.0f, false, 3, nullptr));
+}
+
+DOCTEST_TEST_CASE("Visualizer::generateColorbarTicks - degenerate input") {
+    // Called every frame from the rendering path, so degenerate limits must degrade rather than
+    // throw. Returning an empty vector would leave the colorbar with no labels at all.
+    double spacing = -1.0;
+
+    std::vector<float> ticks;
+    DOCTEST_CHECK_NOTHROW(ticks = VisualizerTestHelper::generateColorbarTicks(5.0f, 5.0f, false, 3, &spacing));
+    DOCTEST_CHECK(!ticks.empty());
+
+    DOCTEST_CHECK_NOTHROW(ticks = VisualizerTestHelper::generateColorbarTicks(10.0f, 5.0f, false, 3, &spacing));
+    DOCTEST_CHECK(!ticks.empty());
+
+    DOCTEST_CHECK_NOTHROW(ticks = VisualizerTestHelper::generateColorbarTicks(1.0f, 1.0f + 1e-12f, false, 3, &spacing));
+    DOCTEST_CHECK(!ticks.empty());
+
+    const float nan_value = std::numeric_limits<float>::quiet_NaN();
+    const float inf_value = std::numeric_limits<float>::infinity();
+    DOCTEST_CHECK_NOTHROW(ticks = VisualizerTestHelper::generateColorbarTicks(nan_value, 1.0f, false, 3, &spacing));
+    DOCTEST_CHECK(!ticks.empty());
+    DOCTEST_CHECK_NOTHROW(ticks = VisualizerTestHelper::generateColorbarTicks(0.0f, inf_value, false, 3, &spacing));
+    DOCTEST_CHECK(!ticks.empty());
+
+    // A degenerate spacing must never be zero or non-finite: formatTickLabel() takes log10 of it.
+    DOCTEST_CHECK(std::isfinite(spacing));
+    DOCTEST_CHECK(spacing > 0.0);
 }
 
 TEST_CASE("Visualizer colorbar text attributes") {
@@ -269,6 +740,98 @@ TEST_CASE("Visualizer colorbar text attributes") {
     DOCTEST_CHECK_NOTHROW(visualizer.setColorbarFontSize(14));
     capture_cerr cerr_buffer;
     DOCTEST_CHECK_THROWS_AS(visualizer.setColorbarFontSize(0), std::runtime_error);
+}
+
+TEST_CASE("Visualizer text rasterizes at framebuffer resolution on high-DPI displays") {
+    // Glyphs are rasterized on the CPU by FreeType at a fixed pixel size, but they are drawn into
+    // the framebuffer. On a high-DPI (Retina) display the framebuffer is larger than the window in
+    // screen coordinates, typically by 2x per axis, so a glyph bitmap generated at window
+    // resolution is magnified when drawn and the text looks blocky.
+    //
+    // Headless mode initializes the framebuffer to match the window exactly, so the mismatch has to
+    // be forced in order to be observable at all.
+
+    constexpr uint window_width = 1000;
+    constexpr uint window_height = 800;
+    constexpr uint fontsize = 12; // matches the colorbar default, the worst case for this defect
+    const char *teststring = "Wg";
+
+    auto build_text = [&](Visualizer &visualizer, uint2 &glyph_resolution_out, float &quad_width_out) {
+        std::vector<size_t> UUIDs = visualizer.addTextboxByCenter(teststring, make_vec3(0.5f, 0.5f, 0.f), make_SphericalCoord(0, 0), RGB::black, fontsize, "OpenSans-Regular", Visualizer::COORDINATES_WINDOW_NORMALIZED);
+        DOCTEST_REQUIRE(UUIDs.size() == std::strlen(teststring));
+
+        glyph_resolution_out = VisualizerTestHelper::getTextureResolution(visualizer, VisualizerTestHelper::getLastRegisteredTextureID(visualizer));
+
+        // Width from the vertex extents rather than a fixed vertex ordering.
+        const std::vector<vec3> vertices = visualizer.getGeometryVertices(UUIDs.back());
+        DOCTEST_REQUIRE(vertices.size() == 4);
+        float xmin = vertices.front().x;
+        float xmax = vertices.front().x;
+        for (const vec3 &vertex: vertices) {
+            xmin = std::min(xmin, vertex.x);
+            xmax = std::max(xmax, vertex.x);
+        }
+        quad_width_out = xmax - xmin;
+    };
+
+    uint2 glyph_resolution_1x;
+    float quad_width_1x;
+    Visualizer visualizer_1x(window_width, window_height, 16, false, true);
+    DOCTEST_REQUIRE(VisualizerTestHelper::getDPIScale(visualizer_1x) == doctest::Approx(1.f));
+    build_text(visualizer_1x, glyph_resolution_1x, quad_width_1x);
+
+    uint2 glyph_resolution_2x;
+    float quad_width_2x;
+    Visualizer visualizer_2x(window_width, window_height, 16, false, true);
+    VisualizerTestHelper::setFrameBufferSize(visualizer_2x, 2 * window_width, 2 * window_height);
+    DOCTEST_REQUIRE(VisualizerTestHelper::getDPIScale(visualizer_2x) == doctest::Approx(2.f));
+    build_text(visualizer_2x, glyph_resolution_2x, quad_width_2x);
+
+    // The glyph bitmap must gain resolution in proportion to the DPI scale. Without this the
+    // bitmap is identical at both scales and is simply magnified when drawn, which is the defect.
+    DOCTEST_CHECK_MESSAGE(glyph_resolution_2x.x > glyph_resolution_1x.x, "glyph rasterized at " << glyph_resolution_2x.x << "x" << glyph_resolution_2x.y << " texels under a 2x DPI scale, versus " << glyph_resolution_1x.x << "x" << glyph_resolution_1x.y
+                                                                                               << " at 1x; the bitmap is being magnified rather than rasterized at framebuffer resolution");
+    DOCTEST_CHECK(glyph_resolution_2x.y > glyph_resolution_1x.y);
+
+    // ...while the on-screen quad must NOT change size, or text would render twice as large on a
+    // high-DPI display. Glyph quads are in window-normalized coordinates and are resolution
+    // independent by construction.
+    DOCTEST_CHECK_MESSAGE(quad_width_2x == doctest::Approx(quad_width_1x).epsilon(0.05), "text quad width changed from " << quad_width_1x << " to " << quad_width_2x << " under a 2x DPI scale; glyph quads must stay the same size on screen regardless of framebuffer resolution");
+}
+
+TEST_CASE("Visualizer texture array layers are sized to their contents") {
+    // Every layer of a texture array has the same dimensions, so allocating them at
+    // maximum_texture_size gave a 7x9-texel glyph a 2048x2048 RGBA8 layer - 16 MB apiece, so a
+    // colorbar's worth of text cost hundreds of megabytes of VRAM. Layers are now sized to the
+    // largest texture actually present.
+    Visualizer visualizer(1000, 800, 16, false, true);
+
+    std::vector<size_t> UUIDs = visualizer.addTextboxByCenter("Wg", make_vec3(0.5f, 0.5f, 0.f), make_SphericalCoord(0, 0), RGB::black, 12, "OpenSans-Regular", Visualizer::COORDINATES_WINDOW_NORMALIZED);
+    DOCTEST_REQUIRE(UUIDs.size() == 2);
+    DOCTEST_CHECK_NOTHROW(visualizer.plotUpdate());
+
+    const uint2 layer_size = VisualizerTestHelper::getTextureArrayLayerSize(visualizer);
+    const uint2 max_size = VisualizerTestHelper::getMaximumTextureSize(visualizer);
+
+    // The layers must be no larger than the largest texture registered. A handful of small glyphs
+    // must not pull in a layer anywhere near the 2048x2048 load-time clamp.
+    uint2 largest_texture = make_uint2(1, 1);
+    for (uint textureID = 0; textureID <= VisualizerTestHelper::getLastRegisteredTextureID(visualizer); textureID++) {
+        const uint2 resolution = VisualizerTestHelper::getTextureResolution(visualizer, textureID);
+        largest_texture.x = std::max(largest_texture.x, resolution.x);
+        largest_texture.y = std::max(largest_texture.y, resolution.y);
+    }
+
+    DOCTEST_CHECK_MESSAGE(layer_size.x == largest_texture.x, "texture array layers allocated " << layer_size.x << " texels wide to hold a largest texture of " << largest_texture.x);
+    DOCTEST_CHECK(layer_size.y == largest_texture.y);
+    DOCTEST_CHECK(layer_size.x < max_size.x);
+    DOCTEST_CHECK(layer_size.y < max_size.y);
+
+    // Sampling is confined to each texture's sub-rectangle by the UV rescale factors, which are
+    // relative to the layer size. A layer sized to its contents means the factors approach one
+    // rather than the ~0.004 a 2048-texel layer produced, so this also exercises that they were
+    // recomputed against the new divisor rather than left scaled to the old one.
+    DOCTEST_CHECK(float(largest_texture.x) / float(layer_size.x) == doctest::Approx(1.f));
 }
 
 TEST_CASE("Visualizer::setColormap") {
@@ -644,7 +1207,13 @@ TEST_CASE("Visualizer::printWindow after plotUpdate regression test") {
 
     // Validate that the image is not all black (the original issue)
     // Read back the pixels directly from the visualizer to verify content
-    std::vector<uint> pixel_buffer(200 * 200 * 3);
+    // getWindowPixelsRGB() writes one entry per framebuffer subpixel, and the framebuffer is
+    // larger than the requested window on a high-DPI display - 2x per axis on a Retina screen, so
+    // 4x the elements. Sizing this buffer from the constructor's window dimensions overflowed it
+    // and corrupted the heap.
+    uint framebuffer_width, framebuffer_height;
+    visualizer.getFramebufferSize(framebuffer_width, framebuffer_height);
+    std::vector<uint> pixel_buffer(3 * framebuffer_width * framebuffer_height);
     DOCTEST_CHECK_NOTHROW(visualizer.getWindowPixelsRGB(pixel_buffer.data()));
 
     // Check that we have non-black pixels (red sphere should be visible)
@@ -723,7 +1292,13 @@ TEST_CASE("Visualizer::printWindow after plotUpdate non-headless regression test
 
     // Validate that the image is not all black (the original issue)
     // Read back the pixels directly from the visualizer to verify content
-    std::vector<uint> pixel_buffer(200 * 200 * 3);
+    // getWindowPixelsRGB() writes one entry per framebuffer subpixel, and the framebuffer is
+    // larger than the requested window on a high-DPI display - 2x per axis on a Retina screen, so
+    // 4x the elements. Sizing this buffer from the constructor's window dimensions overflowed it
+    // and corrupted the heap.
+    uint framebuffer_width, framebuffer_height;
+    visualizer.getFramebufferSize(framebuffer_width, framebuffer_height);
+    std::vector<uint> pixel_buffer(3 * framebuffer_width * framebuffer_height);
     DOCTEST_CHECK_NOTHROW(visualizer.getWindowPixelsRGB(pixel_buffer.data()));
 
     // Check that we have non-black pixels (red sphere should be visible)
@@ -1594,6 +2169,127 @@ DOCTEST_TEST_CASE("Visualizer shadows survive an intervening depth-map render") 
         }
     }
 }
+
+TEST_CASE("Visualizer::plotOnce on a freshly constructed visualizer (headless)") {
+    // Regression test: plotOnce() was the only render entry point that never uploaded the CPU-side
+    // geometry to the GPU before drawing. initialize() ends by queueing a gradient background
+    // rectangle in geometry_handler, so even an empty scene had rectangle_count == 1 while the
+    // vertex buffers were still the zero-byte stores left by glGenBuffers. render() then issued a
+    // glMultiDrawArrays() that fetched vertices out of bounds and the driver faulted.
+    //
+    // Calling setBackgroundColor() first used to mask this, because it removes the background
+    // rectangle and puts nothing back, dropping rectangle_count to zero.
+
+    Visualizer visualizer(200, 200, 0, true, true); // headless
+    visualizer.disableMessages();
+
+    DOCTEST_CHECK_NOTHROW(visualizer.plotOnce(false));
+
+    // Surviving the call is the crash assertion. Additionally verify the background actually
+    // rendered: with the buffers never uploaded there is nothing on the GPU to draw, so a correct
+    // upload is precisely what makes the gradient appear.
+    // getWindowPixelsRGB() writes one entry per framebuffer subpixel, and the framebuffer is
+    // larger than the requested window on a high-DPI display - 2x per axis on a Retina screen, so
+    // 4x the elements. Sizing this buffer from the constructor's window dimensions overflowed it
+    // and corrupted the heap.
+    uint framebuffer_width, framebuffer_height;
+    visualizer.getFramebufferSize(framebuffer_width, framebuffer_height);
+    std::vector<uint> pixel_buffer(3 * framebuffer_width * framebuffer_height);
+    DOCTEST_CHECK_NOTHROW(visualizer.getWindowPixelsRGB(pixel_buffer.data()));
+
+    bool has_non_black_pixels = false;
+    for (size_t i = 0; i < pixel_buffer.size(); i++) {
+        if (pixel_buffer[i] > 10) {
+            has_non_black_pixels = true;
+            break;
+        }
+    }
+
+    DOCTEST_CHECK_MESSAGE(has_non_black_pixels, "plotOnce() produced an empty frame - the default gradient background was never uploaded to the GPU");
+}
+
+TEST_CASE("Visualizer::plotOnce on a freshly constructed visualizer (windowed)") {
+    // Same regression as the headless case above, in windowed mode. The reported crash reproduced
+    // in both modes, so both are covered here.
+
+    const char *display = std::getenv("DISPLAY");
+    const char *wayland_display = std::getenv("WAYLAND_DISPLAY");
+
+#ifdef __APPLE__
+    // On macOS, we can always create a window context
+    bool has_display = true;
+#else
+    // On Linux, check for X11 or Wayland display
+    bool has_display = (display != nullptr && strlen(display) > 0) || (wayland_display != nullptr && strlen(wayland_display) > 0);
+#endif
+
+    if (!has_display) {
+        // Skip test silently when no display is available
+        return;
+    }
+
+    Visualizer visualizer(200, 200, 0, true, false); // NON-headless mode - requires display
+    visualizer.disableMessages();
+
+    DOCTEST_CHECK_NOTHROW(visualizer.plotOnce(false));
+}
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+
+DOCTEST_TEST_CASE("Visualizer::plotOnce does not terminate the process") {
+    // The bug this guards against is a SIGSEGV inside the GL driver, which doctest cannot catch:
+    // an in-process crash takes down the whole test runner instead of reporting a failure. So the
+    // call is made in a forked child and the parent inspects the wait status. Modeled on the
+    // fork()-based test in plugins/radiation/tests/selfTest.cpp.
+    //
+    // macOS is excluded rather than merely #ifndef _WIN32. doctest runs this whole file in one
+    // process, and the first test case in it constructs a Visualizer, so by the time we get here
+    // the parent has already initialized GLFW/OpenGL and therefore the Objective-C runtime. Apple's
+    // CoreFoundation aborts a forked child that re-enters it, which would surface below as
+    // WIFSIGNALED and be indistinguishable from the very crash this test exists to detect. The
+    // headless test case above is the portable assertion; this one is the crash backstop on
+    // platforms where forking after GL initialization is safe.
+#ifndef __APPLE__
+    std::cout.flush();
+    std::cerr.flush();
+
+    pid_t child = fork();
+
+    if (child == 0) {
+        // Child: report status through the exit code only - no doctest macros, and _exit() rather
+        // than exit() so the parent's atexit handlers do not run a second time in the child's
+        // inherited copy of that state.
+        int status = 0;
+        try {
+            Visualizer visualizer(200, 200, 0, true, true); // headless
+            visualizer.disableMessages();
+            visualizer.plotOnce(false);
+        } catch (...) {
+            status = 2; // any escaped exception is a failure
+        }
+        std::cout.flush();
+        _exit(status);
+    }
+
+    DOCTEST_REQUIRE(child > 0);
+
+    int wait_status = 0;
+    DOCTEST_REQUIRE(waitpid(child, &wait_status, 0) == child);
+
+    // A crash surfaces here as termination by signal (SIGSEGV) rather than a normal exit.
+    DOCTEST_CHECK_FALSE(WIFSIGNALED(wait_status));
+    if (WIFSIGNALED(wait_status)) {
+        DOCTEST_MESSAGE("plotOnce() terminated the child by signal " << WTERMSIG(wait_status));
+    }
+    DOCTEST_CHECK(WIFEXITED(wait_status));
+    if (WIFEXITED(wait_status)) {
+        DOCTEST_CHECK(WEXITSTATUS(wait_status) == 0);
+    }
+#endif // __APPLE__
+}
+#endif // _WIN32
 
 int Visualizer::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);

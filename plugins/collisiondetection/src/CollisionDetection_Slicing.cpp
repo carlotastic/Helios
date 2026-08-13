@@ -1194,7 +1194,7 @@ std::vector<uint> CollisionDetection::slicePrimitive(uint UUID, const std::vecto
     for (uint i = 0; i < resulting_UUIDs.size(); i++) {
         this->context->copyPrimitiveData(UUID, resulting_UUIDs.at(i));
         uint parentID = this->context->getPrimitiveParentObjectID(UUID);
-        if (parentID > 0 && this->context->getObjectType(parentID) == helios::OBJECT_TYPE_TILE) {
+        if (parentID > 0 && (this->context->getObjectType(parentID) == helios::OBJECT_TYPE_TILE || this->context->getObjectType(parentID) == helios::OBJECT_TYPE_ADAPTIVE_TILE)) {
             this->context->setPrimitiveParentObjectID(resulting_UUIDs.at(i), 0);
         } else {
             this->context->setPrimitiveParentObjectID(resulting_UUIDs.at(i), parentID);

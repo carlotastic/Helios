@@ -425,6 +425,53 @@ int XMLparser::parse_subdivisions(const pugi::xml_node &node, int3 &subdivisions
     return 0;
 }
 
+int XMLparser::parse_texture_repeat(const pugi::xml_node &node, int2 &texture_repeat) {
+    pugi::xml_node repeat_node = node.child("texture_repeat");
+    std::string repeat = trim_whitespace(repeat_node.child_value());
+    if (!repeat.empty()) {
+        std::istringstream data_stream(repeat);
+        std::vector<std::string> tmp_s(2);
+        data_stream >> tmp_s[0];
+        data_stream >> tmp_s[1];
+        if (!parse_int(tmp_s[0], texture_repeat.x) || !parse_int(tmp_s[1], texture_repeat.y)) {
+            return 2;
+        }
+    } else {
+        return 1;
+    }
+    return 0;
+}
+
+int XMLparser::parse_adaptive_refinement(const pugi::xml_node &node, AdaptiveTileRefinement &refinement) {
+    pugi::xml_node refinement_node = node.child("adaptive_refinement");
+    std::string refinement_str = trim_whitespace(refinement_node.child_value());
+    if (refinement_str.empty()) {
+        return 1;
+    }
+
+    std::istringstream data_stream(refinement_str);
+    std::vector<float> values;
+    std::string tmp_s;
+    while (data_stream >> tmp_s) {
+        float value;
+        if (!parse_float(tmp_s, value)) {
+            return 2;
+        }
+        values.push_back(value);
+    }
+
+    if (values.size() < 5) {
+        return 3;
+    }
+
+    refinement.target = make_vec2(values.at(0), values.at(1));
+    refinement.subpatch_size_min = values.at(2);
+    refinement.subpatch_size_max = values.at(3);
+    refinement.transition_exponent = values.at(4);
+
+    return 0;
+}
+
 int XMLparser::parse_nodes(const pugi::xml_node &node, std::vector<vec3> &nodes) {
     pugi::xml_node node_data = node.child("nodes");
     std::string data_str = node_data.child_value();
@@ -1839,6 +1886,14 @@ std::vector<uint> Context::loadXML(const char *filename, bool quiet) {
             helios_runtime_error("ERROR (Context::loadXML): Tile <subdivisions> node contains invalid data. ");
         }
 
+        // * Tile Texture Repeat * //
+        // Optional tag: every file written before it existed lacks it, in which case the default repeat of
+        // 1x1 is correct. Its absence must therefore not produce a warning, unlike <subdivisions> above.
+        int2 texture_repeat = make_int2(1, 1);
+        if (XMLparser::parse_texture_repeat(p, texture_repeat) == 2) {
+            helios_runtime_error("ERROR (Context::loadXML): Tile <texture_repeat> node contains invalid data. ");
+        }
+
         // Create a dummy patch in order to get the center, size, and rotation based on transformation matrix
         Patch patch(make_RGBAcolor(0, 0, 0, 0), 0, 0);
         patch.setTransformationMatrix(transform);
@@ -1863,7 +1918,7 @@ std::vector<uint> Context::loadXML(const char *filename, bool quiet) {
                 ID = addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, subdiv, make_RGBcolor(color.r, color.g, color.b));
             }
         } else {
-            ID = addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, subdiv, texture_file.c_str());
+            ID = addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, subdiv, texture_file.c_str(), texture_repeat);
         }
 
         getTileObjectPointer_private(ID)->setTransformationMatrix(transform);
@@ -1891,6 +1946,120 @@ std::vector<uint> Context::loadXML(const char *filename, bool quiet) {
         std::vector<uint> childUUIDs = getObjectPrimitiveUUIDs(ID);
         UUID.insert(UUID.end(), childUUIDs.begin(), childUUIDs.end());
     } // end tiles
+
+    //-------------- ADAPTIVE TILES ---------------//
+    for (pugi::xml_node p = helios.child("adaptive_tile"); p; p = p.next_sibling("adaptive_tile")) {
+        // * Adaptive Tile Object ID * //
+        uint objID = 0;
+        if (XMLparser::parse_objID(p, objID) > 1) {
+            helios_runtime_error("ERROR (Context::loadXML): Object ID (objID) given in 'adaptive_tile' block must be a non-negative integer value.");
+        }
+
+        // Unlike a uniform tile, an adaptive tile is not regenerated from its parameters and then overwritten with the loaded primitives. Two reasons: regenerating a large adaptive tile only to delete it is expensive,
+        // and the refinement predicate is evaluated with transcendental functions that are not identically rounded across platforms, so a cell whose desired level falls within one unit in the last place of an integer
+        // could split differently than it did when the file was written. The primitives in the file are therefore the authority, and their absence is an error rather than something to paper over.
+        if (object_prim_UUIDs.find(objID) == object_prim_UUIDs.end() || object_prim_UUIDs.at(objID).empty()) {
+            helios_runtime_error("ERROR (Context::loadXML): <adaptive_tile> block with objID " + std::to_string(objID) + " does not reference any primitives in the file.");
+        }
+
+        // * Adaptive Tile Transformation Matrix * //
+        float transform[16];
+        int result = XMLparser::parse_transform(p, transform);
+        if (result == 3) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <transform> node contains less than 16 data values.");
+        } else if (result == 2) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <transform> node contains invalid data.");
+        }
+
+        // * Adaptive Tile Texture * //
+        std::string texture_file;
+        XMLparser::parse_texture(p, texture_file);
+        if (texture_file == "none") {
+            texture_file.clear();
+        }
+
+        // * Adaptive Tile Refinement Parameters * //
+        AdaptiveTileRefinement refinement;
+        int result_refinement = XMLparser::parse_adaptive_refinement(p, refinement);
+        if (result_refinement == 1) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile block with objID " + std::to_string(objID) + " is missing the required <adaptive_refinement> node.");
+        } else if (result_refinement == 2) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <adaptive_refinement> node contains invalid data.");
+        } else if (result_refinement == 3) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <adaptive_refinement> node contains less than 5 data values.");
+        }
+
+        // * Adaptive Tile Base Subdivisions * //
+        int2 base_subdiv;
+        int result_subdiv = XMLparser::parse_subdivisions(p, base_subdiv);
+        if (result_subdiv == 1) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile block with objID " + std::to_string(objID) + " is missing the required <subdivisions> node.");
+        } else if (result_subdiv == 2) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <subdivisions> node contains invalid data.");
+        }
+
+        // * Adaptive Tile Maximum Refinement Level * //
+        uint max_level = 0;
+        std::string max_level_str = trim_whitespace(p.child("max_refinement_level").child_value());
+        if (max_level_str.empty()) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile block with objID " + std::to_string(objID) + " is missing the required <max_refinement_level> node.");
+        }
+        if (!parse_uint(max_level_str, max_level)) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <max_refinement_level> node contains invalid data.");
+        }
+
+        // * Adaptive Tile Achieved Sub-patch Size Range * //
+        vec2 subpatch_size_range;
+        std::string size_range_str = trim_whitespace(p.child("subpatch_size_range").child_value());
+        if (size_range_str.empty()) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile block with objID " + std::to_string(objID) + " is missing the required <subpatch_size_range> node.");
+        }
+        {
+            std::istringstream size_range_stream(size_range_str);
+            std::vector<std::string> tmp_s(2);
+            size_range_stream >> tmp_s[0];
+            size_range_stream >> tmp_s[1];
+            if (!parse_float(tmp_s[0], subpatch_size_range.x) || !parse_float(tmp_s[1], subpatch_size_range.y)) {
+                helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <subpatch_size_range> node contains invalid data.");
+            }
+        }
+
+        // * Adaptive Tile Texture Repeat * //
+        int2 texture_repeat = make_int2(1, 1);
+        if (XMLparser::parse_texture_repeat(p, texture_repeat) == 2) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <texture_repeat> node contains invalid data. ");
+        }
+
+        // The generation path validates these parameters thoroughly, but nothing regenerates geometry here, so without
+        // an equivalent check a hand-edited or corrupted file produces an object that reports a negative sub-patch size
+        // or an empty base grid through the public accessors as though they were legitimate.
+        if (base_subdiv.x < 1 || base_subdiv.y < 1) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <subdivisions> node must contain two values greater than 0.");
+        } else if (refinement.subpatch_size_min <= 0.f || refinement.subpatch_size_max <= 0.f || refinement.subpatch_size_min > refinement.subpatch_size_max) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <adaptive_refinement> node must specify sub-patch sizes greater than 0, with the minimum no greater than the maximum.");
+        } else if (refinement.transition_exponent <= 0.f) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <adaptive_refinement> node must specify a transition exponent greater than 0.");
+        } else if (subpatch_size_range.x <= 0.f || subpatch_size_range.y <= 0.f || subpatch_size_range.x > subpatch_size_range.y) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <subpatch_size_range> node must contain two values greater than 0, in increasing order.");
+        } else if (texture_repeat.x < 1 || texture_repeat.y < 1) {
+            helios_runtime_error("ERROR (Context::loadXML): Adaptive tile <texture_repeat> node must contain two values greater than 0.");
+        }
+
+        ID = addAdaptiveTileObject_fromPrimitives(object_prim_UUIDs.at(objID), refinement, base_subdiv, max_level, subpatch_size_range, texture_file.c_str(), texture_repeat);
+
+        getAdaptiveTileObjectPointer_private(ID)->setTransformationMatrix(transform);
+
+        // * Adaptive Tile Sub-Patch Data * //
+
+        loadOsubPData(p, ID, load_xml_warnings);
+
+        // * Adaptive Tile Object Data * //
+
+        loadOData(p, ID);
+
+        std::vector<uint> childUUIDs = object_prim_UUIDs.at(objID);
+        UUID.insert(UUID.end(), childUUIDs.begin(), childUUIDs.end());
+    } // end adaptive tiles
 
     //-------------- SPHERES ---------------//
     for (pugi::xml_node p = helios.child("sphere"); p; p = p.next_sibling("sphere")) {
@@ -3135,6 +3304,8 @@ void Context::writeXML(const char *filename, const std::vector<uint> &UUIDs, boo
 
         if (obj->getObjectType() == OBJECT_TYPE_TILE) {
             outfile << "   <tile>" << std::endl;
+        } else if (obj->getObjectType() == OBJECT_TYPE_ADAPTIVE_TILE) {
+            outfile << "   <adaptive_tile>" << std::endl;
         } else if (obj->getObjectType() == OBJECT_TYPE_BOX) {
             outfile << "   <box>" << std::endl;
         } else if (obj->getObjectType() == OBJECT_TYPE_CONE) {
@@ -3338,6 +3509,13 @@ void Context::writeXML(const char *filename, const std::vector<uint> &UUIDs, boo
             int2 subdiv = tile->getSubdivisionCount();
             outfile << "\t<subdivisions>" << subdiv.x << " " << subdiv.y << "</subdivisions>" << std::endl;
 
+            // Written only when it differs from the default, so that files containing no tiled textures are
+            // unchanged by the introduction of this tag.
+            int2 texture_repeat = tile->getTextureRepeat();
+            if (tile->hasTexture() && texture_repeat != make_int2(1, 1)) {
+                outfile << "\t<texture_repeat>" << texture_repeat.x << " " << texture_repeat.y << "</texture_repeat>" << std::endl;
+            }
+
             outfile << "\t<transform> ";
             for (float i: transform) {
                 outfile << i << " ";
@@ -3345,6 +3523,40 @@ void Context::writeXML(const char *filename, const std::vector<uint> &UUIDs, boo
             outfile << "</transform>" << std::endl;
 
             outfile << "   </tile>" << std::endl;
+
+            // Adaptive tiles
+        } else if (obj->getObjectType() == OBJECT_TYPE_ADAPTIVE_TILE) {
+            AdaptiveTile *tile = getAdaptiveTileObjectPointer_private(o);
+
+            float transform[16];
+            tile->getTransformationMatrix(transform);
+
+            const AdaptiveTileRefinement refinement = tile->getRefinement();
+            outfile << "\t<adaptive_refinement>" << refinement.target.x << " " << refinement.target.y << " " << refinement.subpatch_size_min << " " << refinement.subpatch_size_max << " "
+                    << refinement.transition_exponent << "</adaptive_refinement>" << std::endl;
+
+            // The base grid, maximum level and achieved size range are all derived from the refinement parameters when the object is built, but they are written out rather than re-derived on load so that a later change
+            // to the sizing heuristic cannot silently reinterpret an existing file.
+            int2 base_subdiv = tile->getBaseSubdivisionCount();
+            outfile << "\t<subdivisions>" << base_subdiv.x << " " << base_subdiv.y << "</subdivisions>" << std::endl;
+
+            outfile << "\t<max_refinement_level>" << tile->getMaxRefinementLevel() << "</max_refinement_level>" << std::endl;
+
+            vec2 size_range = tile->getSubpatchSizeRange();
+            outfile << "\t<subpatch_size_range>" << size_range.x << " " << size_range.y << "</subpatch_size_range>" << std::endl;
+
+            int2 texture_repeat = tile->getTextureRepeat();
+            if (tile->hasTexture() && texture_repeat != make_int2(1, 1)) {
+                outfile << "\t<texture_repeat>" << texture_repeat.x << " " << texture_repeat.y << "</texture_repeat>" << std::endl;
+            }
+
+            outfile << "\t<transform> ";
+            for (float i: transform) {
+                outfile << i << " ";
+            }
+            outfile << "</transform>" << std::endl;
+
+            outfile << "   </adaptive_tile>" << std::endl;
 
             // Spheres
         } else if (obj->getObjectType() == OBJECT_TYPE_SPHERE) {

@@ -619,6 +619,8 @@ namespace helios {
         OBJECT_TYPE_POLYMESH = 5,
         //! Cone/tapered cylinder
         OBJECT_TYPE_CONE = 6,
+        //! Tile with adaptive (quadtree) sub-patch resolution
+        OBJECT_TYPE_ADAPTIVE_TILE = 7,
         //! Not assigned to an object
         OBJECT_TYPE_NONE = -1
     };
@@ -1139,14 +1141,156 @@ namespace helios {
         //! Get the normalized (u,v) coordinates of the texture at each of the four corners of the tile object
         [[nodiscard]] std::vector<helios::vec2> getTextureUV() const;
 
+        //! Get the number of times the texture image is repeated across the tile object
+        /**
+         * \return Texture repeat count in the x- and y-directions, as specified when the tile object was created.
+         * \note This is the count that was requested. It is retained so that it can be re-applied if the subdivision count is later changed. The count actually applied to the sub-patch texture coordinates is smaller
+         * whenever the requested count does not evenly divide the subdivision count; use \ref getEffectiveTextureRepeat to query that value.
+         */
+        [[nodiscard]] helios::int2 getTextureRepeat() const;
+
+        //! Get the number of texture repeats actually applied to the sub-patch texture coordinates
+        /**
+         * \return Requested texture repeat count, reduced so that it evenly divides the subdivision count.
+         * \sa \ref getTextureRepeat
+         */
+        [[nodiscard]] helios::int2 getEffectiveTextureRepeat() const;
+
     protected:
         //! Default constructor
         /**
          * \note This constructor is private and should not be used.
          */
-        Tile(uint a_OID, const std::vector<uint> &a_UUIDs, const int2 &a_subdiv, const char *a_texturefile, helios::Context *a_context);
+        Tile(uint a_OID, const std::vector<uint> &a_UUIDs, const int2 &a_subdiv, const char *a_texturefile, const int2 &a_texture_repeat, helios::Context *a_context);
 
         helios::int2 subdiv;
+
+        //! Number of times the texture image is repeated across the tile, as requested when the object was created
+        helios::int2 texture_repeat = helios::make_int2(1, 1);
+
+        friend class CompoundObject;
+        friend class Context;
+    };
+
+    //! Parameters controlling the adaptive sub-patch refinement of an adaptive tile object
+    /**
+     * Sub-patch edge length grows with distance from \ref target, from \ref subpatch_size_min at the target itself up to \ref subpatch_size_max at the point of the tile farthest from the target. Refinement is
+     * performed by recursive quadtree subdivision, so the achieved sizes are the requested sizes rounded onto a power-of-two ladder; both ends are typically within about 20% of the request. See the "Adaptive Tile
+     * Objects" section of the User's Guide for the exact refinement law.
+     */
+    struct AdaptiveTileRefinement {
+        //! Point of maximum refinement, in tile-local coordinates relative to the tile center and before rotation is applied
+        /**
+         * Defaults to the center of the tile. A target outside the tile is permitted, but the finest requested sub-patch size will then not be reached anywhere and a warning is issued.
+         */
+        helios::vec2 target = helios::make_vec2(0.f, 0.f);
+
+        //! Requested edge length of the finest sub-patches, which occur at the target point
+        /**
+         * Defaults to 0.05, i.e. 5 cm in the usual case of a scene measured in meters. Set this from the feature you need resolved near the target, such as the width of the shadow cast by a leaf. Must be greater than
+         * zero, and no smaller than the maximum divided by 16777216.
+         */
+        float subpatch_size_min = 0.05f;
+
+        //! Requested edge length of the coarsest sub-patches, which occur farthest from the target point
+        /**
+         * Defaults to 1, i.e. 1 m in the usual case of a scene measured in meters. Must be greater than zero and no more than half the smaller tile dimension. This value sets the grid of coarsest-level cells that the
+         * quadtree refines within, so it drives the cost of a large domain more strongly than the minimum does: halving it quadruples the number of cells the tile starts from.
+         */
+        float subpatch_size_max = 1.f;
+
+        //! Exponent controlling how rapidly sub-patch size grows with distance from the target
+        /**
+         * Defaults to 0.35, which suits a typical ground plane. Useful values run from about 0.25 to 1; the parameter must be greater than zero.
+         *
+         * Values below 1 concentrate fine resolution tightly around the target; values above 1 spread it broadly across the tile; a value of 1 is linear in refinement level versus radius. The achieved sub-patch size
+         * range is unaffected, but the sub-patch count is not, and it is by far the most consequential parameter for the cost of the tile. On a 50 m tile refined from 2 m down to 2 cm, against roughly 6.25 million
+         * sub-patches for a uniform tile at the same fine resolution:
+         *
+         * value | sub-patches
+         * ----- | -----------
+         * 0.25  | roughly 9 thousand
+         * 0.35  | roughly 21 thousand
+         * 0.5   | roughly 61 thousand
+         * 1     | roughly 471 thousand
+         * 2     | roughly 2 million
+         *
+         * Use \ref helios::Context::predictAdaptiveTileObjectSubpatchCount "predictAdaptiveTileObjectSubpatchCount" to check the count for a particular tile before building it.
+         */
+        float transition_exponent = 0.35f;
+    };
+
+    //! Adaptive-resolution tile compound object class
+    /**
+     * A flat rectangular tile subdivided by a quadtree into coplanar, non-overlapping rectangular sub-patches whose edge length increases with distance from a target point. Unlike \ref Tile, the sub-patches are not
+     * uniform in size, so there is no meaningful subdivision count and the sub-patches are ordered by quadtree traversal rather than row-major.
+     */
+    class AdaptiveTile final : public CompoundObject {
+    public:
+        //! Adaptive tile destructor
+        ~AdaptiveTile() override = default;
+
+        //! Get the dimensions of the entire adaptive tile object
+        [[nodiscard]] helios::vec2 getSize() const;
+
+        //! Get the Cartesian coordinates of the center of the adaptive tile object
+        [[nodiscard]] helios::vec3 getCenter() const;
+
+        //! Get the Cartesian coordinates of each of the four corners of the adaptive tile object
+        [[nodiscard]] std::vector<helios::vec3> getVertices() const;
+
+        //! Get a unit vector normal to the adaptive tile object surface
+        [[nodiscard]] helios::vec3 getNormal() const;
+
+        //! Get the normalized texture coordinates at each of the four corners of the adaptive tile object
+        [[nodiscard]] std::vector<helios::vec2> getTextureUV() const;
+
+        //! Get the refinement parameters that were requested when the object was created
+        [[nodiscard]] AdaptiveTileRefinement getRefinement() const;
+
+        //! Get the number of coarsest-level cells spanning the tile in the x- and y-directions
+        /**
+         * The base grid is the uniform grid of unrefined cells that the quadtree refines within. It is derived from the requested sub-patch size range and the tile dimensions.
+         */
+        [[nodiscard]] helios::int2 getBaseSubdivisionCount() const;
+
+        //! Get the maximum quadtree refinement level, which is the number of times a base cell may be subdivided
+        [[nodiscard]] uint getMaxRefinementLevel() const;
+
+        //! Get the sub-patch edge lengths actually achieved, as opposed to those requested
+        /**
+         * \return Achieved minimum edge length in the x-component and achieved maximum edge length in the y-component.
+         */
+        [[nodiscard]] helios::vec2 getSubpatchSizeRange() const;
+
+        //! Get the number of times the texture image is repeated across the adaptive tile object
+        /**
+         * The base grid is snapped to a multiple of the requested repeat count when the object is created, so unlike \ref Tile the requested count is always applied exactly and there is no effective-repeat variant.
+         */
+        [[nodiscard]] helios::int2 getTextureRepeat() const;
+
+    protected:
+        //! Default constructor
+        /**
+         * \note This constructor is private and should not be used.
+         */
+        AdaptiveTile(uint a_OID, const std::vector<uint> &a_UUIDs, const AdaptiveTileRefinement &a_refinement, const helios::int2 &a_base_subdiv, uint a_max_level, const helios::vec2 &a_subpatch_size_range,
+                     const char *a_texturefile, const helios::int2 &a_texture_repeat, helios::Context *a_context);
+
+        //! Refinement parameters as requested when the object was created
+        AdaptiveTileRefinement refinement;
+
+        //! Number of coarsest-level cells spanning the tile, derived from the requested sub-patch size range
+        helios::int2 base_subdiv = helios::make_int2(1, 1);
+
+        //! Maximum number of times a base cell may be subdivided
+        uint max_level = 0;
+
+        //! Achieved minimum and maximum sub-patch edge lengths
+        helios::vec2 subpatch_size_range = helios::make_vec2(0.f, 0.f);
+
+        //! Number of times the texture image is repeated across the tile
+        helios::int2 texture_repeat = helios::make_int2(1, 1);
 
         friend class CompoundObject;
         friend class Context;
@@ -2458,6 +2602,24 @@ namespace helios {
          */
         static int parse_subdivisions(const pugi::xml_node &node_data, int3 &subdivisions);
 
+        //! Parse the value within a \<texture_repeat> (tile object texture tiling count) tag
+        /**
+         * \param[in] node_data PUGI XML node for tag containing vector data
+         * \param[out] texture_repeat 2D (int2) texture repeat count parsed from XML node
+         * \return 0 if parsing was successful, 1 if tag/node did not exist or was empty, 2 if tag/node contained invalid data that could not be converted properly.
+         * \note This tag is optional. Files written before it existed do not contain it, in which case a return value of 1 should be treated as the default repeat count of 1x1 rather than as an error.
+         */
+        static int parse_texture_repeat(const pugi::xml_node &node_data, int2 &texture_repeat);
+
+        //! Parse the value within an \<adaptive_refinement> (adaptive tile object refinement parameters) tag
+        /**
+         * The tag contains five whitespace-separated values, in order: target x, target y, minimum sub-patch size, maximum sub-patch size, transition exponent.
+         * \param[in] node_data PUGI XML node for tag containing vector data
+         * \param[out] refinement Refinement parameters parsed from XML node
+         * \return 0 if parsing was successful, 1 if tag/node did not exist or was empty, 2 if tag/node contained invalid data that could not be converted properly, 3 if it contained fewer than five values.
+         */
+        static int parse_adaptive_refinement(const pugi::xml_node &node_data, AdaptiveTileRefinement &refinement);
+
         //! Parse the value within a \<nodes> (coordinates defining nodes of a tube or cone) tag
         /**
          * \param[in] node_data PUGI XML node for tag containing vector data
@@ -2527,6 +2689,31 @@ namespace helios {
          * @private
          */
         [[nodiscard]] Tile *getTileObjectPointer_private(uint ObjID) const;
+
+        //! Get a pointer to an Adaptive Tile Object from the Context
+        /**
+         * \param[in] ObjID ID of Adaptive Tile Object
+         * @private
+         */
+        [[nodiscard]] AdaptiveTile *getAdaptiveTileObjectPointer_private(uint ObjID) const;
+
+        //! Build an adaptive tile object around primitives that already exist in the Context
+        /**
+         * Used when reading an adaptive tile back from an XML file, where the sub-patch geometry has already been loaded and must be adopted rather than regenerated. Regenerating is both wasteful and unreliable: the
+         * refinement predicate depends on transcendental functions that are not identically rounded across platforms, so a cell whose desired level lies within one unit in the last place of an integer could split
+         * differently than it did when the file was written.
+         * \param[in] UUIDs Sub-patch primitives to adopt, in quadtree traversal order.
+         * \param[in] refinement Refinement parameters as originally requested.
+         * \param[in] base_subdiv Number of coarsest-level cells spanning the tile.
+         * \param[in] max_level Maximum quadtree refinement level.
+         * \param[in] subpatch_size_range Achieved minimum and maximum sub-patch edge lengths.
+         * \param[in] texturefile Name of image file for texture map, or an empty string if untextured.
+         * \param[in] texture_repeat Number of times the texture image is repeated in the x- and y-directions.
+         * \return Object ID of new adaptive tile object.
+         * @private
+         */
+        uint addAdaptiveTileObject_fromPrimitives(const std::vector<uint> &UUIDs, const AdaptiveTileRefinement &refinement, const int2 &base_subdiv, uint max_level, const vec2 &subpatch_size_range,
+                                                  const char *texturefile, const int2 &texture_repeat);
 
         //! Rebuild the sub-patch primitives of a tile object for a new subdivision count, preserving its orientation
         /**
@@ -5798,6 +5985,8 @@ namespace helios {
          * \param[in] ObjIDs object IDs of the tile objects to change
          * \param[in] new_subdiv the new subdivisions desired
          * \note The tile's position, size and orientation (including any in-plane rotation) are preserved.
+         * \note For a textured tile, the texture repeat count specified when the tile was created is also retained and re-applied. It is reduced wherever it does not evenly divide the new subdivision count, in the same way
+         * as a repeat count passed directly to \ref addTileObject; use \ref getTileObjectEffectiveTextureRepeat to query the value that was applied.
          */
         void setTileObjectSubdivisionCount(const std::vector<uint> &ObjIDs, const int2 &new_subdiv);
 
@@ -5806,6 +5995,8 @@ namespace helios {
          * \param[in] ObjIDs object IDs of the tile objects to change
          * \param[in] area_ratio the approximate ratio between individual tile object area and individual subpatch area desired. Must be greater than or equal to 1.
          * \note The tile's position, size and orientation (including any in-plane rotation) are preserved.
+         * \note For a textured tile, the texture repeat count specified when the tile was created is also retained and re-applied. It is reduced wherever it does not evenly divide the new subdivision count, in the same way
+         * as a repeat count passed directly to \ref addTileObject; use \ref getTileObjectEffectiveTextureRepeat to query the value that was applied.
          */
         void setTileObjectSubdivisionCount(const std::vector<uint> &ObjIDs, float area_ratio);
 
@@ -5829,6 +6020,23 @@ namespace helios {
          */
         [[nodiscard]] helios::int2 getTileObjectSubdivisionCount(uint ObjID) const;
 
+        //! get the requested texture repeat count of a tile object from the context
+        /**
+         * \param[in] ObjID object ID of the tile object
+         * \return Texture repeat count in the x- and y-directions, as specified when the tile object was created.
+         * \note The repeat actually applied to the sub-patch texture coordinates is reduced whenever the requested count does not evenly divide the subdivision count; use \ref getTileObjectEffectiveTextureRepeat to query
+         * that value.
+         */
+        [[nodiscard]] helios::int2 getTileObjectTextureRepeat(uint ObjID) const;
+
+        //! get the texture repeat count actually applied to the sub-patches of a tile object
+        /**
+         * \param[in] ObjID object ID of the tile object
+         * \return Requested texture repeat count, reduced so that it evenly divides the subdivision count.
+         * \sa \ref getTileObjectTextureRepeat
+         */
+        [[nodiscard]] helios::int2 getTileObjectEffectiveTextureRepeat(uint ObjID) const;
+
         //! get the normal of a tile object from the context
         /**
          * \param[in] ObjID object ID of the tile object
@@ -5846,6 +6054,75 @@ namespace helios {
          * \param[in] ObjID object ID of the tile object
          */
         [[nodiscard]] std::vector<helios::vec3> getTileObjectVertices(uint ObjID) const;
+
+        //! get the center of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         */
+        [[nodiscard]] helios::vec3 getAdaptiveTileObjectCenter(uint ObjID) const;
+
+        //! get the size of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         */
+        [[nodiscard]] helios::vec2 getAdaptiveTileObjectSize(uint ObjID) const;
+
+        //! get the normal vector of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         */
+        [[nodiscard]] helios::vec3 getAdaptiveTileObjectNormal(uint ObjID) const;
+
+        //! get the vertices of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         */
+        [[nodiscard]] std::vector<helios::vec3> getAdaptiveTileObjectVertices(uint ObjID) const;
+
+        //! get the refinement parameters of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         * \return Refinement parameters as they were requested when the object was created.
+         */
+        [[nodiscard]] AdaptiveTileRefinement getAdaptiveTileObjectRefinement(uint ObjID) const;
+
+        //! get the base grid dimensions of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         * \return Number of coarsest-level cells spanning the tile in the x- and y-directions.
+         */
+        [[nodiscard]] helios::int2 getAdaptiveTileObjectBaseSubdivisionCount(uint ObjID) const;
+
+        //! get the maximum quadtree refinement level of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         */
+        [[nodiscard]] uint getAdaptiveTileObjectMaxRefinementLevel(uint ObjID) const;
+
+        //! get the sub-patch edge lengths actually achieved by an adaptive tile object
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         * \return Achieved minimum edge length in the x-component and achieved maximum edge length in the y-component.
+         */
+        [[nodiscard]] helios::vec2 getAdaptiveTileObjectSubpatchSizeRange(uint ObjID) const;
+
+        //! get the texture repeat count of an adaptive tile object from the context
+        /**
+         * \param[in] ObjID object ID of the adaptive tile object
+         */
+        [[nodiscard]] helios::int2 getAdaptiveTileObjectTextureRepeat(uint ObjID) const;
+
+        //! Determine how many sub-patches an adaptive tile object would contain, without building any geometry
+        /**
+         * Runs the same quadtree traversal as \ref addAdaptiveTileObject but counts cells instead of creating primitives. Useful for checking the cost of a set of refinement parameters before committing to it, since the
+         * sub-patch count is highly sensitive to \ref AdaptiveTileRefinement::transition_exponent.
+         * \param[in] size Size of the tile in the x- and y-directions
+         * \param[in] refinement Parameters controlling the adaptive sub-patch resolution
+         * \param[in] texture_repeat Number of times the texture image would be repeated in the x- and y-directions
+         * \return Number of sub-patches that would be created.
+         * \note Raises the same error as \ref addAdaptiveTileObject for a refinement that would generate too many sub-patches, rather than reporting a count, so that both answer the question the same way.
+         */
+        [[nodiscard]] size_t predictAdaptiveTileObjectSubpatchCount(const vec2 &size, const AdaptiveTileRefinement &refinement, const int2 &texture_repeat = helios::make_int2(1, 1)) const;
 
         //! get the center of a Sphere object from the context
         /**
@@ -6126,9 +6403,67 @@ namespace helios {
          * \param[in] texturefile Name of image file for texture map
          * \param[in] texture_repeat Number of times to repeat the texture image in the x- and y-directions
          * \return Object ID of new tile object.
+         * \note The repeat count is silently reduced wherever it does not evenly divide the subdivision count, since each sub-patch must cover a whole number of them. Use \ref getTileObjectEffectiveTextureRepeat to query
+         * the value that was applied.
+         * \note The requested count is retained on the tile object and re-applied if the subdivision count is later changed via \ref setTileObjectSubdivisionCount, so it is the requested rather than the reduced value that
+         * governs subsequent changes.
          * \ingroup compoundobjects
          */
         uint addTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const int2 &subdiv, const char *texturefile, const int2 &texture_repeat);
+
+        //! Add a patch that is subdivided into sub-patches whose size adapts with distance from a target point
+        /**
+         * Sub-patches are generated by recursive quadtree subdivision, so they are fine near \ref AdaptiveTileRefinement::target and progressively coarser away from it. This is intended for ground planes, where fine
+         * resolution is needed to resolve shadows cast near an object of interest but the remainder of the domain only needs to occlude the horizon. The sub-patches exactly partition the tile with no gaps and no
+         * overlaps, and the achieved sizes are typically within about 20% of those requested.
+         * \param[in] center 3D coordinates of tile center
+         * \param[in] size Size of the tile in the x- and y-directions
+         * \param[in] rotation Spherical rotation of tiled surface
+         * \param[in] refinement Parameters controlling the adaptive sub-patch resolution
+         * \return Object ID of new adaptive tile object.
+         * \note Sub-patches are ordered by quadtree traversal, not row-major, so they cannot be indexed by grid position.
+         * \ingroup compoundobjects
+         */
+        uint addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement);
+
+        //! Add a patch that is subdivided into sub-patches whose size adapts with distance from a target point, with a specified color
+        /**
+         * \param[in] center 3D coordinates of tile center
+         * \param[in] size Size of the tile in the x- and y-directions
+         * \param[in] rotation Spherical rotation of tiled surface
+         * \param[in] refinement Parameters controlling the adaptive sub-patch resolution
+         * \param[in] color diffuse R-G-B color of tile
+         * \return Object ID of new adaptive tile object.
+         * \ingroup compoundobjects
+         */
+        uint addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const RGBcolor &color);
+
+        //! Add a patch that is subdivided into sub-patches whose size adapts with distance from a target point, with a texture map
+        /**
+         * \param[in] center 3D coordinates of tile center
+         * \param[in] size Size of the tile in the x- and y-directions
+         * \param[in] rotation Spherical rotation of tiled surface
+         * \param[in] refinement Parameters controlling the adaptive sub-patch resolution
+         * \param[in] texturefile Name of image file for texture map
+         * \return Object ID of new adaptive tile object.
+         * \ingroup compoundobjects
+         */
+        uint addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const char *texturefile);
+
+        //! Add a patch that is subdivided into sub-patches whose size adapts with distance from a target point, with a tiled texture map
+        /**
+         * \param[in] center 3D coordinates of tile center
+         * \param[in] size Size of the tile in the x- and y-directions
+         * \param[in] rotation Spherical rotation of tiled surface
+         * \param[in] refinement Parameters controlling the adaptive sub-patch resolution
+         * \param[in] texturefile Name of image file for texture map
+         * \param[in] texture_repeat Number of times to repeat the texture image in the x- and y-directions
+         * \return Object ID of new adaptive tile object.
+         * \note The repeat count is applied exactly. The base grid of coarsest cells is snapped to a multiple of the repeat count so that no sub-patch can straddle a boundary between texture repeats, which perturbs the
+         * achieved sub-patch sizes slightly. This differs from \ref addTileObject, which instead reduces the repeat count.
+         * \ingroup compoundobjects
+         */
+        uint addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const char *texturefile, const int2 &texture_repeat);
 
         //! Add a spherical compound object to the Context
         /**

@@ -1830,11 +1830,12 @@ static ParameterOptimization::Result evaluatePopulation(const std::vector<Parame
 static ParameterOptimization::Result runBayesianOptimization(std::function<float(const ParametersToOptimize &)> simulation, const ParametersToOptimize &parameters, const BayesianOptimization &bo, bool print_progress,
                                                              const std::string &write_progress_to_file, std::ofstream &outProgress, bool message_flag) {
 
+    validateParameters(parameters);
+    validateContinuousParameters(parameters);
+
     std::mt19937 rng = makeRNG(bo.random_seed);
     helios::Timer timer;
     timer.tic();
-
-    validateParameters(parameters);
 
     // Get parameter names in consistent order
     std::vector<std::string> param_names;
@@ -2455,11 +2456,12 @@ static ParameterOptimization::Result runGeneticAlgorithm(std::function<float(con
 static ParameterOptimization::Result runCMAES(std::function<float(const ParametersToOptimize &)> simulation, const ParametersToOptimize &parameters, const CMAES &cmaes, bool print_progress, const std::string &write_progress_to_file,
                                               const std::string &write_result_to_file, std::ofstream &outProgress, bool message_flag) {
 
+    validateParameters(parameters);
+    validateContinuousParameters(parameters);
+
     std::mt19937 rng = makeRNG(cmaes.random_seed);
     helios::Timer timer;
     timer.tic();
-
-    validateParameters(parameters);
 
     // Get parameter names in consistent order
     std::vector<std::string> param_names;

@@ -26,6 +26,7 @@ void Visualizer::clearContextGeometry() {
     depth_buffer_data.clear();
     colorbar_min = 0;
     colorbar_max = 0;
+    colorbar_range_set = false;
 }
 
 void Visualizer::buildContextGeometry(helios::Context *context_ptr) {
@@ -170,7 +171,7 @@ void Visualizer::buildContextGeometry_private() {
     //  \todo Figure out how to avoid doing this when not necessary
 
     colormap_current.setRange(colorbar_min, colorbar_max);
-    if ((!colorPrimitivesByData.empty() || !colorPrimitivesByObjectData.empty()) && colorbar_min == 0 && colorbar_max == 0) { // range was not set by user, use full range of values
+    if ((!colorPrimitivesByData.empty() || !colorPrimitivesByObjectData.empty()) && !colorbar_range_set) { // range was not set by user, use full range of values
 
         colorbar_min = (std::numeric_limits<float>::max)();
         colorbar_max = (std::numeric_limits<float>::lowest)();
@@ -178,6 +179,7 @@ void Visualizer::buildContextGeometry_private() {
         // Initialize integer data flag (will be set on first data encounter)
         colorbar_integer_data = false;
         bool data_type_detected = false;
+        bool data_value_found = false;
 
         for (uint UUID: contextUUIDs_build) {
             float colorValue = -9999;
@@ -253,19 +255,26 @@ void Visualizer::buildContextGeometry_private() {
             }
 
             if (colorValue != -9999) {
+                data_value_found = true;
                 if (colorValue < colorbar_min) {
                     colorbar_min = colorValue;
-                    ;
                 }
                 if (colorValue > colorbar_max) {
                     colorbar_max = colorValue;
-                    ;
                 }
             }
         }
 
-        if (!std::isinf(colorbar_min) && !std::isinf(colorbar_max)) {
+        // Test that a value was actually found rather than testing the accumulators for infinity:
+        // they are seeded with FLT_MAX/lowest(), which are finite, so an empty scan passed the old
+        // isinf() check and handed the colormap an inverted range.
+        if (data_value_found) {
             colormap_current.setRange(colorbar_min, colorbar_max);
+        } else {
+            // Nothing contributed a value, so leave the range as it was rather than publishing the
+            // sentinels.
+            colorbar_min = 0.f;
+            colorbar_max = 0.f;
         }
     }
 
@@ -485,12 +494,13 @@ void Visualizer::updateContextPrimitiveColors() {
 
     colormap_current.setRange(colorbar_min, colorbar_max);
 
-    if ((!colorPrimitivesByData.empty() || !colorPrimitivesByObjectData.empty()) && colorbar_min == 0 && colorbar_max == 0) {
+    if ((!colorPrimitivesByData.empty() || !colorPrimitivesByObjectData.empty()) && !colorbar_range_set) {
         colorbar_min = (std::numeric_limits<float>::max)();
         colorbar_max = (std::numeric_limits<float>::lowest)();
 
         // Initialize integer data flag (will be set on first data encounter)
         colorbar_integer_data = false;
+        bool data_value_found = false;
         bool data_type_detected = false;
 
         for (auto UUID: geometry_UUIDs) {
@@ -571,6 +581,7 @@ void Visualizer::updateContextPrimitiveColors() {
             }
 
             if (colorValue != -9999.f) {
+                data_value_found = true;
                 if (colorValue < colorbar_min) {
                     colorbar_min = colorValue;
                 }
@@ -580,8 +591,13 @@ void Visualizer::updateContextPrimitiveColors() {
             }
         }
 
-        if (!std::isinf(colorbar_min) && !std::isinf(colorbar_max)) {
+        // See the matching comment in buildContextGeometry(): the accumulators are seeded with
+        // finite sentinels, so isinf() never detected an empty scan.
+        if (data_value_found) {
             colormap_current.setRange(colorbar_min, colorbar_max);
+        } else {
+            colorbar_min = 0.f;
+            colorbar_max = 0.f;
         }
     }
 
@@ -810,6 +826,7 @@ void Visualizer::clearColor() {
     disableColorbar();
     colorbar_min = 0;
     colorbar_max = 0;
+    colorbar_range_set = false;
     colorbar_flag = 0;
     primitiveColorsNeedUpdate = true;
 }

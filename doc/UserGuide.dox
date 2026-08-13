@@ -1189,9 +1189,22 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
 	 <li> \ref helios::Context::addTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::int2 &subdiv ) "addTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const int2 &subdiv )" </li>
 	 <li> \ref helios::Context::addTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::int2 &subdiv, const helios::RGBcolor &color ) "addTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const int2 &subdiv, const RGBcolor &color )" </li>
 	 <li> \ref helios::Context::addTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::int2 &subdiv, const char* texturefile ) "addTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const int2 &subdiv, const char* texturefile )" </li>
+	 <li> \ref helios::Context::addTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::int2 &subdiv, const char* texturefile, const helios::int2 &texture_repeat ) "addTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const int2 &subdiv, const char* texturefile, const int2 &texture_repeat )" </li>
        </ul>
      </td>
      <td>\image html images/Tile.png</td>
+   </tr>
+   <tr>
+     <td>Adaptive Tile</td>
+     <td>Patch subdivided by a quadtree into sub-patches that are fine near a target point and progressively coarser away from it. See \ref AdaptiveTileObjects.</td>
+     <td> <ul>
+	 <li> \ref helios::Context::addAdaptiveTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::AdaptiveTileRefinement &refinement ) "addAdaptiveTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement )" </li>
+	 <li> \ref helios::Context::addAdaptiveTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::AdaptiveTileRefinement &refinement, const helios::RGBcolor &color ) "addAdaptiveTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const RGBcolor &color )" </li>
+	 <li> \ref helios::Context::addAdaptiveTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::AdaptiveTileRefinement &refinement, const char* texturefile ) "addAdaptiveTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const char* texturefile )" </li>
+	 <li> \ref helios::Context::addAdaptiveTileObject( const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const helios::AdaptiveTileRefinement &refinement, const char* texturefile, const helios::int2 &texture_repeat ) "addAdaptiveTileObject( const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const char* texturefile, const int2 &texture_repeat )" </li>
+       </ul>
+     </td>
+     <td></td>
    </tr>
    <tr>
      <td>Sphere</td>
@@ -1297,7 +1310,23 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
 	<li>\ref helios::Tile::getVertices() "getVertices()"</li>
 	<li>\ref helios::Tile::getNormal() "getNormal()"</li>
 	<li>\ref helios::Tile::getTextureUV() "getTextureUV()"</li>
+	<li>\ref helios::Tile::getTextureRepeat() "getTextureRepeat()"</li>
+	<li>\ref helios::Tile::getEffectiveTextureRepeat() "getEffectiveTextureRepeat()"</li>
 	<li>\ref helios::Tile::scale() "scale()"</li>
+       </ul>
+ </td></tr>
+ <tr><td>Adaptive Tile</td><td>Queried through the Context using the getAdaptiveTileObject*() functions rather than through an object pointer.</td><td>
+     <ul>
+	<li>\ref helios::Context::getAdaptiveTileObjectSize() "getAdaptiveTileObjectSize()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectCenter() "getAdaptiveTileObjectCenter()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectVertices() "getAdaptiveTileObjectVertices()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectNormal() "getAdaptiveTileObjectNormal()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectRefinement() "getAdaptiveTileObjectRefinement()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectBaseSubdivisionCount() "getAdaptiveTileObjectBaseSubdivisionCount()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectMaxRefinementLevel() "getAdaptiveTileObjectMaxRefinementLevel()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectSubpatchSizeRange() "getAdaptiveTileObjectSubpatchSizeRange()"</li>
+	<li>\ref helios::Context::getAdaptiveTileObjectTextureRepeat() "getAdaptiveTileObjectTextureRepeat()"</li>
+	<li>\ref helios::Context::predictAdaptiveTileObjectSubpatchCount() "predictAdaptiveTileObjectSubpatchCount()"</li>
        </ul>
  </td></tr>
  <tr><td>Sphere</td><td>\ref helios::Context::getSphereObjectPointer() "getSphereObjectPointer()"</td><td>
@@ -1347,6 +1376,63 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
  </td>
  </tr>
  </table>
+
+ \subsection AdaptiveTileObjects Adaptive Tile Objects
+
+ A ground plane is normally built as a tile object, which subdivides it into a uniform grid. That forces an awkward tradeoff whenever the scene contains an object of interest sitting on a large domain: resolving the shadows it casts requires centimeter-scale sub-patches, while the rest of the domain only needs to occlude the horizon. Running the fine resolution all the way out wastes millions of sub-patches, and nesting several tiles of differing resolution by hand is tedious and leaves seams to manage.
+
+ An adaptive tile object solves this in a single object. Sub-patches are generated by recursive quadtree subdivision, so they are finest at a user-specified target point and grow progressively coarser with distance from it. Because sub-patches are flat, coplanar, independent rectangles rather than a welded mesh, the differing resolutions meet without cracks or overlaps: the sub-patches exactly partition the tile.
+
+ ~~~~~~{.cpp}
+  #include "Context.h"
+  using namespace helios;
+
+  int main(){
+    Context context;
+
+    AdaptiveTileRefinement refinement;
+    refinement.target = make_vec2( 0.f, 0.f );      // tile-local, relative to the tile center
+    refinement.subpatch_size_min = 0.02f;           // 2 cm beneath the plant
+    refinement.subpatch_size_max = 2.f;             // 2 m out at the domain edge
+    refinement.transition_exponent = 0.35f;
+
+    uint ground = context.addAdaptiveTileObject( make_vec3(0,0,0), make_vec2(50,50), nullrotation, refinement, "plugins/canopygenerator/textures/dirt.jpg" );
+  }
+ ~~~~~~
+
+ \subsubsection AdaptiveTileRefinementLaw Controlling the refinement
+
+ Refinement is controlled entirely by \ref helios::AdaptiveTileRefinement. The requested size range determines a grid of coarsest-level cells spanning the tile and the number of times such a cell may be subdivided; both are chosen so that the relative error is balanced between the two ends of the range rather than making one end exact and the other arbitrarily wrong. The achieved sizes are therefore close to, but not exactly equal to, those requested \htmlonly&mdash;\endhtmlonly typically within about 20% at each end. Query what was actually achieved with \ref helios::Context::getAdaptiveTileObjectSubpatchSizeRange "getAdaptiveTileObjectSubpatchSizeRange".
+
+ A cell is subdivided while its refinement level is below the level desired at its own distance from the target, where the desired level falls from the maximum at the target to zero at the point of the tile farthest from it. Distance is measured to the closest point of the cell, so the fine region is a disc centered on the target rather than a cross running along the row and column through it.
+
+ The transition exponent controls the shape of that falloff, and it is by far the most consequential parameter for the resulting sub-patch count:
+
+ <table>
+ <tr><th>transition_exponent</th><th>Effect</th><th>Sub-patches on a 50 m tile refined from 2 m to 2 cm</th></tr>
+ <tr><td>0.25</td><td>Fine resolution concentrated tightly around the target</td><td>roughly 9 thousand</td></tr>
+ <tr><td>0.35 (default)</td><td>Suits a typical ground plane</td><td>roughly 21 thousand</td></tr>
+ <tr><td>0.5</td><td>Fine resolution held further out from the target</td><td>roughly 61 thousand</td></tr>
+ <tr><td>1</td><td>Refinement level falls linearly with radius</td><td>roughly 471 thousand</td></tr>
+ <tr><td>2</td><td>Fine resolution spread broadly across the tile</td><td>roughly 2 million</td></tr>
+ </table>
+
+ For reference, a uniform tile at the same 2 cm resolution across the whole 50 m domain would need 6.25 million sub-patches.
+
+ The default of 0.35 is a reasonable starting point for a ground plane, and values much above 1 are rarely worth their cost. Since the count varies by more than two orders of magnitude across this range, \ref helios::Context::predictAdaptiveTileObjectSubpatchCount "predictAdaptiveTileObjectSubpatchCount" can be used to check the cost of a set of parameters before building any geometry. A refinement that would generate an unreasonable number of sub-patches is rejected with an error rather than exhausting memory.
+
+ \subsubsection AdaptiveTileTextures Texture tiling on adaptive tiles
+
+ A texture image can be repeated across an adaptive tile at a rate that is independent of the sub-patch resolution, exactly as for a uniform tile. The two differ in how a repeat count that does not fit the underlying grid is handled. A uniform tile reduces the repeat count until it divides the subdivision count, which is reasonable there because the user chose the subdivision count. An adaptive tile instead snaps its grid of coarsest-level cells to a whole number of repeats, honoring the requested count exactly, because that grid is derived internally and the user has no direct control over it. The cost is that the achieved sub-patch sizes shift slightly when the repeat count is large relative to the number of coarsest-level cells.
+
+ \subsubsection AdaptiveTileNotes Differences from uniform tile objects
+
+ <ul>
+   <li>Sub-patches are ordered by quadtree traversal rather than row-major, so they cannot be indexed by grid position.</li>
+   <li>There is no subdivision count, area ratio, or subdivision-changing function. \ref helios::Context::getTileObjectAreaRatio "getTileObjectAreaRatio" and \ref helios::Context::setTileObjectSubdivisionCount "setTileObjectSubdivisionCount" ignore adaptive tiles with a warning, so sweeping them over every object in a scene will not overwrite an adaptive layout with a uniform grid.</li>
+   <li>Adaptive tiles are written to XML as an \htmlonly<code>&lt;adaptive_tile&gt;</code>\endhtmlonly block. Their sub-patch geometry is read back from the file rather than regenerated from the refinement parameters, so a file whose sub-patches are missing is rejected rather than silently rebuilt.</li>
+   <li>Plug-ins that derive a characteristic length from the parent object, such as the boundary-layer conductance model, use the dimension of the whole tile and not that of an individual sub-patch. This is the same behavior as for a uniform tile object, but it means the adaptive resolution is not visible to those models.</li>
+ </ul>
 
  <!-- **************** DATA STRUCTURES ***************** -->
  \section Data Data Structures

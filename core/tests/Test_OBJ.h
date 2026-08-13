@@ -3,11 +3,13 @@
 // Suite: OBJ File I/O Tests
 //
 // Tests for OBJ file loading and writing functionality in Context class.
-// Includes basic functionality, performance benchmarking, error handling, and
-// correctness validation tests.
+// Includes basic functionality, error handling, and correctness validation tests.
+//
+// Deliberately excludes performance benchmarks. A wall-clock threshold asserts the speed of
+// whatever machine runs the suite, not the correctness of the code, so it fails on a loaded or
+// slow host while catching no real defect. Benchmarking belongs in benchmarks/, not here.
 // =================================================================================
 
-#include <chrono>
 #include <fstream>
 
 TEST_CASE("OBJ File Loading - Basic Functionality") {
@@ -65,10 +67,7 @@ TEST_CASE("OBJ File Loading - Basic Functionality") {
         Context ctx;
         std::vector<uint> UUIDs;
 
-        // Record loading time for performance awareness
-        auto start = std::chrono::high_resolution_clock::now();
         DOCTEST_CHECK_NOTHROW(UUIDs = ctx.loadOBJ("lib/models/test_complex_large.obj", true));
-        auto end = std::chrono::high_resolution_clock::now();
 
         // Should load successfully
         DOCTEST_CHECK(UUIDs.size() > 5000); // Should have many triangles from grid + icosphere
@@ -660,84 +659,6 @@ TEST_CASE("OBJ File Loading - Error Handling and Edge Cases") {
     }
 }
 
-TEST_CASE("OBJ File I/O - Performance Benchmarking") {
-    SUBCASE("Loading performance baseline") {
-        Context ctx;
-        std::vector<uint> UUIDs;
-
-        // Benchmark loading the large complex file
-        auto start = std::chrono::high_resolution_clock::now();
-        DOCTEST_CHECK_NOTHROW(UUIDs = ctx.loadOBJ("lib/models/test_complex_large.obj", true));
-        auto end = std::chrono::high_resolution_clock::now();
-
-        auto load_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-        DOCTEST_CHECK(UUIDs.size() > 0);
-
-        // Store baseline metrics (for future optimization comparison)
-        float triangles_per_second = UUIDs.size() * 1000000.0f / load_duration.count();
-        float load_time_ms = load_duration.count() / 1000.0f;
-
-        // Basic sanity check - should process at least 1000 triangles/second
-        // (This is a very conservative baseline)
-        DOCTEST_CHECK(triangles_per_second > 1000.0f);
-    }
-
-    SUBCASE("Loading performance with transformations") {
-        Context ctx;
-        std::vector<uint> UUIDs;
-
-        // Test performance with transformations (more CPU intensive)
-        vec3 origin = make_vec3(10.0f, 5.0f, 0.0f);
-        float height = 2.0f;
-        SphericalCoord rotation = make_SphericalCoord(M_PI / 6, M_PI / 4);
-        RGBcolor color = RGB::green;
-
-        auto start = std::chrono::high_resolution_clock::now();
-        DOCTEST_CHECK_NOTHROW(UUIDs = ctx.loadOBJ("lib/models/test_complex_large.obj", origin, height, rotation, color, "ZUP", true));
-        auto end = std::chrono::high_resolution_clock::now();
-
-        auto load_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-        DOCTEST_CHECK(UUIDs.size() > 0);
-
-        float triangles_per_second = UUIDs.size() * 1000000.0f / load_duration.count();
-        float load_time_ms = load_duration.count() / 1000.0f;
-
-        // Transformed loading should still maintain reasonable performance
-        DOCTEST_CHECK(triangles_per_second > 800.0f);
-    }
-
-    SUBCASE("Writing performance baseline") {
-        Context ctx;
-
-        // Create a substantial amount of geometry
-        std::vector<uint> uuids;
-        for (int i = 0; i < 1000; i++) {
-            float x = static_cast<float>(i % 10);
-            float z = static_cast<float>(i / 10);
-            uint tri = ctx.addTriangle(make_vec3(x, 0, z), make_vec3(x + 1, 0, z), make_vec3(x + 0.5f, 1, z));
-            uuids.push_back(tri);
-        }
-
-        // Benchmark writing
-        std::string output_file = "lib/models/test_perf_output.obj";
-        auto start = std::chrono::high_resolution_clock::now();
-        DOCTEST_CHECK_NOTHROW(ctx.writeOBJ(output_file.c_str(), uuids, false, true));
-        auto end = std::chrono::high_resolution_clock::now();
-
-        auto write_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-        // Basic sanity check - should write at least 500 triangles/second
-        float triangles_per_second = uuids.size() * 1000000.0f / write_duration.count();
-        DOCTEST_CHECK(triangles_per_second > 500.0f);
-
-        // Clean up
-        std::remove(output_file.c_str());
-        std::remove("lib/models/test_perf_output.mtl");
-    }
-}
-
 TEST_CASE("OBJ File I/O - Correctness Validation") {
     SUBCASE("Round-trip geometry preservation") {
         Context ctx1, ctx2, ctx3;
@@ -1015,82 +936,7 @@ TEST_CASE("OBJ WriteOBJ - Comprehensive Test Suite for Optimization") {
     }
 }
 
-TEST_CASE("OBJ WriteOBJ - Performance Benchmarking Suite") {
-
-    // Performance benchmark helper
-    auto benchmarkWriteOBJ = [](Context &ctx, const std::vector<uint> &uuids, const std::string &test_name) {
-        std::string output_file = "bench_" + test_name + ".obj";
-
-        auto start = std::chrono::high_resolution_clock::now();
-        ctx.writeOBJ(output_file.c_str(), uuids, false, true);
-        auto end = std::chrono::high_resolution_clock::now();
-
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-        float write_time_ms = duration.count() / 1000.0f;
-        float primitives_per_second = uuids.size() * 1000000.0f / duration.count();
-
-        // Clean up
-        std::remove(output_file.c_str());
-        std::string mtl_file = "bench_" + test_name + ".mtl";
-        std::remove(mtl_file.c_str());
-
-        return std::make_pair(write_time_ms, primitives_per_second);
-    };
-
-    SUBCASE("Baseline performance - 1000 triangles") {
-        Context ctx;
-        std::vector<uint> uuids;
-
-        for (int i = 0; i < 1000; i++) {
-            float x = static_cast<float>(i % 10);
-            float z = static_cast<float>(i / 10);
-            uint tri = ctx.addTriangle(make_vec3(x, 0, z), make_vec3(x + 1, 0, z), make_vec3(x + 0.5f, 1, z));
-            uuids.push_back(tri);
-        }
-
-        auto [time_ms, prims_per_sec] = benchmarkWriteOBJ(ctx, uuids, "baseline_1k");
-
-        // Should achieve reasonable performance (conservative baseline)
-        DOCTEST_CHECK(prims_per_sec > 100.0f);
-    }
-
-    SUBCASE("Multi-material performance - 2000 primitives") {
-        Context ctx;
-        std::vector<uint> uuids;
-
-        for (int i = 0; i < 2000; i++) {
-            float x = static_cast<float>(i % 20);
-            float z = static_cast<float>(i / 20);
-
-            // Create 10 different materials
-            RGBcolor color = make_RGBcolor((i % 10) / 10.0f, 0.5f, 0.7f);
-            uint tri = ctx.addTriangle(make_vec3(x, 0, z), make_vec3(x + 1, 0, z), make_vec3(x + 0.5f, 1, z), color);
-            uuids.push_back(tri);
-        }
-
-        auto [time_ms, prims_per_sec] = benchmarkWriteOBJ(ctx, uuids, "multi_material_2k");
-
-        // Should handle multiple materials efficiently
-        DOCTEST_CHECK(prims_per_sec > 50.0f);
-    }
-
-    SUBCASE("Large dataset performance - 5000 primitives") {
-        Context ctx;
-        std::vector<uint> uuids;
-
-        for (int i = 0; i < 5000; i++) {
-            float x = static_cast<float>(i % 50);
-            float z = static_cast<float>(i / 50);
-            uint tri = ctx.addTriangle(make_vec3(x, 0, z), make_vec3(x + 1, 0, z), make_vec3(x + 0.5f, 1, z));
-            uuids.push_back(tri);
-        }
-
-        auto [time_ms, prims_per_sec] = benchmarkWriteOBJ(ctx, uuids, "large_5k");
-
-        // Performance should remain reasonable for larger datasets
-        DOCTEST_CHECK(prims_per_sec > 25.0f);
-    }
-
+TEST_CASE("OBJ WriteOBJ - Output Size Validation") {
     SUBCASE("Memory usage monitoring") {
         Context ctx;
         std::vector<uint> uuids;
@@ -1138,14 +984,10 @@ TEST_CASE("OBJ WriteOBJ - Stress Testing and Edge Cases") {
 
         std::string output_file = "stress_large.obj";
 
-        auto start = std::chrono::high_resolution_clock::now();
+        // Writing a large dataset must succeed. Elapsed time is deliberately not asserted on: a
+        // wall-clock threshold reports the speed of the machine running the suite rather than the
+        // correctness of the code, and fails on a loaded or slow host for no useful reason.
         DOCTEST_CHECK_NOTHROW(ctx.writeOBJ(output_file.c_str(), uuids, false, true));
-        auto end = std::chrono::high_resolution_clock::now();
-
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-
-        // Should complete within reasonable time (10 seconds max)
-        DOCTEST_CHECK(duration.count() < 10000);
 
         // Clean up
         std::remove(output_file.c_str());

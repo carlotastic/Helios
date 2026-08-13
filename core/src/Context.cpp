@@ -1199,8 +1199,17 @@ uint Context::copyObject(uint ObjID) {
         Tile *o = getTileObjectPointer_private(ObjID);
 
         const int2 &subdiv = o->getSubdivisionCount();
+        const int2 &texture_repeat = o->getTextureRepeat();
 
-        auto *tile_new = (new Tile(currentObjectID, UUIDs_copy, subdiv, texturefile.c_str(), this));
+        auto *tile_new = (new Tile(currentObjectID, UUIDs_copy, subdiv, texturefile.c_str(), texture_repeat, this));
+
+        objects[currentObjectID] = tile_new;
+    } else if (type == OBJECT_TYPE_ADAPTIVE_TILE) {
+        AdaptiveTile *o = getAdaptiveTileObjectPointer_private(ObjID);
+
+        // The sub-patch geometry has already been duplicated by copyPrimitive() above, so the adaptive layout is reproduced exactly and only the object's own parameters need to be carried across.
+        auto *tile_new = (new AdaptiveTile(currentObjectID, UUIDs_copy, o->getRefinement(), o->getBaseSubdivisionCount(), o->getMaxRefinementLevel(), o->getSubpatchSizeRange(), texturefile.c_str(),
+                                           o->getTextureRepeat(), this));
 
         objects[currentObjectID] = tile_new;
     } else if (type == OBJECT_TYPE_SPHERE) {
@@ -1602,17 +1611,22 @@ void Context::regenerateTileObjectSubpatches(uint ObjID, const int2 &new_subdiv)
     Patch *first_patch = getPatchPointer_private(UUIDs_old.front());
     const bool textured = first_patch->hasTexture();
 
-    // Build a canonical unit-tile template with the requested subdivision count.
+    // Build a canonical unit-tile template with the requested subdivision count. The tile's texture repeat
+    // count must be carried through, otherwise the template is built with the default repeat of 1x1 and a
+    // single copy of the texture ends up stretched across the whole tile. The requested (uncorrected)
+    // repeat is passed so that addTileObject() re-derives the correction against the new subdivision count.
     uint template_ObjID;
     if (textured) {
-        template_ObjID = addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, new_subdiv, tile->getTextureFile().c_str());
+        template_ObjID = addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, new_subdiv, tile->getTextureFile().c_str(), tile->getTextureRepeat());
     } else {
         RGBcolor color = getPrimitiveColor(UUIDs_old.front());
         template_ObjID = addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, new_subdiv, color);
     }
 
-    // The addTileObject() call may down-correct the subdivision count (e.g. for low-resolution textures),
-    // so read it back from the template rather than assuming new_subdiv.
+    // addTileObject() constructs the tile with the subdivision count it is given, but read it back from the
+    // template rather than assuming new_subdiv so that this stays correct if that ever changes. Note that it
+    // is the texture *repeat* passed above that may legitimately be down-corrected, to a divisor of the new
+    // subdivision count (see Context::addTileObject).
     const std::vector<uint> template_UUIDs = getTileObjectPointer_private(template_ObjID)->getPrimitiveUUIDs();
     const int2 corrected_subdiv = getTileObjectPointer_private(template_ObjID)->getSubdivisionCount();
     std::vector<uint> UUIDs_new = copyPrimitive(template_UUIDs); // index-aligned with template_UUIDs
@@ -3973,6 +3987,8 @@ void Context::printObjectInfo(uint ObjID) const {
         ostype = "OBJECT_TYPE_POLYMESH";
     } else if (otype == 6) {
         ostype = "OBJECT_TYPE_CONE";
+    } else if (otype == 7) {
+        ostype = "OBJECT_TYPE_ADAPTIVE_TILE";
     }
 
     std::cout << "Type: " << ostype << std::endl;
@@ -4034,6 +4050,26 @@ void Context::printObjectInfo(uint ObjID) const {
 
         std::cout << "Tile Vertices: " << std::endl;
         std::vector<vec3> primitive_vertices = getTileObjectVertices(ObjID);
+        for (uint i = 0; i < primitive_vertices.size(); i++) {
+            std::cout << "   " << primitive_vertices.at(i) << std::endl;
+        }
+    } else if (otype == OBJECT_TYPE_ADAPTIVE_TILE) {
+        const AdaptiveTileRefinement refinement = getAdaptiveTileObjectRefinement(ObjID);
+        const vec2 size_range = getAdaptiveTileObjectSubpatchSizeRange(ObjID);
+
+        std::cout << "Adaptive Tile Center: " << getAdaptiveTileObjectCenter(ObjID) << std::endl;
+        std::cout << "Adaptive Tile Size: " << getAdaptiveTileObjectSize(ObjID) << std::endl;
+        std::cout << "Adaptive Tile Refinement Target: " << refinement.target << std::endl;
+        std::cout << "Adaptive Tile Requested Sub-patch Size Range: " << refinement.subpatch_size_min << " to " << refinement.subpatch_size_max << std::endl;
+        std::cout << "Adaptive Tile Achieved Sub-patch Size Range: " << size_range.x << " to " << size_range.y << std::endl;
+        std::cout << "Adaptive Tile Transition Exponent: " << refinement.transition_exponent << std::endl;
+        std::cout << "Adaptive Tile Base Subdivision Count: " << getAdaptiveTileObjectBaseSubdivisionCount(ObjID) << std::endl;
+        std::cout << "Adaptive Tile Maximum Refinement Level: " << getAdaptiveTileObjectMaxRefinementLevel(ObjID) << std::endl;
+        std::cout << "Adaptive Tile Texture Repeat: " << getAdaptiveTileObjectTextureRepeat(ObjID) << std::endl;
+        std::cout << "Adaptive Tile Normal: " << getAdaptiveTileObjectNormal(ObjID) << std::endl;
+
+        std::cout << "Adaptive Tile Vertices: " << std::endl;
+        std::vector<vec3> primitive_vertices = getAdaptiveTileObjectVertices(ObjID);
         for (uint i = 0; i < primitive_vertices.size(); i++) {
             std::cout << "   " << primitive_vertices.at(i) << std::endl;
         }
@@ -4587,6 +4623,17 @@ Tile *Context::getTileObjectPointer_private(uint ObjID) const {
     return dynamic_cast<Tile *>(objects.at(ObjID));
 }
 
+AdaptiveTile *Context::getAdaptiveTileObjectPointer_private(uint ObjID) const {
+    // Checked unconditionally rather than only under HELIOS_DEBUG, as the tile accessor above does. Without the check a Release build dereferences the null result of a failed dynamic_cast instead of reporting the
+    // mismatch, and confusing an adaptive tile with a uniform one is an easy mistake to make.
+    if (objects.find(ObjID) == objects.end()) {
+        helios_runtime_error("ERROR (Context::getAdaptiveTileObjectPointer): ObjectID of " + std::to_string(ObjID) + " does not exist in the Context.");
+    } else if (objects.at(ObjID)->getObjectType() != OBJECT_TYPE_ADAPTIVE_TILE) {
+        helios_runtime_error("ERROR (Context::getAdaptiveTileObjectPointer): ObjectID of " + std::to_string(ObjID) + " is not an Adaptive Tile Object.");
+    }
+    return dynamic_cast<AdaptiveTile *>(objects.at(ObjID));
+}
+
 Sphere *Context::getSphereObjectPointer_private(uint ObjID) const {
 #ifdef HELIOS_DEBUG
     if (objects.find(ObjID) == objects.end()) {
@@ -4665,6 +4712,14 @@ helios::int2 Context::getTileObjectSubdivisionCount(uint ObjID) const {
     return getTileObjectPointer_private(ObjID)->getSubdivisionCount();
 }
 
+helios::int2 Context::getTileObjectTextureRepeat(uint ObjID) const {
+    return getTileObjectPointer_private(ObjID)->getTextureRepeat();
+}
+
+helios::int2 Context::getTileObjectEffectiveTextureRepeat(uint ObjID) const {
+    return getTileObjectPointer_private(ObjID)->getEffectiveTextureRepeat();
+}
+
 helios::vec3 Context::getTileObjectNormal(uint ObjID) const {
     return getTileObjectPointer_private(ObjID)->getNormal();
 }
@@ -4675,6 +4730,42 @@ std::vector<helios::vec2> Context::getTileObjectTextureUV(uint ObjID) const {
 
 std::vector<helios::vec3> Context::getTileObjectVertices(uint ObjID) const {
     return getTileObjectPointer_private(ObjID)->getVertices();
+}
+
+helios::vec3 Context::getAdaptiveTileObjectCenter(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getCenter();
+}
+
+helios::vec2 Context::getAdaptiveTileObjectSize(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getSize();
+}
+
+helios::vec3 Context::getAdaptiveTileObjectNormal(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getNormal();
+}
+
+std::vector<helios::vec3> Context::getAdaptiveTileObjectVertices(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getVertices();
+}
+
+AdaptiveTileRefinement Context::getAdaptiveTileObjectRefinement(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getRefinement();
+}
+
+helios::int2 Context::getAdaptiveTileObjectBaseSubdivisionCount(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getBaseSubdivisionCount();
+}
+
+uint Context::getAdaptiveTileObjectMaxRefinementLevel(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getMaxRefinementLevel();
+}
+
+helios::vec2 Context::getAdaptiveTileObjectSubpatchSizeRange(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getSubpatchSizeRange();
+}
+
+helios::int2 Context::getAdaptiveTileObjectTextureRepeat(uint ObjID) const {
+    return getAdaptiveTileObjectPointer_private(ObjID)->getTextureRepeat();
 }
 
 helios::vec3 Context::getSphereObjectCenter(uint ObjID) const {

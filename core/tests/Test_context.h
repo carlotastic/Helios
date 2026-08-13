@@ -1685,6 +1685,116 @@ TEST_CASE("Tile Object Advanced Features") {
         DOCTEST_CHECK(center_after.z == doctest::Approx(center_before.z).epsilon(errtol));
     }
 
+    SUBCASE("subdivision update preserves texture repeat") {
+        // Regression test: a tile's texture repeat count was not retained anywhere on the Tile object, so
+        // regenerating its sub-patches rebuilt them from a template created with the 5-argument
+        // addTileObject(), which delegates with a repeat of 1x1. The texture was silently stretched once
+        // across the whole tile. The repeat is observable only through the sub-patch (u,v) windows: every
+        // sub-patch spans exactly repeat/subdiv of the image, so repeat == u_span*subdiv.
+        //
+        // Note: do not assert on getObjectArea() here. The total opaque fraction of an alpha-masked texture
+        // is the same whether it is tiled 25x or once, so the tile area is identical before and after and
+        // such a check would pass on the buggy code.
+        Context ctx;
+        const char *texture = "lib/images/disk_texture.png"; // 800x800, far above the subdivision counts used here
+        uint tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(10, 10), nullrotation, make_int2(10, 10), texture, make_int2(5, 5));
+
+        // Confirm the tile really was built with a 5x5 repeat before exercising the operation under test.
+        // This assertion passes on the unfixed code by construction; it is here to prove the measurement.
+        DOCTEST_CHECK(ctx.getTileObjectTextureRepeat(tile) == make_int2(5, 5));
+        {
+            std::vector<vec2> uv = ctx.getPrimitiveTextureUV(ctx.getObjectPrimitiveUUIDs(tile).front());
+            DOCTEST_CHECK(uv.size() == 4);
+            DOCTEST_CHECK((uv.at(1).x - uv.at(0).x) == doctest::Approx(0.5f).epsilon(errtol)); // 5/10
+        }
+
+        ctx.setTileObjectSubdivisionCount({tile}, make_int2(20, 20));
+
+        DOCTEST_CHECK(ctx.getTileObjectSubdivisionCount(tile) == make_int2(20, 20));
+        DOCTEST_CHECK(ctx.getTileObjectTextureRepeat(tile) == make_int2(5, 5));
+        DOCTEST_CHECK(ctx.getTileObjectEffectiveTextureRepeat(tile) == make_int2(5, 5));
+
+        // 20 subdivisions / 5 repeats = 4 sub-patches per texture copy, so each spans 0.25 of the image and
+        // the pattern restarts every 4 sub-patches in each direction.
+        std::vector<uint> uuids = ctx.getObjectPrimitiveUUIDs(tile);
+        DOCTEST_CHECK(uuids.size() == 400);
+        const float uv_sub = 0.25f;
+        for (size_t k = 0; k < uuids.size(); k++) {
+            const int i_local = static_cast<int>(k % 20) % 4;
+            const int j_local = static_cast<int>(k / 20) % 4;
+            std::vector<vec2> uv = ctx.getPrimitiveTextureUV(uuids.at(k));
+            DOCTEST_CHECK(uv.size() == 4);
+            DOCTEST_CHECK(uv.at(0).x == doctest::Approx(float(i_local) * uv_sub).epsilon(errtol));
+            DOCTEST_CHECK(uv.at(0).y == doctest::Approx(float(j_local) * uv_sub).epsilon(errtol));
+            DOCTEST_CHECK(uv.at(2).x == doctest::Approx(float(i_local + 1) * uv_sub).epsilon(errtol));
+            DOCTEST_CHECK(uv.at(2).y == doctest::Approx(float(j_local + 1) * uv_sub).epsilon(errtol));
+            // the repeat expressed the way the bug report measures it
+            DOCTEST_CHECK(std::lround((uv.at(2).x - uv.at(0).x) * 20.f) == 5);
+        }
+    }
+
+    SUBCASE("copyObject preserves tile texture repeat") {
+        // copyObject() reconstructs the Tile directly rather than going through addTileObject(), so it has
+        // its own path for carrying the repeat across. Note that checking only the copy's (u,v) coordinates
+        // would pass on the unfixed code: copyPrimitive() duplicates the sub-patches verbatim, so the copy
+        // renders correctly even when the repeat it stores is wrong. The defect is observable only through
+        // the getter or through a subsequent subdivision change.
+        Context ctx;
+        const char *texture = "lib/images/disk_texture.png";
+        uint tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(10, 10), nullrotation, make_int2(10, 10), texture, make_int2(5, 5));
+        uint tile_copy = ctx.copyObject(tile);
+
+        DOCTEST_CHECK(ctx.getTileObjectTextureRepeat(tile_copy) == make_int2(5, 5));
+
+        ctx.setTileObjectSubdivisionCount({tile_copy}, make_int2(20, 20));
+
+        std::vector<vec2> uv_copy = ctx.getPrimitiveTextureUV(ctx.getObjectPrimitiveUUIDs(tile_copy).at(1));
+        DOCTEST_CHECK(uv_copy.size() == 4);
+        DOCTEST_CHECK(uv_copy.at(0).x == doctest::Approx(0.25f).epsilon(errtol));
+
+        // the original must be untouched
+        DOCTEST_CHECK(ctx.getTileObjectSubdivisionCount(tile) == make_int2(10, 10));
+        std::vector<vec2> uv_orig = ctx.getPrimitiveTextureUV(ctx.getObjectPrimitiveUUIDs(tile).front());
+        DOCTEST_CHECK((uv_orig.at(1).x - uv_orig.at(0).x) == doctest::Approx(0.5f).epsilon(errtol));
+    }
+
+    SUBCASE("texture repeat is re-derived from the request on each subdivision change") {
+        // The Tile stores the repeat that was requested, not the value it was auto-resized down to, so an
+        // intermediate subdivision count that the repeat does not evenly divide must not degrade it
+        // permanently. This is the test that fails if the fix is later "simplified" to store the corrected
+        // value, which would let the repeat ratchet toward 1 across successive calls.
+        Context ctx;
+        const char *texture = "lib/images/disk_texture.png";
+        uint tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(10, 10), nullrotation, make_int2(10, 10), texture, make_int2(5, 5));
+
+        ctx.setTileObjectSubdivisionCount({tile}, make_int2(7, 7)); // 7 is prime: the repeat resizes to 1
+        DOCTEST_CHECK(ctx.getTileObjectTextureRepeat(tile) == make_int2(5, 5));
+        DOCTEST_CHECK(ctx.getTileObjectEffectiveTextureRepeat(tile) == make_int2(1, 1));
+        {
+            std::vector<vec2> uv = ctx.getPrimitiveTextureUV(ctx.getObjectPrimitiveUUIDs(tile).front());
+            DOCTEST_CHECK(std::lround((uv.at(2).x - uv.at(0).x) * 7.f) == 1);
+        }
+
+        ctx.setTileObjectSubdivisionCount({tile}, make_int2(20, 20)); // the request recovers in full
+        DOCTEST_CHECK(ctx.getTileObjectEffectiveTextureRepeat(tile) == make_int2(5, 5));
+        {
+            std::vector<vec2> uv = ctx.getPrimitiveTextureUV(ctx.getObjectPrimitiveUUIDs(tile).front());
+            DOCTEST_CHECK(std::lround((uv.at(2).x - uv.at(0).x) * 20.f) == 5);
+        }
+    }
+
+    SUBCASE("subdivision update of a low-resolution tiled texture") {
+        // The texture resolution guard in addTileObject() is subdiv >= repeat*resolution. Rebuilding the
+        // template with a repeat of 1x1 dropped the threshold from 2*5 to 1*5, so this threw even though a
+        // repeat of 2 makes the requested subdivision count perfectly representable. Restoring the repeat
+        // can only raise that threshold, never lower it.
+        Context ctx;
+        uint tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(2, 2), nullrotation, make_int2(4, 4), "lib/images/solid.jpg", make_int2(2, 2)); // 5x5 image
+        DOCTEST_CHECK_NOTHROW(ctx.setTileObjectSubdivisionCount({tile}, make_int2(8, 8)));
+        DOCTEST_CHECK(ctx.getTileObjectSubdivisionCount(tile) == make_int2(8, 8));
+        DOCTEST_CHECK(ctx.getTileObjectEffectiveTextureRepeat(tile) == make_int2(2, 2));
+    }
+
     SUBCASE("subdivision update of multiple tiles and object data survival") {
         // Updating several tiles in one call must regenerate each independently and leave the tile objects
         // (and their object-level data) intact. The new sub-patches must be correctly re-parented.
@@ -1834,6 +1944,547 @@ TEST_CASE("Tile Object Advanced Features") {
             DOCTEST_CHECK(v.x == doctest::Approx(1.f).epsilon(errtol));
             DOCTEST_CHECK(v.z == doctest::Approx(3.f).epsilon(errtol));
         }
+    }
+}
+
+//! Collect the axis-aligned tile-local bounds of every sub-patch of an unrotated adaptive tile centered on the origin
+static std::vector<std::vector<float>> getAdaptiveTileSubpatchRects(const Context &ctx, uint ObjID) {
+    std::vector<std::vector<float>> rects;
+    for (uint UUID: ctx.getObjectPrimitiveUUIDs(ObjID)) {
+        const std::vector<vec3> vertices = ctx.getPrimitiveVertices(UUID);
+        float x_min = vertices.front().x, x_max = vertices.front().x;
+        float y_min = vertices.front().y, y_max = vertices.front().y;
+        for (const vec3 &vertex: vertices) {
+            x_min = std::min(x_min, vertex.x);
+            x_max = std::max(x_max, vertex.x);
+            y_min = std::min(y_min, vertex.y);
+            y_max = std::max(y_max, vertex.y);
+        }
+        rects.push_back({x_min, y_min, x_max, y_max});
+    }
+    return rects;
+}
+
+//! Distance from a point to the closest point of an axis-aligned rectangle, which is zero when the point lies inside it
+static float adaptiveTileRectDistance(const std::vector<float> &rect, const vec2 &point) {
+    const float closest_x = std::min(std::max(point.x, rect.at(0)), rect.at(2));
+    const float closest_y = std::min(std::max(point.y, rect.at(1)), rect.at(3));
+    return std::hypot(point.x - closest_x, point.y - closest_y);
+}
+
+TEST_CASE("Adaptive Tile Object") {
+
+    SUBCASE("sub-patches exactly partition the tile") {
+        // The quadtree derives every cell's bounds from integer indices against a fixed base cell size rather than by
+        // accumulating offsets from its parent, so the leaves must tile the object exactly. A gap or an overlap
+        // anywhere shows up immediately as an area that does not match the tile area. The tile must be untextured
+        // here, since getPrimitiveArea scales by the texture solid fraction.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(1.f, 2.f);
+        refinement.subpatch_size_min = 0.05f;
+        refinement.subpatch_size_max = 1.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(20, 20), nullrotation, refinement);
+
+        DOCTEST_CHECK(ctx.getObjectType(tile) == OBJECT_TYPE_ADAPTIVE_TILE);
+        DOCTEST_CHECK(ctx.getObjectArea(tile) == doctest::Approx(400.f).epsilon(1e-4));
+    }
+
+    SUBCASE("no two sub-patches overlap") {
+        // Matching total area alone cannot distinguish a correct partition from one containing a gap and an overlap of
+        // equal size, so probe the tile on a grid of points and require each to fall inside exactly one sub-patch. The
+        // probe offset is deliberately not a dyadic fraction, so no probe point can land on a cell boundary.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(-1.5f, 0.5f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement);
+
+        const std::vector<std::vector<float>> rects = getAdaptiveTileSubpatchRects(ctx, tile);
+
+        const int probe_count = 41;
+        for (int j = 0; j < probe_count; j++) {
+            for (int i = 0; i < probe_count; i++) {
+                const float x = 8.f * ((float(i) + 0.31830989f) / float(probe_count)) - 4.f;
+                const float y = 8.f * ((float(j) + 0.31830989f) / float(probe_count)) - 4.f;
+
+                int containing_count = 0;
+                for (const std::vector<float> &rect: rects) {
+                    if (x >= rect.at(0) && x <= rect.at(2) && y >= rect.at(1) && y <= rect.at(3)) {
+                        containing_count++;
+                    }
+                }
+                DOCTEST_CHECK(containing_count == 1);
+            }
+        }
+    }
+
+    SUBCASE("achieved sub-patch sizes bracket the requested range") {
+        // The coarsest cells must survive at refinement level 0. They do not if the transition is normalized by the
+        // distance to the farthest tile corner instead of by the largest closest-point distance over the base cells:
+        // the cell owning that corner is nearer to the target than the corner itself, so no cell reaches the far end of
+        // the transition, every base cell subdivides once, and the achieved maximum lands at half the requested one.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.02f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.25f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(50, 50), nullrotation, refinement);
+
+        const int2 base_subdiv = ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile);
+        const uint max_level = ctx.getAdaptiveTileObjectMaxRefinementLevel(tile);
+        DOCTEST_CHECK(base_subdiv == make_int2(22, 22));
+        DOCTEST_CHECK(max_level == 7);
+
+        const vec2 size_range = ctx.getAdaptiveTileObjectSubpatchSizeRange(tile);
+        const float base_size = 50.f / 22.f;
+
+        // The coarsest cells are exactly the base cells and the finest are the base cells subdivided the full number of
+        // levels, which is only true when both ends of the transition are actually reached.
+        DOCTEST_CHECK(size_range.y == doctest::Approx(base_size).epsilon(errtol));
+        DOCTEST_CHECK(size_range.x == doctest::Approx(base_size / 128.f).epsilon(errtol));
+
+        // Both ends land within about 20% of the request, and the errors are anti-correlated because the base cell size
+        // is chosen as the geometric mean of the two constraints.
+        DOCTEST_CHECK(size_range.x == doctest::Approx(0.02f).epsilon(0.25f));
+        DOCTEST_CHECK(size_range.y == doctest::Approx(2.f).epsilon(0.25f));
+        DOCTEST_CHECK((size_range.y / 2.f) * (size_range.x / 0.02f) == doctest::Approx(1.f).epsilon(0.05f));
+    }
+
+    SUBCASE("predicted sub-patch count matches the count actually created") {
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(2.f, -1.f);
+        refinement.subpatch_size_min = 0.1f;
+        refinement.subpatch_size_max = 1.f;
+        refinement.transition_exponent = 0.75f;
+
+        const size_t predicted = ctx.predictAdaptiveTileObjectSubpatchCount(make_vec2(16, 16), refinement);
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(16, 16), nullrotation, refinement);
+
+        DOCTEST_CHECK(predicted == ctx.getObjectPrimitiveCount(tile));
+        DOCTEST_CHECK(predicted > 0);
+    }
+
+    SUBCASE("sub-patch size grows with distance from the target") {
+        // Refinement level is inherited from a cell's ancestors, so an individual leaf far from the target can be finer
+        // than a nearer one that never subdivided. The property that actually holds, and that the feature exists to
+        // provide, is that size grows with distance in aggregate.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.05f;
+        refinement.subpatch_size_max = 1.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(20, 20), nullrotation, refinement);
+
+        const std::vector<std::vector<float>> rects = getAdaptiveTileSubpatchRects(ctx, tile);
+
+        const int bin_count = 5;
+        std::vector<float> size_sum(bin_count, 0.f);
+        std::vector<int> bin_population(bin_count, 0);
+        for (const std::vector<float> &rect: rects) {
+            const float distance = adaptiveTileRectDistance(rect, make_vec2(0.f, 0.f));
+            const int bin = std::min(bin_count - 1, int(distance / (10.f / float(bin_count))));
+            size_sum.at(bin) += std::max(rect.at(2) - rect.at(0), rect.at(3) - rect.at(1));
+            bin_population.at(bin)++;
+        }
+
+        for (int bin = 1; bin < bin_count; bin++) {
+            DOCTEST_CHECK(bin_population.at(bin) > 0);
+            DOCTEST_CHECK(bin_population.at(bin - 1) > 0);
+            const float mean_previous = size_sum.at(bin - 1) / float(bin_population.at(bin - 1));
+            const float mean_current = size_sum.at(bin) / float(bin_population.at(bin));
+            DOCTEST_CHECK(mean_current > mean_previous);
+        }
+
+        // The finest sub-patches occur at the target itself. Many sub-patches share the finest size, so the nearest of
+        // them is what matters; taking whichever happens to come first in traversal order would prove nothing.
+        float finest_size = std::numeric_limits<float>::max();
+        for (const std::vector<float> &rect: rects) {
+            finest_size = std::min(finest_size, std::max(rect.at(2) - rect.at(0), rect.at(3) - rect.at(1)));
+        }
+        // Compared with a tolerance rather than exactly: a cell's width is recovered as the difference of two vertex
+        // coordinates, and that difference loses low-order bits differently depending on where the cell sits on the
+        // tile, so cells of the same refinement level do not all report an identical width.
+        float finest_distance = std::numeric_limits<float>::max();
+        for (const std::vector<float> &rect: rects) {
+            if (std::max(rect.at(2) - rect.at(0), rect.at(3) - rect.at(1)) < 1.001f * finest_size) {
+                finest_distance = std::min(finest_distance, adaptiveTileRectDistance(rect, make_vec2(0.f, 0.f)));
+            }
+        }
+        DOCTEST_CHECK(finest_distance < 1e-6f);
+    }
+
+    SUBCASE("refinement is radially symmetric about the target") {
+        // A separable non-uniform grid would refine along the full row and column through the target, leaving a
+        // cross-shaped fine region; the quadtree refines into a disc. Sampling at a fixed radius in eight directions
+        // distinguishes the two: the cross would be fine along the axes and coarse on the diagonals.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(16, 16), nullrotation, refinement);
+
+        // An even base grid puts the target on a cell corner, so the layout is symmetric under the square's reflections.
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile) == make_int2(8, 8));
+
+        const std::vector<std::vector<float>> rects = getAdaptiveTileSubpatchRects(ctx, tile);
+
+        const float sample_radius = 2.7f;
+        float reference_size = -1.f;
+        for (int direction = 0; direction < 8; direction++) {
+            const float angle = float(direction) * 0.25f * M_PI;
+            const float x = sample_radius * std::cos(angle);
+            const float y = sample_radius * std::sin(angle);
+
+            float sampled_size = -1.f;
+            for (const std::vector<float> &rect: rects) {
+                if (x >= rect.at(0) && x <= rect.at(2) && y >= rect.at(1) && y <= rect.at(3)) {
+                    sampled_size = std::max(rect.at(2) - rect.at(0), rect.at(3) - rect.at(1));
+                    break;
+                }
+            }
+            DOCTEST_CHECK(sampled_size > 0.f);
+
+            if (direction == 0) {
+                reference_size = sampled_size;
+            } else {
+                DOCTEST_CHECK(sampled_size == doctest::Approx(reference_size).epsilon(errtol));
+            }
+        }
+    }
+
+    SUBCASE("all sub-patches are coplanar and share the tile normal") {
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(1.f, 1.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        const SphericalCoord rotation = make_SphericalCoord(0.6f, 1.1f);
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(3, -2, 1), make_vec2(8, 8), rotation, refinement);
+
+        const vec3 tile_normal = ctx.getAdaptiveTileObjectNormal(tile);
+        for (uint UUID: ctx.getObjectPrimitiveUUIDs(tile)) {
+            const vec3 subpatch_normal = ctx.getPrimitiveNormal(UUID);
+            DOCTEST_CHECK(subpatch_normal.x == doctest::Approx(tile_normal.x).epsilon(errtol));
+            DOCTEST_CHECK(subpatch_normal.y == doctest::Approx(tile_normal.y).epsilon(errtol));
+            DOCTEST_CHECK(subpatch_normal.z == doctest::Approx(tile_normal.z).epsilon(errtol));
+        }
+
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectCenter(tile).x == doctest::Approx(3.f).epsilon(errtol));
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectCenter(tile).z == doctest::Approx(1.f).epsilon(errtol));
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectSize(tile).x == doctest::Approx(8.f).epsilon(errtol));
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectVertices(tile).size() == 4);
+    }
+
+    SUBCASE("texture repeat is applied exactly and no sub-patch straddles a repeat boundary") {
+        // A uniform tile reduces a repeat count that does not divide its subdivision count. An adaptive tile instead
+        // snaps its base grid to a multiple of the requested count, because the base grid is derived internally and
+        // silently degrading the user's requested repeat against it would be surprising.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(16, 16), nullrotation, refinement, "lib/images/diamond_texture.png", make_int2(3, 3));
+
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectTextureRepeat(tile) == make_int2(3, 3));
+
+        const int2 base_subdiv = ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile);
+        DOCTEST_CHECK(base_subdiv.x % 3 == 0);
+        DOCTEST_CHECK(base_subdiv.y % 3 == 0);
+
+        const uint max_level = ctx.getAdaptiveTileObjectMaxRefinementLevel(tile);
+        const uint finest_per_repeat_x = uint(base_subdiv.x / 3) << max_level;
+        const uint finest_per_repeat_y = uint(base_subdiv.y / 3) << max_level;
+
+        for (uint UUID: ctx.getObjectPrimitiveUUIDs(tile)) {
+            const std::vector<vec2> uv = ctx.getPrimitiveTextureUV(UUID);
+            DOCTEST_CHECK(uv.size() == 4);
+
+            for (const vec2 &coordinate: uv) {
+                DOCTEST_CHECK(coordinate.x >= 0.f);
+                DOCTEST_CHECK(coordinate.x <= 1.f);
+                DOCTEST_CHECK(coordinate.y >= 0.f);
+                DOCTEST_CHECK(coordinate.y <= 1.f);
+
+                // Every window boundary lands on the grid of finest-level cells within one texture repeat. This is what
+                // guarantees that no sub-patch straddles a boundary between repeats and that the windows tile the image
+                // exactly: a window that fell between grid lines would sample across the seam.
+                const float scaled_x = coordinate.x * float(finest_per_repeat_x);
+                const float scaled_y = coordinate.y * float(finest_per_repeat_y);
+                DOCTEST_CHECK(std::fabs(scaled_x - std::round(scaled_x)) < 1e-4f);
+                DOCTEST_CHECK(std::fabs(scaled_y - std::round(scaled_y)) < 1e-4f);
+            }
+
+            // A window spans a whole number of finest-level cells, never a fraction of one.
+            const float window_width = uv.at(1).x - uv.at(0).x;
+            const uint cells_per_repeat = uint(std::lround(1.f / window_width));
+            DOCTEST_CHECK(window_width == doctest::Approx(1.f / float(cells_per_repeat)).epsilon(errtol));
+            DOCTEST_CHECK(cells_per_repeat >= uint(base_subdiv.x / 3));
+            DOCTEST_CHECK(cells_per_repeat <= finest_per_repeat_x);
+            DOCTEST_CHECK(finest_per_repeat_x % cells_per_repeat == 0);
+        }
+    }
+
+    SUBCASE("copyObject reproduces geometry and parameters exactly") {
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(1.f, -1.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement);
+        uint tile_copy = ctx.copyObject(tile);
+
+        DOCTEST_CHECK(ctx.getObjectType(tile_copy) == OBJECT_TYPE_ADAPTIVE_TILE);
+        DOCTEST_CHECK(ctx.getObjectPrimitiveCount(tile_copy) == ctx.getObjectPrimitiveCount(tile));
+        DOCTEST_CHECK(ctx.getObjectArea(tile_copy) == doctest::Approx(ctx.getObjectArea(tile)).epsilon(errtol));
+
+        const AdaptiveTileRefinement copied_refinement = ctx.getAdaptiveTileObjectRefinement(tile_copy);
+        DOCTEST_CHECK(copied_refinement.target.x == refinement.target.x);
+        DOCTEST_CHECK(copied_refinement.target.y == refinement.target.y);
+        DOCTEST_CHECK(copied_refinement.subpatch_size_min == refinement.subpatch_size_min);
+        DOCTEST_CHECK(copied_refinement.subpatch_size_max == refinement.subpatch_size_max);
+        DOCTEST_CHECK(copied_refinement.transition_exponent == refinement.transition_exponent);
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile_copy) == ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile));
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectMaxRefinementLevel(tile_copy) == ctx.getAdaptiveTileObjectMaxRefinementLevel(tile));
+
+        // Sub-patch geometry is duplicated rather than regenerated, so it must match bit for bit.
+        const std::vector<uint> original_UUIDs = ctx.getObjectPrimitiveUUIDs(tile);
+        const std::vector<uint> copied_UUIDs = ctx.getObjectPrimitiveUUIDs(tile_copy);
+        for (size_t i = 0; i < original_UUIDs.size(); i++) {
+            const std::vector<vec3> original_vertices = ctx.getPrimitiveVertices(original_UUIDs.at(i));
+            const std::vector<vec3> copied_vertices = ctx.getPrimitiveVertices(copied_UUIDs.at(i));
+            for (size_t v = 0; v < original_vertices.size(); v++) {
+                DOCTEST_CHECK(copied_vertices.at(v).x == original_vertices.at(v).x);
+                DOCTEST_CHECK(copied_vertices.at(v).y == original_vertices.at(v).y);
+            }
+        }
+
+        // Deleting the original must leave the copy intact.
+        const float copy_area = ctx.getObjectArea(tile_copy);
+        ctx.deleteObject(tile);
+        DOCTEST_CHECK(ctx.doesObjectExist(tile_copy));
+        DOCTEST_CHECK(ctx.getObjectArea(tile_copy) == doctest::Approx(copy_area).epsilon(errtol));
+    }
+
+    SUBCASE("uniform tile accessors reject adaptive tiles without corrupting them") {
+        // These operations are meaningless for a non-uniform layout. setTileObjectSubdivisionCount in particular takes
+        // a vector of object IDs, so a user sweeping it over every object in the scene must not silently replace an
+        // adaptive layout with a uniform grid.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement);
+
+        const uint original_count = ctx.getObjectPrimitiveCount(tile);
+        const float original_area = ctx.getObjectArea(tile);
+
+        float area_ratio;
+        std::string output;
+        {
+            capture_cerr capture;
+            area_ratio = ctx.getTileObjectAreaRatio(tile);
+            ctx.setTileObjectSubdivisionCount({tile}, make_int2(4, 4));
+            output = capture.get_captured_output();
+        }
+
+        DOCTEST_CHECK(area_ratio == 0.f);
+        DOCTEST_CHECK(output.find("not a tile object") != std::string::npos);
+        DOCTEST_CHECK(ctx.getObjectPrimitiveCount(tile) == original_count);
+        DOCTEST_CHECK(ctx.getObjectArea(tile) == doctest::Approx(original_area).epsilon(errtol));
+
+        uint uniform_tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(1, 1), nullrotation, make_int2(2, 2));
+        AdaptiveTileRefinement rejected_refinement;
+        DOCTEST_CHECK_THROWS(rejected_refinement = ctx.getAdaptiveTileObjectRefinement(uniform_tile));
+    }
+
+    SUBCASE("degenerate refinement range produces a uniform grid") {
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 1.f;
+        refinement.subpatch_size_max = 1.f;
+        refinement.transition_exponent = 1.f;
+
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement);
+
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectMaxRefinementLevel(tile) == 0);
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile) == make_int2(8, 8));
+        DOCTEST_CHECK(ctx.getObjectPrimitiveCount(tile) == 64);
+
+        const vec2 size_range = ctx.getAdaptiveTileObjectSubpatchSizeRange(tile);
+        DOCTEST_CHECK(size_range.x == doctest::Approx(1.f).epsilon(errtol));
+        DOCTEST_CHECK(size_range.y == doctest::Approx(1.f).epsilon(errtol));
+    }
+
+    SUBCASE("refinement target outside the tile warns but still produces valid geometry") {
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(100.f, 0.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        uint tile;
+        std::string output;
+        {
+            capture_cerr capture;
+            tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(16, 16), nullrotation, refinement);
+            output = capture.get_captured_output();
+        }
+
+        DOCTEST_CHECK(output.find("outside") != std::string::npos);
+        DOCTEST_CHECK(ctx.getObjectArea(tile) == doctest::Approx(256.f).epsilon(1e-4));
+
+        // The requested minimum sub-patch size is not reached, since no cell is anywhere near the target.
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectSubpatchSizeRange(tile).x > refinement.subpatch_size_min);
+    }
+
+    SUBCASE("a coarsest-level grid larger than the sub-patch limit is rejected before it is built") {
+        // The coarsest-level grid is materialized in full before any subdivision happens, so a limit applied only to
+        // the final sub-patch count is applied too late: a large domain relative to subpatch_size_max spends hundreds
+        // of megabytes — gigabytes, for a multi-kilometer domain — building a grid whose only purpose is to be
+        // rejected, which turns a clean error into an out-of-memory crash. The grid is a lower bound on the sub-patch
+        // count, since every cell in it yields at least one sub-patch, so it can be rejected up front.
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.05f;
+        refinement.subpatch_size_max = 0.5f;
+        refinement.transition_exponent = 0.25f;
+
+        std::string message;
+        {
+            capture_cerr capture;
+            try {
+                ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(1000, 1000), nullrotation, refinement);
+            } catch (const std::runtime_error &error) {
+                message = error.what();
+            }
+        }
+        DOCTEST_CHECK(message.find("coarsest-level grid") != std::string::npos);
+    }
+
+    SUBCASE("predicting the count of an unbuildable refinement reports the same error as building it") {
+        // The whole point of the prediction is to answer "would this work" without paying for it, so returning the
+        // limit itself as though it were the true count reports a viable configuration for one that will be rejected.
+        Context ctx;
+
+        AdaptiveTileRefinement explosive;
+        explosive.target = make_vec2(0.f, 0.f);
+        explosive.subpatch_size_min = 0.005f;
+        explosive.subpatch_size_max = 2.f;
+        explosive.transition_exponent = 4.f;
+
+        capture_cerr capture;
+        size_t predicted = 0;
+        DOCTEST_CHECK_THROWS(predicted = ctx.predictAdaptiveTileObjectSubpatchCount(make_vec2(100, 100), explosive));
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(100, 100), nullrotation, explosive));
+    }
+
+    SUBCASE("invalid input") {
+        Context ctx;
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        capture_cerr capture;
+
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(0, 8), nullrotation, refinement));
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, -8), nullrotation, refinement));
+
+        AdaptiveTileRefinement invalid = refinement;
+        invalid.subpatch_size_min = 0.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        invalid = refinement;
+        invalid.subpatch_size_min = -0.1f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        invalid = refinement;
+        invalid.subpatch_size_max = 0.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        invalid = refinement;
+        invalid.subpatch_size_min = 3.f;
+        invalid.subpatch_size_max = 2.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        invalid = refinement;
+        invalid.transition_exponent = 0.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        invalid = refinement;
+        invalid.transition_exponent = -1.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        // The maximum sub-patch size must leave room for at least two base cells across the tile, below which the
+        // sizing heuristic misses both ends of the requested range in the same direction.
+        invalid = refinement;
+        invalid.subpatch_size_max = 6.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        // The size ratio bounds the refinement level, and with it the shift used to index cells within a coarsest-level
+        // cell. The sub-patch count limit does not cover this, since a chain deep enough to overflow the shift costs
+        // only a few cells per level.
+        invalid = refinement;
+        invalid.subpatch_size_min = 1e-9f;
+        invalid.subpatch_size_max = 2.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, invalid));
+
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement, "lib/images/solid.jpg", make_int2(0, 1)));
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement, "lib/images/missing.jpg"));
+
+        // More texture repeats than there are base cells cannot be honored, since a sub-patch would have to straddle a
+        // boundary between repeats.
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(8, 8), nullrotation, refinement, "lib/images/solid.jpg", make_int2(100, 100)));
+
+        // A refinement fine enough to exhaust memory is rejected before any geometry is allocated.
+        AdaptiveTileRefinement explosive;
+        explosive.target = make_vec2(0.f, 0.f);
+        explosive.subpatch_size_min = 0.005f;
+        explosive.subpatch_size_max = 2.f;
+        explosive.transition_exponent = 4.f;
+        DOCTEST_CHECK_THROWS(ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(100, 100), nullrotation, explosive));
     }
 }
 

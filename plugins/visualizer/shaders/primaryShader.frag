@@ -48,6 +48,8 @@ void main(){
     //    = 1 -> color fragments based on texture map color, set transparency according to texture alpha-value
     //    = 2 -> color fragments based on their RGB color value, set transparency according to texture alpha-value
     //    = 3 -> color fragments based on their RGB color value, set transparency according to texture r-value
+    //    = 4 -> color fragments based on texture map color, blending the texture alpha rather than
+    //           thresholding it (image overlays whose edges are genuinely partially transparent)
     // coordinateFlag:
     //    = 0 -> 2D projection in window-normalized coordinates
     //    = 1 -> 3D Cartesian coordinates
@@ -104,12 +106,24 @@ void main(){
         if( color.a<0.5 ){
             discard;
         }
+    }else if( textureFlag==4 ){//Color by texture map, blending the texture's alpha rather than testing it
+        //Used for image overlays such as the watermark. textureFlag==1 discards fragments below a
+        //fixed alpha threshold, which is correct for the alpha-masked cutouts of leaf and bark
+        //textures but destroys the antialiasing of an image whose edges are genuinely partially
+        //transparent: those edge pixels are exactly the ones the test throws away, leaving a
+        //jagged boundary. Here the alpha is used as-is and left to the blend function.
+        color = texture(textureSampler, texcoord3);
+        if( color.a < 0.004 ){
+            discard;
+        }
     }else if( textureFlag==3 ){//Color by interpolating the colors at vertices, and set the transparency according to the red channel of the texture map given by textureSampler
-        float rawAlpha = texture(textureSampler, texcoord3).r;
-        float edge = fwidth(rawAlpha);
-        float alpha = smoothstep(0.5 - edge, 0.5 + edge, rawAlpha);
-        color = vec4(fragmentColor.rgb * alpha, alpha);
-        color.a = clamp(alpha,0,1);
+        //The red channel holds the per-pixel antialiased coverage computed by FreeType, not a
+        //signed distance field, so it is used directly as the alpha value. Thresholding it would
+        //discard the antialiasing and leave hard, aliased glyph edges. The color is not
+        //premultiplied by alpha here because the blend function is GL_SRC_ALPHA/
+        //GL_ONE_MINUS_SRC_ALPHA, which applies that multiply itself.
+        float alpha = texture(textureSampler, texcoord3).r;
+        color = vec4(fragmentColor.rgb, clamp(alpha,0,1));
         if( color.a < 0.01 ){
             discard;
         }

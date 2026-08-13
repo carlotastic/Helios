@@ -354,6 +354,282 @@ TEST_CASE("Context XML I/O Functions") {
         std::remove(test_file);
     }
 
+    SUBCASE("writeXML and loadXML preserve tile texture repeat") {
+        // Regression test: the sub-patch (u,v) coordinates of a textured tile already survived a
+        // round-trip, so a reloaded scene rendered correctly. What was lost was the repeat count itself,
+        // which was not written at all and which the reader could not recover -- so changing the
+        // subdivision count of a reloaded tile stretched the texture across the whole tile.
+        const char *texture = "lib/images/disk_texture.png";
+        const char *test_file = "helios_tile_texture_repeat_test.xml";
+
+        Context ctx;
+        uint tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(10, 10), nullrotation, make_int2(10, 10), texture, make_int2(5, 5));
+        DOCTEST_CHECK(ctx.getTileObjectTextureRepeat(tile) == make_int2(5, 5));
+        DOCTEST_CHECK_NOTHROW(ctx.writeXML(test_file, true));
+
+        Context ctx2;
+        DOCTEST_CHECK_NOTHROW(ctx2.loadXML(test_file, true));
+
+        uint loaded_tile = 0;
+        bool found = false;
+        for (uint objID: ctx2.getAllObjectIDs()) {
+            if (ctx2.getObjectType(objID) == OBJECT_TYPE_TILE) {
+                loaded_tile = objID;
+                found = true;
+                break;
+            }
+        }
+        DOCTEST_CHECK(found);
+        DOCTEST_CHECK(ctx2.getTileObjectSubdivisionCount(loaded_tile) == make_int2(10, 10));
+        DOCTEST_CHECK(ctx2.getTileObjectTextureRepeat(loaded_tile) == make_int2(5, 5));
+
+        ctx2.setTileObjectSubdivisionCount({loaded_tile}, make_int2(20, 20));
+
+        std::vector<uint> uuids = ctx2.getObjectPrimitiveUUIDs(loaded_tile);
+        DOCTEST_CHECK(uuids.size() == 400);
+        for (size_t k = 0; k < uuids.size(); k++) {
+            const int i_local = static_cast<int>(k % 20) % 4;
+            const int j_local = static_cast<int>(k / 20) % 4;
+            std::vector<vec2> uv = ctx2.getPrimitiveTextureUV(uuids.at(k));
+            DOCTEST_CHECK(uv.size() == 4);
+            DOCTEST_CHECK(uv.at(0).x == doctest::Approx(float(i_local) * 0.25f).epsilon(errtol));
+            DOCTEST_CHECK(uv.at(2).y == doctest::Approx(float(j_local + 1) * 0.25f).epsilon(errtol));
+        }
+
+        std::remove(test_file);
+    }
+
+    SUBCASE("writeXML and loadXML round-trip an adaptive tile") {
+        // An adaptive tile is not regenerated from its parameters on load; the sub-patches written to the file are
+        // adopted directly. Regenerating would be both wasteful and unreliable, since the refinement predicate uses
+        // transcendental functions that are not identically rounded across platforms.
+        const char *test_file = "helios_adaptive_tile_test.xml";
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(1.5f, -0.5f);
+        refinement.subpatch_size_min = 0.25f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        Context ctx;
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(1, 2, 0), make_vec2(8, 8), nullrotation, refinement);
+
+        const uint original_count = ctx.getObjectPrimitiveCount(tile);
+        const float original_area = ctx.getObjectArea(tile);
+        const int2 original_base_subdiv = ctx.getAdaptiveTileObjectBaseSubdivisionCount(tile);
+        const uint original_max_level = ctx.getAdaptiveTileObjectMaxRefinementLevel(tile);
+        const vec2 original_size_range = ctx.getAdaptiveTileObjectSubpatchSizeRange(tile);
+        const vec3 original_normal = ctx.getAdaptiveTileObjectNormal(tile);
+
+        // Deliberately dense rather than sparse. The writer emits a sub-patch data element only where the data exists
+        // while the reader consumes them positionally, so sparse per-sub-patch data is shifted on reload. That is a
+        // pre-existing defect affecting uniform tiles too, and testing around it here would hide it.
+        std::vector<uint> original_UUIDs = ctx.getObjectPrimitiveUUIDs(tile);
+        for (size_t k = 0; k < original_UUIDs.size(); k++) {
+            ctx.setPrimitiveData(original_UUIDs.at(k), "cell_index", float(k));
+        }
+
+        DOCTEST_CHECK_NOTHROW(ctx.writeXML(test_file, true));
+
+        Context ctx2;
+        DOCTEST_CHECK_NOTHROW(ctx2.loadXML(test_file, true));
+
+        uint loaded_tile = 0;
+        bool found = false;
+        for (uint objID: ctx2.getAllObjectIDs()) {
+            if (ctx2.getObjectType(objID) == OBJECT_TYPE_ADAPTIVE_TILE) {
+                loaded_tile = objID;
+                found = true;
+                break;
+            }
+        }
+        DOCTEST_CHECK(found);
+
+        DOCTEST_CHECK(ctx2.getObjectPrimitiveCount(loaded_tile) == original_count);
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectBaseSubdivisionCount(loaded_tile) == original_base_subdiv);
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectMaxRefinementLevel(loaded_tile) == original_max_level);
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectSubpatchSizeRange(loaded_tile).x == doctest::Approx(original_size_range.x).epsilon(1e-4));
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectSubpatchSizeRange(loaded_tile).y == doctest::Approx(original_size_range.y).epsilon(1e-4));
+
+        const AdaptiveTileRefinement loaded_refinement = ctx2.getAdaptiveTileObjectRefinement(loaded_tile);
+        DOCTEST_CHECK(loaded_refinement.target.x == doctest::Approx(refinement.target.x).epsilon(1e-4));
+        DOCTEST_CHECK(loaded_refinement.target.y == doctest::Approx(refinement.target.y).epsilon(1e-4));
+        DOCTEST_CHECK(loaded_refinement.subpatch_size_min == doctest::Approx(refinement.subpatch_size_min).epsilon(1e-4));
+        DOCTEST_CHECK(loaded_refinement.subpatch_size_max == doctest::Approx(refinement.subpatch_size_max).epsilon(1e-4));
+        DOCTEST_CHECK(loaded_refinement.transition_exponent == doctest::Approx(refinement.transition_exponent).epsilon(1e-4));
+
+        // Coordinates are written at the default stream precision of six significant digits, so the sub-patch corners
+        // are quantized on the way out and the partition is no longer exact. The exact area check belongs in
+        // Test_context.h, before anything has been written to a file.
+        DOCTEST_CHECK(ctx2.getObjectArea(loaded_tile) == doctest::Approx(original_area).epsilon(1e-3));
+
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectCenter(loaded_tile).x == doctest::Approx(1.f).epsilon(1e-4));
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectCenter(loaded_tile).y == doctest::Approx(2.f).epsilon(1e-4));
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectSize(loaded_tile).x == doctest::Approx(8.f).epsilon(1e-4));
+
+        const vec3 loaded_normal = ctx2.getAdaptiveTileObjectNormal(loaded_tile);
+        DOCTEST_CHECK(loaded_normal.z == doctest::Approx(original_normal.z).epsilon(1e-4));
+
+        std::vector<uint> loaded_UUIDs = ctx2.getObjectPrimitiveUUIDs(loaded_tile);
+        DOCTEST_CHECK(loaded_UUIDs.size() == original_UUIDs.size());
+        for (size_t k = 0; k < loaded_UUIDs.size(); k++) {
+            float cell_index;
+            DOCTEST_CHECK(ctx2.doesPrimitiveDataExist(loaded_UUIDs.at(k), "cell_index"));
+            ctx2.getPrimitiveData(loaded_UUIDs.at(k), "cell_index", cell_index);
+            DOCTEST_CHECK(cell_index == doctest::Approx(float(k)).epsilon(errtol));
+        }
+
+        std::remove(test_file);
+    }
+
+    SUBCASE("writeXML and loadXML preserve adaptive tile texture coordinates") {
+        const char *texture = "lib/images/diamond_texture.png";
+        const char *test_file = "helios_adaptive_tile_texture_test.xml";
+
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.5f;
+        refinement.subpatch_size_max = 2.f;
+        refinement.transition_exponent = 0.5f;
+
+        Context ctx;
+        uint tile = ctx.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(16, 16), nullrotation, refinement, texture, make_int2(2, 2));
+        DOCTEST_CHECK(ctx.getAdaptiveTileObjectTextureRepeat(tile) == make_int2(2, 2));
+
+        std::vector<std::vector<vec2>> original_uv;
+        for (uint UUID: ctx.getObjectPrimitiveUUIDs(tile)) {
+            original_uv.push_back(ctx.getPrimitiveTextureUV(UUID));
+        }
+
+        DOCTEST_CHECK_NOTHROW(ctx.writeXML(test_file, true));
+
+        Context ctx2;
+        DOCTEST_CHECK_NOTHROW(ctx2.loadXML(test_file, true));
+
+        uint loaded_tile = 0;
+        bool found = false;
+        for (uint objID: ctx2.getAllObjectIDs()) {
+            if (ctx2.getObjectType(objID) == OBJECT_TYPE_ADAPTIVE_TILE) {
+                loaded_tile = objID;
+                found = true;
+                break;
+            }
+        }
+        DOCTEST_CHECK(found);
+        DOCTEST_CHECK(ctx2.getAdaptiveTileObjectTextureRepeat(loaded_tile) == make_int2(2, 2));
+
+        std::vector<uint> loaded_UUIDs = ctx2.getObjectPrimitiveUUIDs(loaded_tile);
+        DOCTEST_CHECK(loaded_UUIDs.size() == original_uv.size());
+        for (size_t k = 0; k < loaded_UUIDs.size(); k++) {
+            std::vector<vec2> uv = ctx2.getPrimitiveTextureUV(loaded_UUIDs.at(k));
+            DOCTEST_CHECK(uv.size() == original_uv.at(k).size());
+            for (size_t v = 0; v < uv.size(); v++) {
+                DOCTEST_CHECK(uv.at(v).x == doctest::Approx(original_uv.at(k).at(v).x).epsilon(1e-4));
+                DOCTEST_CHECK(uv.at(v).y == doctest::Approx(original_uv.at(k).at(v).y).epsilon(1e-4));
+            }
+        }
+
+        std::remove(test_file);
+    }
+
+    SUBCASE("loadXML of an adaptive tile block referencing no primitives fails fast") {
+        // The primitives in the file are the authority for an adaptive tile's geometry, so a block without them cannot
+        // be reconstructed. Silently producing an empty or regenerated object would hide a corrupt file.
+        const char *test_file = "helios_adaptive_tile_orphan_test.xml";
+
+        std::ofstream outfile(test_file);
+        outfile << "<helios>" << std::endl;
+        outfile << "   <adaptive_tile>" << std::endl;
+        outfile << "\t<objID>1</objID>" << std::endl;
+        outfile << "\t<adaptive_refinement>0 0 0.25 2 0.5</adaptive_refinement>" << std::endl;
+        outfile << "\t<subdivisions>4 4</subdivisions>" << std::endl;
+        outfile << "\t<max_refinement_level>3</max_refinement_level>" << std::endl;
+        outfile << "\t<subpatch_size_range>0.25 2</subpatch_size_range>" << std::endl;
+        outfile << "\t<transform> 8 0 0 0 0 8 0 0 0 0 1 0 0 0 0 1 </transform>" << std::endl;
+        outfile << "   </adaptive_tile>" << std::endl;
+        outfile << "</helios>" << std::endl;
+        outfile.close();
+
+        Context ctx;
+        capture_cerr capture;
+        DOCTEST_CHECK_THROWS(ctx.loadXML(test_file, true));
+
+        std::remove(test_file);
+    }
+
+    SUBCASE("loadXML of an adaptive tile block with nonsensical parameters fails fast") {
+        // The generation path validates these parameters thoroughly, but the load path adopts whatever the file says.
+        // Without matching validation a hand-edited or corrupted file produces an object that reports a negative
+        // sub-patch size and a zero-cell base grid through the public accessors as though they were legitimate.
+        const char *test_file = "helios_adaptive_tile_invalid_test.xml";
+
+        std::ofstream outfile(test_file);
+        outfile << "<helios>" << std::endl;
+        outfile << "   <patch>" << std::endl;
+        outfile << "\t<UUID>0</UUID>" << std::endl;
+        outfile << "\t<objID>1</objID>" << std::endl;
+        outfile << "\t<transform> 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 </transform>" << std::endl;
+        outfile << "   </patch>" << std::endl;
+        outfile << "   <adaptive_tile>" << std::endl;
+        outfile << "\t<objID>1</objID>" << std::endl;
+        outfile << "\t<adaptive_refinement>0 0 -5 -2 -1</adaptive_refinement>" << std::endl;
+        outfile << "\t<subdivisions>0 0</subdivisions>" << std::endl;
+        outfile << "\t<max_refinement_level>3</max_refinement_level>" << std::endl;
+        outfile << "\t<subpatch_size_range>0.25 2</subpatch_size_range>" << std::endl;
+        outfile << "\t<transform> 8 0 0 0 0 8 0 0 0 0 1 0 0 0 0 1 </transform>" << std::endl;
+        outfile << "   </adaptive_tile>" << std::endl;
+        outfile << "</helios>" << std::endl;
+        outfile.close();
+
+        Context ctx;
+        capture_cerr capture;
+        DOCTEST_CHECK_THROWS(ctx.loadXML(test_file, true));
+
+        std::remove(test_file);
+    }
+
+    SUBCASE("loadXML of a file without a texture repeat element defaults silently") {
+        // Backward compatibility: every Helios XML file written before <texture_repeat> existed lacks the
+        // element, so its absence must default to 1x1 without any warning. A tile with the default repeat
+        // must also not emit the element at all, keeping existing scene files byte-identical.
+        const char *texture = "lib/images/disk_texture.png";
+        const char *test_file = "helios_tile_default_repeat_test.xml";
+
+        Context ctx;
+        uint tile = ctx.addTileObject(make_vec3(0, 0, 0), make_vec2(4, 4), nullrotation, make_int2(4, 4), texture);
+        DOCTEST_CHECK(ctx.getTileObjectTextureRepeat(tile) == make_int2(1, 1));
+        DOCTEST_CHECK_NOTHROW(ctx.writeXML(test_file, true));
+
+        std::ifstream infile(test_file);
+        std::stringstream buffer;
+        buffer << infile.rdbuf();
+        infile.close();
+        DOCTEST_CHECK(buffer.str().find("texture_repeat") == std::string::npos);
+
+        std::string captured;
+        Context ctx2;
+        {
+            capture_cerr capture;
+            ctx2.loadXML(test_file, true);
+            captured = capture.get_captured_output();
+        } // capture destroyed before the assertions below
+        DOCTEST_CHECK(captured.find("texture_repeat") == std::string::npos);
+
+        uint loaded_tile = 0;
+        bool found = false;
+        for (uint objID: ctx2.getAllObjectIDs()) {
+            if (ctx2.getObjectType(objID) == OBJECT_TYPE_TILE) {
+                loaded_tile = objID;
+                found = true;
+                break;
+            }
+        }
+        DOCTEST_CHECK(found);
+        DOCTEST_CHECK(ctx2.getTileObjectTextureRepeat(loaded_tile) == make_int2(1, 1));
+
+        std::remove(test_file);
+    }
+
     SUBCASE("writeXML and loadXML preserve object sub-primitive ordering after deletion") {
         // Deleting a sub-primitive from a compound object must keep the remaining sub-primitives'
         // ordering intact across a writeXML()/loadXML() round-trip (deleteChildPrimitive is

@@ -5894,7 +5894,7 @@ void RadiationModel::buildGeometryData(const std::vector<uint> &UUIDs) {
         uint UUID = primitive_UUIDs_ordered[u];
         uint parentID = context->getPrimitiveParentObjectID(UUID);
 
-        if (last_parentID != parentID || parentID == 0 || context->getObjectType(parentID) == helios::OBJECT_TYPE_TILE) {
+        if (last_parentID != parentID || parentID == 0 || context->getObjectType(parentID) == helios::OBJECT_TYPE_TILE || context->getObjectType(parentID) == helios::OBJECT_TYPE_ADAPTIVE_TILE) {
             primitiveID_indices.push_back(u);
             last_parentID = parentID;
             current_objID++;

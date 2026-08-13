@@ -872,14 +872,15 @@ public:
     //! Set the range of the Colorbar
     /**
      * \param[in] cmin Minimum value
-     * \param[out] cmax Maximum value
+     * \param[in] cmax Maximum value
+     * \note The command is ignored if cmin is greater than cmax.
      */
     void setColorbarRange(float cmin, float cmax);
 
     //! Set the values in the colorbar where ticks and labels should be placed
     /**
      * \param[in] ticks Vector of values corresponding to ticks
-        \note If tick values are outside of the colorbar range (see setColorBarRange()), the colorbar will be automatically expanded to fit the tick values.
+        \note If tick values are outside of the colorbar range (see setColorbarRange()), the colorbar range will be automatically expanded to fit the tick values, and a warning is issued if messages are enabled. Because the colormap limits follow the colorbar range, this changes the colors shown as well as the labels. To keep an explicit range authoritative, call setColorbarRange() after setColorbarTicks().
     */
     void setColorbarTicks(const std::vector<float> &ticks);
 
@@ -917,33 +918,6 @@ public:
 
     //! Get the current colormap used in Colorbar/visualization
     [[nodiscard]] Colormap getCurrentColormap() const;
-
-    //! Helper function to round a value to a "nice" number (1, 2, or 5 times a power of 10)
-    /**
-     * \param[in] value The value to round
-     * \param[in] round If true, round to nearest nice number; if false, round up
-     * \return The rounded "nice" number
-     */
-    static double niceNumber(double value, bool round);
-
-    //! Helper function to format a tick label with appropriate precision
-    /**
-     * \param[in] value The tick value to format
-     * \param[in] spacing The spacing between ticks
-     * \param[in] isIntegerData Whether the data represents integer values
-     * \return The formatted label string
-     */
-    static std::string formatTickLabel(double value, double spacing, bool isIntegerData);
-
-    //! Generate optimal tick values using nice numbers algorithm
-    /**
-     * \param[in] dataMin Minimum data value
-     * \param[in] dataMax Maximum data value
-     * \param[in] isIntegerData Whether the data represents integer values
-     * \param[in] targetTicks Target number of ticks (default 5)
-     * \return Vector of tick values
-     */
-    static std::vector<float> generateNiceTicks(float dataMin, float dataMax, bool isIntegerData, int targetTicks = 5);
 
     //! Add all geometry from the Context to the visualizer
     /**
@@ -1055,6 +1029,11 @@ public:
 
     //! Run one rendering loop from plotInteractive()
     /**
+     * This is the body of plotInteractive()'s render loop, exposed so that an external loop can
+     * drive rendering itself. Any geometry pending upload is transferred to the GPU before
+     * rendering, but unlike plotUpdate() the Context geometry is not rebuilt: call
+     * buildContextGeometry() or plotUpdate() if primitives have been added to or changed in the
+     * Context since the last render.
      * \param[in] getKeystrokes If false, do not update visualization with input keystrokes.
      */
     void plotOnce(bool getKeystrokes);
@@ -1110,14 +1089,23 @@ public:
 
     //! Get R-G-B pixel data in the current display window
     /**
-     * \param[out] buffer Pixel data. The data is stored as r-g-b * column * row. So indices (0,1,2) would be the RGB values for row 0 and column 0, indices (3,4,5) would be RGB values for row 0 and column 1, and so on. Thus, buffer is of size
-     * 3*width*height.
+     * \param[out] buffer Pixel data. The data is stored as r-g-b * column * row. So indices (0,1,2) would be the RGB values for row 0 and column 0, indices (3,4,5) would be RGB values for row 0 and column 1, and so on.
+     * \note The buffer must hold `3*width*height` elements, where width and height come from \ref getFramebufferSize() — **not** from \ref getWindowSize() and not from the dimensions passed to the constructor. On a high-DPI (Retina) display the framebuffer is larger than the window, typically by a factor of two per axis, so sizing the buffer from the window dimensions overflows it. Prefer the std::vector overload, which allocates correctly on the caller's behalf.
      */
     void getWindowPixelsRGB(uint *buffer) const;
 
+    //! Get R-G-B pixel data in the current display window
+    /**
+     * Resizes the vector to the current framebuffer dimensions, so it cannot be undersized by the caller.
+     * \param[out] pixel_data Pixel data, stored as r-g-b * column * row.
+     * \param[out] width_pixels Width of the returned image in pixels
+     * \param[out] height_pixels Height of the returned image in pixels
+     */
+    void getWindowPixelsRGB(std::vector<uint> &pixel_data, uint &width_pixels, uint &height_pixels) const;
+
     //! Get depth buffer data for the current display window
     /**
-     * \param[out] buffer Distance to nearest object from the camera location.
+     * \param[out] buffer Distance to nearest object from the camera location. The buffer must hold `width*height` elements as reported by \ref getWindowSize(). Note this differs from \ref getWindowPixelsRGB(), which is sized from the framebuffer rather than the window.
      */
     [[deprecated]]
     void getDepthMap(float *buffer);
@@ -1214,6 +1202,55 @@ public:
     void getPointRenderingMetrics(size_t &total_points, size_t &rendered_points, float &culling_time_ms) const;
 
 private:
+    //! Helper function to round a value to a "nice" number (1, 2, or 5 times a power of 10)
+    /**
+     * \param[in] value The value to round
+     * \param[in] round If true, round to nearest nice number; if false, round up
+     * \return The rounded "nice" number
+     */
+    static double niceNumber(double value, bool round);
+
+    //! Helper function to format a tick label with appropriate precision
+    /**
+     * \param[in] value The tick value to format
+     * \param[in] spacing The spacing between ticks
+     * \param[in] isIntegerData Whether the data represents integer values
+     * \return The formatted label string
+     */
+    static std::string formatTickLabel(double value, double spacing, bool isIntegerData);
+
+    //! Generate optimal tick values using nice numbers algorithm
+    /**
+     * Tick bounds are extended outward to the next "nice" number past the data, which is the
+     * correct behavior for general axis labeling. For a colorbar, whose ends are fixed at the
+     * colormap limits, use generateColorbarTicks() instead.
+     * \param[in] dataMin Minimum data value
+     * \param[in] dataMax Maximum data value
+     * \param[in] isIntegerData Whether the data represents integer values
+     * \param[in] targetTicks Target number of ticks (default 5)
+     * \return Vector of tick values
+     */
+    static std::vector<float> generateNiceTicks(float dataMin, float dataMax, bool isIntegerData, int targetTicks = 5);
+
+    //! Generate "nice" tick values confined to the colorbar range [cmin, cmax]
+    /**
+     * Unlike generateNiceTicks(), which extends outward past the data for true axis semantics,
+     * every returned tick lies within [cmin, cmax] because a colorbar has hard ends. At least two
+     * ticks are returned whenever cmax > cmin and both are finite, falling back to progressively
+     * finer "nice" spacings and finally to the range endpoints if no nice grid fits.
+     *
+     * This is called from the rendering path, so degenerate input (non-finite limits, or a range
+     * that is empty or narrower than 1e-10) returns a single-tick vector rather than throwing.
+     *
+     * \param[in] cmin Lower colorbar limit
+     * \param[in] cmax Upper colorbar limit
+     * \param[in] isIntegerData Whether the data represents integer values
+     * \param[in] targetTicks Target number of ticks
+     * \param[out] tick_spacing_out If non-null, receives the spacing used to generate the ticks. This is the generating spacing, not one derived from the returned values, so it remains correct when the endpoint fallback produces non-uniform ticks.
+     * \return Vector of tick values, all within [cmin, cmax]
+     */
+    static std::vector<float> generateColorbarTicks(float cmin, float cmax, bool isIntegerData, int targetTicks, double *tick_spacing_out = nullptr);
+
     /**
      * \brief Retrieves the size of the framebuffer.
      *
@@ -1395,6 +1432,16 @@ private:
     //! Height of the display window in pixels
     uint Hframebuffer;
 
+    //! Ratio of framebuffer pixels to window screen coordinates
+    /**
+     * On a high-DPI (Retina) display the framebuffer is larger than the window in screen
+     * coordinates, typically by a factor of two per axis. Content rasterized on the CPU at
+     * screen-coordinate resolution and then drawn into the framebuffer is magnified by this
+     * factor, so text glyphs must be rasterized at framebuffer resolution to appear sharp.
+     * \return Scale factor, or 1 when the framebuffer matches the window (including headless mode).
+     */
+    [[nodiscard]] float getDPIScale() const;
+
     helios::uint2 shadow_buffer_size;
 
     uint frame_counter;
@@ -1447,7 +1494,23 @@ private:
     bool isWatermarkVisible;
 
     //! UUID associated with the watermark rectangle
+    //! Add a textured rectangle whose texture alpha is blended rather than thresholded
+    /**
+     * Used for image overlays such as the watermark. The usual textured-rectangle path tests the
+     * texture's alpha against a fixed threshold, which is what produces the cutout of an
+     * alpha-masked leaf or bark texture but discards the partially-transparent edge pixels of an
+     * image that is genuinely antialiased, leaving a jagged boundary.
+     * \param[in] center (x,y,z) location of the rectangle center
+     * \param[in] size Width and height of the rectangle
+     * \param[in] rotation Spherical rotation angle
+     * \param[in] texture_file Path to the image file
+     * \param[in] coordFlag Coordinate system used for the spatial coordinates
+     * \return Unique identifier for the rectangle geometry
+     */
+    size_t addAlphaBlendedRectangleByCenter(const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const char *texture_file, CoordinateSystem coordFlag);
+
     size_t watermark_ID;
+
 
     //! Color of the window background
     helios::RGBcolor backgroundColor;
@@ -1602,6 +1665,12 @@ private:
 
     float colorbar_min;
     float colorbar_max;
+
+    //! Whether the colorbar range was set explicitly by the user
+    /**
+     * Distinguishes an explicit range from an unset one. Inferring this from `colorbar_min == 0 && colorbar_max == 0` made a legitimate setColorbarRange(0, 0) indistinguishable from "never set", so it was silently replaced by the auto-detected data range.
+     */
+    bool colorbar_range_set = false;
     std::vector<float> colorbar_ticks;
     bool colorbar_integer_data;
 
@@ -1638,7 +1707,35 @@ private:
 
     GLuint texArray = 0;
     size_t texture_array_layers = 0;
+    //! Dimensions each layer of the texture array is currently allocated at, in texels
+    /**
+     * Every layer of a texture array is the same size, so this is the size of the largest texture
+     * in the manager rather than a fixed maximum. Allocating every layer at
+     * \ref maximum_texture_size instead would give a 7x9-texel glyph a 2048x2048 RGBA8 layer, or
+     * 16 MB to store roughly 250 bytes. It is tracked here because the array is immutable once
+     * created, so a change in the required size forces the same reallocation a change in the layer
+     * count does, and because the shader's UV rescale factors are relative to it.
+     */
+    helios::uint2 texture_array_layer_size = helios::make_uint2(0, 0);
     bool textures_dirty;
+
+    //! Sampler applying linear filtering, bound only while drawing text glyphs
+    /**
+     * The texture array is shared by glyphs and image textures. Glyphs carry an antialiased
+     * coverage mask that must be interpolated to look smooth, whereas image textures are
+     * alpha-masked against a fixed threshold and are filtered with GL_NEAREST so that the
+     * resulting cutout is not shifted. A sampler object overrides the texture object's own filter
+     * state for the duration of a draw, which keeps the two cases separate.
+     */
+    GLuint glyph_sampler = 0;
+
+    //! Sampler applying linear filtering, bound only while drawing the watermark
+    /**
+     * Shares its filter settings with \ref glyph_sampler but is bound from the opaque draw path
+     * rather than the transparent one. Kept as a separate object so that the two uses can diverge
+     * without disturbing each other.
+     */
+    GLuint image_sampler = 0;
 
     helios::uint2 maximum_texture_size;
 
@@ -1724,6 +1821,14 @@ private:
 
     friend struct Shader;
     friend struct Texture;
+
+    //! Test-only accessor for private tick-generation helpers and colorbar state
+    /**
+     * Defined solely in plugins/visualizer/tests/selfTest.cpp. The tick helpers are private
+     * because they are internal implementation details rather than user-facing API, but they are
+     * pure functions that are worth unit testing directly.
+     */
+    friend class VisualizerTestHelper;
 };
 
 inline glm::vec3 glm_vec3(const helios::vec3 &v) {

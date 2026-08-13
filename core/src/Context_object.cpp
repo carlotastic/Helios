@@ -261,6 +261,266 @@ uint Context::addSphereObject(uint Ndivs, const vec3 &center, const vec3 &radius
     return currentObjectID - 1;
 }
 
+//! Reduce a requested texture repeat count so that it evenly divides the tile's subdivision count
+/**
+ * The (u,v) window assigned to each sub-patch is 1/(subdiv/repeat) of the texture image, so the repeat count must divide the subdivision count evenly for the sub-patches to tile the image. A requested count that does not
+ * is silently resized downward to the nearest divisor. Both components of the result are guaranteed to lie in [1, subdiv].
+ */
+static helios::int2 correctTextureRepeat(const helios::int2 &subdiv, const helios::int2 &texture_repeat) {
+    helios::int2 repeat = texture_repeat;
+    repeat.x = std::min(subdiv.x, repeat.x);
+    repeat.y = std::min(subdiv.y, repeat.y);
+    // Terminates because both components are >= 1 at this point and subdiv % 1 == 0.
+    while (subdiv.x % repeat.x != 0) {
+        repeat.x--;
+    }
+    while (subdiv.y % repeat.y != 0) {
+        repeat.y--;
+    }
+    return repeat;
+}
+
+//! Largest sub-patch count an adaptive tile object is permitted to generate
+/**
+ * The sub-patch count is extremely sensitive to the transition exponent: on a 50x50 m tile refined to 2 cm, an exponent of 0.25 yields roughly 9 thousand sub-patches while an exponent of 2 yields roughly 2 million.
+ * Without a limit a plausible-looking set of parameters can exhaust memory, so the count is checked before any geometry is allocated.
+ */
+static constexpr size_t adaptive_tile_max_subpatch_count = 2000000;
+
+//! Quadtree grid description used to generate the sub-patches of an adaptive tile object
+struct AdaptiveTileLayout {
+    //! Number of coarsest-level cells spanning the tile in the x- and y-directions
+    helios::int2 base_subdiv;
+    //! Maximum number of times a coarsest-level cell may be subdivided
+    int max_level;
+    //! Dimensions of a coarsest-level cell
+    helios::vec2 base_cell_size;
+    //! Refinement target, in tile-local coordinates relative to the tile center
+    helios::vec2 target;
+    //! Largest closest-point distance from the target to any coarsest-level cell
+    float r_edge;
+    //! Exponent controlling how rapidly sub-patch size grows with distance from the target
+    float transition_exponent;
+};
+
+//! One leaf cell of an adaptive tile quadtree, described purely by integer indices
+/**
+ * Cell geometry is always recovered from these indices against a fixed base cell size, never by accumulating offsets from a parent cell. This is what guarantees that the leaves exactly partition the tile: a shared
+ * edge between two cells is evaluated from the same expression on both sides, so it comes out bitwise identical and no gap or overlap can open up.
+ */
+struct AdaptiveTileCell {
+    //! Index in the x-direction of the coarsest-level cell containing this cell
+    int base_i;
+    //! Index in the y-direction of the coarsest-level cell containing this cell
+    int base_j;
+    //! Index in the x-direction of this cell within its coarsest-level cell, in the range 0 to 2^level-1
+    uint local_i;
+    //! Index in the y-direction of this cell within its coarsest-level cell, in the range 0 to 2^level-1
+    uint local_j;
+    //! Number of times the coarsest-level cell has been subdivided to reach this cell
+    int level;
+};
+
+//! Get the tile-local bounds of an adaptive tile quadtree cell
+static void getAdaptiveTileCellBounds(const AdaptiveTileLayout &layout, const helios::vec2 &size, const AdaptiveTileCell &cell, float &x0, float &y0, float &dx, float &dy) {
+    const float inv = 1.f / float(1u << cell.level);
+    dx = layout.base_cell_size.x * inv;
+    dy = layout.base_cell_size.y * inv;
+    x0 = -0.5f * size.x + (float(cell.base_i) + float(cell.local_i) * inv) * layout.base_cell_size.x;
+    y0 = -0.5f * size.y + (float(cell.base_j) + float(cell.local_j) * inv) * layout.base_cell_size.y;
+}
+
+//! Get the distance from a point to the closest point of an axis-aligned rectangle, which is zero when the point lies inside it
+/**
+ * Refinement is driven by the distance to the closest point of a cell rather than to its center. Using the center would bias refinement toward whichever side of the target the cell centers happen to fall on, making
+ * the fine region asymmetric about the target; the closest-point distance makes it radially symmetric.
+ */
+static float adaptiveTileCellDistance(const helios::vec2 &target, float x0, float y0, float dx, float dy) {
+    const float closest_x = std::min(std::max(target.x, x0), x0 + dx);
+    const float closest_y = std::min(std::max(target.y, y0), y0 + dy);
+    return std::hypot(target.x - closest_x, target.y - closest_y);
+}
+
+//! Determine the quadtree grid that best approximates a requested adaptive tile sub-patch size range
+/**
+ * The maximum refinement level is the base-2 logarithm of the requested size ratio, and the base cell size is the geometric mean of the requested maximum and of the requested minimum scaled back up by that many
+ * levels. Taking the geometric mean balances the resulting relative error between the two ends of the range rather than making one end exact and the other arbitrarily wrong.
+ */
+static AdaptiveTileLayout computeAdaptiveTileLayout(const helios::vec2 &size, const helios::AdaptiveTileRefinement &refinement, const helios::int2 &texture_repeat) {
+    AdaptiveTileLayout layout;
+
+    layout.target = refinement.target;
+    layout.transition_exponent = refinement.transition_exponent;
+    layout.max_level = std::max(0, static_cast<int>(std::lround(std::log2(refinement.subpatch_size_max / refinement.subpatch_size_min))));
+
+    const float base_size_target = std::sqrt(refinement.subpatch_size_max * refinement.subpatch_size_min * std::exp2(float(layout.max_level)));
+    layout.base_subdiv.x = std::max(1, static_cast<int>(std::lround(size.x / base_size_target)));
+    layout.base_subdiv.y = std::max(1, static_cast<int>(std::lround(size.y / base_size_target)));
+
+    if (texture_repeat.x > layout.base_subdiv.x || texture_repeat.y > layout.base_subdiv.y) {
+        // Honoring such a repeat count is possible, but only by inflating the coarsest-level grid well past what the
+        // requested sub-patch size range asks for, since the grid must be snapped to a whole number of repeats below.
+        // Rejecting it is better than silently abandoning the requested size range.
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The requested texture repeat count of " + std::to_string(texture_repeat.x) + "x" + std::to_string(texture_repeat.y) +
+                             " exceeds the number of coarsest-level cells spanning the tile (" + std::to_string(layout.base_subdiv.x) + "x" + std::to_string(layout.base_subdiv.y) +
+                             "), so honoring it would require a coarsest-level grid much finer than the requested subpatch_size_max. Reduce the texture repeat count, increase the tile size, or decrease "
+                             "subpatch_size_max.");
+    }
+
+    // Snap the base grid to a whole number of texture repeats. Every texture repeat boundary then coincides with a boundary between coarsest-level cells, and since quadtree children only ever subdivide within their
+    // own coarsest-level cell, no sub-patch can straddle one. Snapping the grid rather than reducing the repeat count (as addTileObject does) honors the requested count exactly, at the cost of perturbing the achieved
+    // sub-patch sizes by at most one repeat period. The grid is a derived quantity the user cannot see, so silently degrading their requested repeat count against it would be surprising.
+    if (texture_repeat.x > 1) {
+        layout.base_subdiv.x = texture_repeat.x * std::max(1, static_cast<int>(std::lround(float(layout.base_subdiv.x) / float(texture_repeat.x))));
+    }
+    if (texture_repeat.y > 1) {
+        layout.base_subdiv.y = texture_repeat.y * std::max(1, static_cast<int>(std::lround(float(layout.base_subdiv.y) / float(texture_repeat.y))));
+    }
+
+    // Every coarsest-level cell yields at least one sub-patch, so the grid is a lower bound on the final sub-patch
+    // count and can be rejected here. Leaving this to the traversal's own limit would apply it far too late: the grid
+    // is materialized in full before any subdivision happens, so a domain large relative to subpatch_size_max would
+    // first spend hundreds of megabytes — gigabytes, for a multi-kilometer domain — building a grid whose only purpose
+    // is to be rejected, turning what should be a clean error into an out-of-memory crash.
+    const size_t base_cell_count = size_t(layout.base_subdiv.x) * size_t(layout.base_subdiv.y);
+    if (base_cell_count >= adaptive_tile_max_subpatch_count) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The coarsest-level grid alone would contain " + std::to_string(base_cell_count) + " cells, which already exceeds the maximum of " +
+                             std::to_string(adaptive_tile_max_subpatch_count) + " sub-patches. Increase subpatch_size_max or decrease the tile size.");
+    }
+
+    layout.base_cell_size = helios::make_vec2(size.x / float(layout.base_subdiv.x), size.y / float(layout.base_subdiv.y));
+
+    // The transition is normalized by the largest closest-point distance attainable over the coarsest-level cells, NOT by the distance to the farthest tile corner. The cell owning that corner has its closest point at
+    // its inner corner, which is nearer than the corner itself by roughly one cell diagonal, so normalizing by the corner distance would leave every cell short of the far end of the transition and force all of them to
+    // subdivide at least once. That pins the achieved maximum sub-patch size at half of the requested one.
+    layout.r_edge = 0.f;
+    for (int j = 0; j < layout.base_subdiv.y; j++) {
+        for (int i = 0; i < layout.base_subdiv.x; i++) {
+            const float x0 = -0.5f * size.x + float(i) * layout.base_cell_size.x;
+            const float y0 = -0.5f * size.y + float(j) * layout.base_cell_size.y;
+            layout.r_edge = std::max(layout.r_edge, adaptiveTileCellDistance(layout.target, x0, y0, layout.base_cell_size.x, layout.base_cell_size.y));
+        }
+    }
+
+    // Only possible when the base grid is a single cell containing the target, in which case there is no distance over which to transition.
+    if (layout.r_edge <= 0.f) {
+        layout.max_level = 0;
+    }
+
+    return layout;
+}
+
+//! Walk the adaptive tile quadtree and collect its leaf cells
+/**
+ * A cell is subdivided while its refinement level is below the level desired at its own distance from the target. The desired level is expressed directly in level space rather than as a desired sub-patch size, so that
+ * the two ends of the transition land exactly on the coarsest and finest levels the grid can actually represent. Expressing it as a size instead would compare against a base cell size that, after rounding the grid to
+ * a whole number of cells, may be slightly larger than the requested maximum, which would again force every cell to subdivide once.
+ * \param[in] layout Quadtree grid description.
+ * \param[in] size Size of the tile in the x- and y-directions.
+ * \param[out] cells_out Leaf cells in traversal order, or null to count them without storing them.
+ * \param[in] count_limit Traversal stops once this many leaf cells have been found.
+ * \return Number of leaf cells, saturating at count_limit.
+ */
+static size_t traverseAdaptiveTileCells(const AdaptiveTileLayout &layout, const helios::vec2 &size, std::vector<AdaptiveTileCell> *cells_out, size_t count_limit) {
+    std::vector<AdaptiveTileCell> stack;
+    stack.reserve(size_t(layout.base_subdiv.x) * size_t(layout.base_subdiv.y) + 3 * size_t(layout.max_level) + 4);
+
+    // Pushed in reverse so that the coarsest-level cells pop in row-major order.
+    for (int j = layout.base_subdiv.y - 1; j >= 0; j--) {
+        for (int i = layout.base_subdiv.x - 1; i >= 0; i--) {
+            stack.push_back({i, j, 0, 0, 0});
+        }
+    }
+
+    size_t cell_count = 0;
+    while (!stack.empty()) {
+        const AdaptiveTileCell cell = stack.back();
+        stack.pop_back();
+
+        float x0, y0, dx, dy;
+        getAdaptiveTileCellBounds(layout, size, cell, x0, y0, dx, dy);
+
+        const float distance = adaptiveTileCellDistance(layout.target, x0, y0, dx, dy);
+        const float normalized_distance = (layout.r_edge > 0.f) ? std::min(distance / layout.r_edge, 1.f) : 1.f;
+        const float level_desired = float(layout.max_level) * (1.f - std::pow(normalized_distance, layout.transition_exponent));
+
+        if (cell.level < layout.max_level && float(cell.level) < level_desired) {
+            // Pushed in reverse so that the children pop in the order (0,0), (1,0), (0,1), (1,1).
+            for (int k = 3; k >= 0; k--) {
+                stack.push_back({cell.base_i, cell.base_j, 2 * cell.local_i + uint(k & 1), 2 * cell.local_j + uint(k >> 1), cell.level + 1});
+            }
+            continue;
+        }
+
+        if (cells_out != nullptr) {
+            cells_out->push_back(cell);
+        }
+        cell_count++;
+        if (cell_count >= count_limit) {
+            break;
+        }
+    }
+
+    return cell_count;
+}
+
+//! Get the achieved minimum and maximum sub-patch edge length of a set of adaptive tile quadtree leaf cells
+/**
+ * Sub-patch size is taken as the longer of the two cell edges. The base grid rounds independently in each direction, so cells are square only when the tile dimensions happen to divide evenly; taking the longer edge
+ * guarantees that both edges of every sub-patch are no larger than the reported size.
+ */
+static helios::vec2 getAdaptiveTileSubpatchSizeRange(const AdaptiveTileLayout &layout, const std::vector<AdaptiveTileCell> &cells) {
+    int level_min = layout.max_level;
+    int level_max = 0;
+    for (const AdaptiveTileCell &cell: cells) {
+        level_min = std::min(level_min, cell.level);
+        level_max = std::max(level_max, cell.level);
+    }
+
+    const float base_size = std::max(layout.base_cell_size.x, layout.base_cell_size.y);
+    return helios::make_vec2(base_size / float(1u << level_max), base_size / float(1u << level_min));
+}
+
+//! Check that the requested adaptive tile refinement parameters are usable, and raise an error explaining how to fix them if they are not
+static void validateAdaptiveTileRefinement(const helios::vec2 &size, const helios::AdaptiveTileRefinement &refinement) {
+    if (size.x <= 0.f || size.y <= 0.f) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Size of tile must be greater than 0.");
+    } else if (!std::isfinite(refinement.target.x) || !std::isfinite(refinement.target.y)) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Refinement target must be finite.");
+    } else if (refinement.subpatch_size_min <= 0.f || !std::isfinite(refinement.subpatch_size_min)) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Minimum sub-patch size must be greater than 0.");
+    } else if (refinement.subpatch_size_max <= 0.f || !std::isfinite(refinement.subpatch_size_max)) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Maximum sub-patch size must be greater than 0.");
+    } else if (refinement.subpatch_size_min > refinement.subpatch_size_max) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Minimum sub-patch size of " + std::to_string(refinement.subpatch_size_min) + " is greater than the maximum sub-patch size of " +
+                             std::to_string(refinement.subpatch_size_max) + ".");
+    } else if (refinement.transition_exponent <= 0.f || !std::isfinite(refinement.transition_exponent)) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Transition exponent must be greater than 0.");
+    } else if (refinement.subpatch_size_max / refinement.subpatch_size_min > 16777216.f) {
+        // Bounds the refinement level, and with it the shift used to index cells within a coarsest-level cell. The
+        // sub-patch count limit does not cover this on its own: reaching a very deep level costs only a few cells per
+        // level, so a chain deep enough to overflow the shift stays well under that limit.
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The ratio of maximum to minimum sub-patch size is " + std::to_string(refinement.subpatch_size_max / refinement.subpatch_size_min) +
+                             ", which exceeds the largest supported ratio of 16777216. Increase subpatch_size_min or decrease subpatch_size_max.");
+    } else if (std::min(size.x, size.y) < 2.f * refinement.subpatch_size_max) {
+        // Below this the base grid rounds to a single cell in one direction and the sizing heuristic breaks down: both ends of the requested range are then missed in the same direction, by as much as 60%.
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Maximum sub-patch size of " + std::to_string(refinement.subpatch_size_max) + " is too large for a tile of size " + std::to_string(size.x) + "x" +
+                             std::to_string(size.y) + ". It must be no more than half of the smaller tile dimension.");
+    }
+}
+
+//! Warn when an adaptive tile refinement target lies off the tile, since the finest requested sub-patch size will then not be reached anywhere
+/**
+ * This is a legal configuration rather than an error: refinement simply grades from whatever level the nearest corner of the tile reaches down to the coarsest, which is a reasonable thing to ask for when the object of
+ * interest sits just outside the ground plane. It is worth warning about because the requested minimum sub-patch size is silently not achieved.
+ */
+static void warnIfAdaptiveTileTargetIsOutsideTile(const helios::vec2 &size, const helios::AdaptiveTileRefinement &refinement) {
+    if (std::fabs(refinement.target.x) > 0.5f * size.x || std::fabs(refinement.target.y) > 0.5f * size.y) {
+        std::cerr << "WARNING (Context::addAdaptiveTileObject): Refinement target (" << refinement.target.x << ", " << refinement.target.y << ") lies outside a tile of size " << size.x << "x" << size.y
+                  << ". The requested minimum sub-patch size of " << refinement.subpatch_size_min << " will not be reached anywhere on the tile." << std::endl;
+    }
+}
+
 uint Context::addTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const int2 &subdiv) {
     RGBcolor color(0.f, 0.75f, 0.f); // Default color is green
 
@@ -297,7 +557,7 @@ uint Context::addTileObject(const vec3 &center, const vec2 &size, const Spherica
         }
     }
 
-    auto *tile_new = (new Tile(currentObjectID, UUID, subdiv, "", this));
+    auto *tile_new = (new Tile(currentObjectID, UUID, subdiv, "", make_int2(1, 1), this));
 
     float T[16], S[16], R[16];
 
@@ -347,15 +607,7 @@ uint Context::addTileObject(const vec3 &center, const vec2 &size, const Spherica
     }
 
     // Automatically resize the repeat count so that it evenly divides the subdivisions.
-    int2 repeat = texture_repeat;
-    repeat.x = std::min(subdiv.x, repeat.x);
-    repeat.y = std::min(subdiv.y, repeat.y);
-    while (subdiv.x % repeat.x != 0) {
-        repeat.x--;
-    }
-    while (subdiv.y % repeat.y != 0) {
-        repeat.y--;
-    }
+    int2 repeat = correctTextureRepeat(subdiv, texture_repeat);
 
     std::vector<uint> UUID;
     UUID.reserve(subdiv.x * subdiv.y);
@@ -432,7 +684,11 @@ uint Context::addTileObject(const vec3 &center, const vec2 &size, const Spherica
         }
     }
 
-    auto *tile_new = (new Tile(currentObjectID, UUID, subdiv, texturefile, this));
+    // Store the repeat that was requested, not the corrected local `repeat`. The correction is a function of the
+    // subdivision count, so re-deriving it whenever the subdivisions change preserves the user's intent; storing
+    // the corrected value instead would let the repeat decay monotonically across successive calls to
+    // setTileObjectSubdivisionCount() and never recover.
+    auto *tile_new = (new Tile(currentObjectID, UUID, subdiv, texturefile, texture_repeat, this));
 
     float T[16], S[16], R[16];
 
@@ -460,6 +716,270 @@ uint Context::addTileObject(const vec3 &center, const vec2 &size, const Spherica
     objects[currentObjectID] = tile_new;
     currentObjectID++;
     return currentObjectID - 1;
+}
+
+uint Context::addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement) {
+    RGBcolor color(0.f, 0.75f, 0.f); // Default color is green
+
+    return addAdaptiveTileObject(center, size, rotation, refinement, color);
+}
+
+uint Context::addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const RGBcolor &color) {
+    validateAdaptiveTileRefinement(size, refinement);
+
+    const AdaptiveTileLayout layout = computeAdaptiveTileLayout(size, refinement, make_int2(1, 1));
+
+    std::vector<AdaptiveTileCell> cells;
+    if (traverseAdaptiveTileCells(layout, size, &cells, adaptive_tile_max_subpatch_count) >= adaptive_tile_max_subpatch_count) {
+        cells.clear();
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The requested refinement would generate at least " + std::to_string(adaptive_tile_max_subpatch_count) +
+                             " sub-patches. Decrease transition_exponent (values below 1 reduce the count sharply), increase subpatch_size_min, or decrease the tile size.");
+    }
+
+    warnIfAdaptiveTileTargetIsOutsideTile(size, refinement);
+
+    std::vector<uint> UUID;
+    UUID.reserve(cells.size());
+
+    for (const AdaptiveTileCell &cell: cells) {
+        float x0, y0, dx, dy;
+        getAdaptiveTileCellBounds(layout, size, cell, x0, y0, dx, dy);
+
+        vec3 subcenter = make_vec3(x0 + 0.5f * dx, y0 + 0.5f * dy, 0.f);
+
+        UUID.push_back(addPatch(subcenter, make_vec2(dx, dy), make_SphericalCoord(0, 0), color));
+
+        if (rotation.elevation != 0.f) {
+            getPrimitivePointer_private(UUID.back())->rotate(-rotation.elevation, "x");
+        }
+        if (rotation.azimuth != 0.f) {
+            getPrimitivePointer_private(UUID.back())->rotate(-rotation.azimuth, "z");
+        }
+        getPrimitivePointer_private(UUID.back())->translate(center);
+    }
+
+    auto *tile_new = (new AdaptiveTile(currentObjectID, UUID, refinement, layout.base_subdiv, uint(layout.max_level), getAdaptiveTileSubpatchSizeRange(layout, cells), "", make_int2(1, 1), this));
+
+    float T[16], S[16], R[16];
+
+    float transform[16];
+    tile_new->getTransformationMatrix(transform);
+
+    makeScaleMatrix(make_vec3(size.x, size.y, 1.f), S);
+    matmult(S, transform, transform);
+
+    makeRotationMatrix(-rotation.elevation, "x", R);
+    matmult(R, transform, transform);
+    makeRotationMatrix(-rotation.azimuth, "z", R);
+    matmult(R, transform, transform);
+
+    makeTranslationMatrix(center, T);
+    matmult(T, transform, transform);
+    tile_new->setTransformationMatrix(transform);
+
+    tile_new->setColor(color);
+
+    for (uint p: UUID) {
+        getPrimitivePointer_private(p)->setParentObjectID(currentObjectID);
+    }
+
+    tile_new->object_origin = center;
+
+    objects[currentObjectID] = tile_new;
+    currentObjectID++;
+    return currentObjectID - 1;
+}
+
+uint Context::addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const char *texturefile) {
+    return addAdaptiveTileObject(center, size, rotation, refinement, texturefile, make_int2(1, 1));
+}
+
+uint Context::addAdaptiveTileObject(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const AdaptiveTileRefinement &refinement, const char *texturefile, const int2 &texture_repeat) {
+    if (!validateTextureFileExtenstion(texturefile)) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Texture file " + std::string(texturefile) + " is not PNG or JPEG format.");
+    } else if (!doesTextureFileExist(texturefile)) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Texture file " + std::string(texturefile) + " does not exist.");
+    } else if (texture_repeat.x < 1 || texture_repeat.y < 1) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Number of texture repeats must be greater than 0.");
+    }
+
+    validateAdaptiveTileRefinement(size, refinement);
+
+    const AdaptiveTileLayout layout = computeAdaptiveTileLayout(size, refinement, texture_repeat);
+
+    // Number of finest-level cells spanning a single repeat of the texture image. The (u,v) window of a sub-patch is a whole number of these, so this is also the denominator of every texture coordinate the tile
+    // produces. Beyond 2^24 a float can no longer represent consecutive integers, at which point adjacent sub-patches would start sharing texture coordinates.
+    // Deliberately long long rather than long: long is 32 bits on Windows, where the shift below would overflow before
+    // the comparison could catch it, silently defeating the guard it exists to enforce.
+    const long long finest_per_repeat_x = static_cast<long long>(layout.base_subdiv.x / texture_repeat.x) << layout.max_level;
+    const long long finest_per_repeat_y = static_cast<long long>(layout.base_subdiv.y / texture_repeat.y) << layout.max_level;
+    if (finest_per_repeat_x > 16777216LL || finest_per_repeat_y > 16777216LL) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The requested refinement subdivides a single texture repeat into more sub-patches than can be assigned distinct texture coordinates. Increase "
+                             "subpatch_size_min or decrease the texture repeat count.");
+    }
+
+    addTexture(texturefile);
+
+    const int2 &sz = textures.at(texturefile).getImageResolution();
+    if (finest_per_repeat_x >= sz.x || finest_per_repeat_y >= sz.y) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The resolution of the texture image '" + std::string(texturefile) + "' (" + std::to_string(sz.x) + "x" + std::to_string(sz.y) +
+                             ") is lower than the finest adaptive sub-patch resolution of " + std::to_string(finest_per_repeat_x) + "x" + std::to_string(finest_per_repeat_y) +
+                             " sub-patches per texture repeat. Increase the resolution of the texture image, increase subpatch_size_min, or decrease the texture repeat count.");
+    }
+
+    std::vector<AdaptiveTileCell> cells;
+    if (traverseAdaptiveTileCells(layout, size, &cells, adaptive_tile_max_subpatch_count) >= adaptive_tile_max_subpatch_count) {
+        cells.clear();
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): The requested refinement would generate at least " + std::to_string(adaptive_tile_max_subpatch_count) +
+                             " sub-patches. Decrease transition_exponent (values below 1 reduce the count sharply), increase subpatch_size_min, or decrease the tile size.");
+    }
+
+    warnIfAdaptiveTileTargetIsOutsideTile(size, refinement);
+
+    // Each sub-patch is assigned its own (u,v) window of the texture image, so unlike a uniform tile there is no small set of windows to reuse. Every window therefore misses the solid-fraction cache and the texture
+    // mask has to be evaluated from scratch. Opaque images short-circuit that evaluation, but an image with an alpha channel does not.
+    if (cells.size() > 10000 && textures.at(texturefile).hasTransparencyChannel()) {
+        std::cerr << "WARNING (Context::addAdaptiveTileObject): Texture file " << texturefile << " has a transparency channel, and this adaptive tile has " << cells.size()
+                  << " sub-patches each requiring its own texture mask evaluation. This may take a long time. Consider using an opaque texture image for large adaptive tiles." << std::endl;
+    }
+
+    const int2 base_per_repeat = make_int2(layout.base_subdiv.x / texture_repeat.x, layout.base_subdiv.y / texture_repeat.y);
+
+    std::vector<uint> UUID;
+    UUID.reserve(cells.size());
+
+    std::vector<helios::vec2> uv(4);
+
+    for (const AdaptiveTileCell &cell: cells) {
+        float x0, y0, dx, dy;
+        getAdaptiveTileCellBounds(layout, size, cell, x0, y0, dx, dy);
+
+        vec3 subcenter = make_vec3(x0 + 0.5f * dx, y0 + 0.5f * dy, 0.f);
+
+        // Texture coordinates are built from exact integers and divided once, rather than multiplied by a precomputed reciprocal. A reciprocal multiply does not always reproduce the quotient exactly, which would leave
+        // the shared edge between two neighboring sub-patches with two slightly different texture coordinates.
+        const uint cells_per_repeat_x = uint(base_per_repeat.x) << cell.level;
+        const uint cells_per_repeat_y = uint(base_per_repeat.y) << cell.level;
+        const uint index_x = uint(cell.base_i % base_per_repeat.x) * (1u << cell.level) + cell.local_i;
+        const uint index_y = uint(cell.base_j % base_per_repeat.y) * (1u << cell.level) + cell.local_j;
+
+        const float u0 = float(index_x) / float(cells_per_repeat_x);
+        const float u1 = float(index_x + 1) / float(cells_per_repeat_x);
+        const float v0 = float(index_y) / float(cells_per_repeat_y);
+        const float v1 = float(index_y + 1) / float(cells_per_repeat_y);
+
+        uv.at(0) = make_vec2(u0, v0);
+        uv.at(1) = make_vec2(u1, v0);
+        uv.at(2) = make_vec2(u1, v1);
+        uv.at(3) = make_vec2(u0, v1);
+
+        auto *patch_new = (new Patch(texturefile, uv, textures, 0, currentUUID));
+
+        patch_new->scale(make_vec3(dx, dy, 1));
+
+        patch_new->translate(subcenter);
+
+        if (rotation.elevation != 0) {
+            patch_new->rotate(-rotation.elevation, "x");
+        }
+        if (rotation.azimuth != 0) {
+            patch_new->rotate(-rotation.azimuth, "z");
+        }
+
+        patch_new->translate(center);
+
+        primitives[currentUUID] = patch_new;
+
+        // Set context pointer
+        patch_new->context_ptr = this;
+
+        // Create or reuse material with de-duplication
+        std::string mat_label = generateMaterialLabel(make_RGBAcolor(0, 0, 0, 1), texturefile, false);
+        if (!doesMaterialExist(mat_label)) {
+            patch_new->materialID = addMaterial_internal(mat_label, make_RGBAcolor(0, 0, 0, 1), texturefile);
+        } else {
+            patch_new->materialID = getMaterialIDFromLabel(mat_label);
+        }
+        // Increment material reference count
+        materials[patch_new->materialID].reference_count++;
+
+        currentUUID++;
+        UUID.push_back(currentUUID - 1);
+    }
+
+    auto *tile_new = (new AdaptiveTile(currentObjectID, UUID, refinement, layout.base_subdiv, uint(layout.max_level), getAdaptiveTileSubpatchSizeRange(layout, cells), texturefile, texture_repeat, this));
+
+    float T[16], S[16], R[16];
+
+    float transform[16];
+    tile_new->getTransformationMatrix(transform);
+
+    makeScaleMatrix(make_vec3(size.x, size.y, 1.f), S);
+    matmult(S, transform, transform);
+
+    makeRotationMatrix(-rotation.elevation, "x", R);
+    matmult(R, transform, transform);
+    makeRotationMatrix(-rotation.azimuth, "z", R);
+    matmult(R, transform, transform);
+
+    makeTranslationMatrix(center, T);
+    matmult(T, transform, transform);
+    tile_new->setTransformationMatrix(transform);
+
+    for (uint p: UUID) {
+        getPrimitivePointer_private(p)->setParentObjectID(currentObjectID);
+    }
+
+    tile_new->object_origin = center;
+
+    objects[currentObjectID] = tile_new;
+    currentObjectID++;
+    return currentObjectID - 1;
+}
+
+uint Context::addAdaptiveTileObject_fromPrimitives(const std::vector<uint> &UUIDs, const AdaptiveTileRefinement &refinement, const int2 &base_subdiv, uint max_level, const vec2 &subpatch_size_range,
+                                                   const char *texturefile, const int2 &texture_repeat) {
+    if (UUIDs.empty()) {
+        helios_runtime_error("ERROR (Context::addAdaptiveTileObject): Cannot build an adaptive tile object from an empty set of primitives.");
+    }
+
+    auto *tile_new = (new AdaptiveTile(currentObjectID, UUIDs, refinement, base_subdiv, max_level, subpatch_size_range, texturefile, texture_repeat, this));
+
+    for (uint p: UUIDs) {
+        getPrimitivePointer_private(p)->setParentObjectID(currentObjectID);
+    }
+
+    objects[currentObjectID] = tile_new;
+    currentObjectID++;
+
+    // Recovered from the adopted primitives rather than left at the origin, so that rotateObject() and
+    // scaleObjectAboutPoint() act about the tile's own center after a reload as they do before one.
+    uint objID = currentObjectID - 1;
+    tile_new->object_origin = getObjectCenter(objID);
+
+    return objID;
+}
+
+size_t Context::predictAdaptiveTileObjectSubpatchCount(const vec2 &size, const AdaptiveTileRefinement &refinement, const int2 &texture_repeat) const {
+    validateAdaptiveTileRefinement(size, refinement);
+
+    if (texture_repeat.x < 1 || texture_repeat.y < 1) {
+        helios_runtime_error("ERROR (Context::predictAdaptiveTileObjectSubpatchCount): Number of texture repeats must be greater than 0.");
+    }
+
+    const AdaptiveTileLayout layout = computeAdaptiveTileLayout(size, refinement, texture_repeat);
+
+    const size_t cell_count = traverseAdaptiveTileCells(layout, size, nullptr, adaptive_tile_max_subpatch_count);
+
+    // Reporting the limit itself as though it were the true count would say that a refinement is viable when building
+    // it is going to be rejected, which defeats the purpose of asking in advance. Raise the same error the builder
+    // would instead, so that both answer the question the same way.
+    if (cell_count >= adaptive_tile_max_subpatch_count) {
+        helios_runtime_error("ERROR (Context::predictAdaptiveTileObjectSubpatchCount): The requested refinement would generate at least " + std::to_string(adaptive_tile_max_subpatch_count) +
+                             " sub-patches. Decrease transition_exponent (values below 1 reduce the count sharply), increase subpatch_size_min, or decrease the tile size.");
+    }
+
+    return cell_count;
 }
 
 uint Context::addTubeObject(uint radial_subdivisions, const std::vector<vec3> &nodes, const std::vector<float> &radius) {
@@ -1754,13 +2274,14 @@ bool CompoundObject::arePrimitivesComplete() const {
 
 // ============== TILE CLASS METHOD DEFINITIONS ==============
 
-Tile::Tile(uint a_OID, const std::vector<uint> &a_UUIDs, const int2 &a_subdiv, const char *a_texturefile, helios::Context *a_context) {
+Tile::Tile(uint a_OID, const std::vector<uint> &a_UUIDs, const int2 &a_subdiv, const char *a_texturefile, const int2 &a_texture_repeat, helios::Context *a_context) {
     makeIdentityMatrix(transform);
 
     OID = a_OID;
     type = helios::OBJECT_TYPE_TILE;
     UUIDs = a_UUIDs;
     subdiv = a_subdiv;
+    texture_repeat = a_texture_repeat;
     texturefile = a_texturefile;
     context = a_context;
 }
@@ -1793,6 +2314,14 @@ helios::int2 Tile::getSubdivisionCount() const {
 
 void Tile::setSubdivisionCount(const helios::int2 &a_subdiv) {
     subdiv = a_subdiv;
+}
+
+helios::int2 Tile::getTextureRepeat() const {
+    return texture_repeat;
+}
+
+helios::int2 Tile::getEffectiveTextureRepeat() const {
+    return correctTextureRepeat(subdiv, texture_repeat);
 }
 
 
@@ -1828,6 +2357,92 @@ vec3 Tile::getNormal() const {
 
 std::vector<helios::vec2> Tile::getTextureUV() const {
     return {make_vec2(0, 0), make_vec2(1, 0), make_vec2(1, 1), make_vec2(0, 1)};
+}
+
+// ============== ADAPTIVE TILE CLASS METHOD DEFINITIONS ==============
+
+AdaptiveTile::AdaptiveTile(uint a_OID, const std::vector<uint> &a_UUIDs, const AdaptiveTileRefinement &a_refinement, const helios::int2 &a_base_subdiv, uint a_max_level, const helios::vec2 &a_subpatch_size_range,
+                           const char *a_texturefile, const helios::int2 &a_texture_repeat, helios::Context *a_context) {
+    makeIdentityMatrix(transform);
+
+    OID = a_OID;
+    type = helios::OBJECT_TYPE_ADAPTIVE_TILE;
+    UUIDs = a_UUIDs;
+    refinement = a_refinement;
+    base_subdiv = a_base_subdiv;
+    max_level = a_max_level;
+    subpatch_size_range = a_subpatch_size_range;
+    texture_repeat = a_texture_repeat;
+    texturefile = a_texturefile;
+    context = a_context;
+}
+
+helios::vec2 AdaptiveTile::getSize() const {
+    const std::vector<vec3> &vertices = getVertices();
+    float l = (vertices.at(1) - vertices.at(0)).magnitude();
+    float w = (vertices.at(3) - vertices.at(0)).magnitude();
+    return make_vec2(l, w);
+}
+
+vec3 AdaptiveTile::getCenter() const {
+    vec3 center;
+    vec3 Y;
+    Y.x = 0.f;
+    Y.y = 0.f;
+    Y.z = 0.f;
+
+    center.x = transform[0] * Y.x + transform[1] * Y.y + transform[2] * Y.z + transform[3];
+    center.y = transform[4] * Y.x + transform[5] * Y.y + transform[6] * Y.z + transform[7];
+    center.z = transform[8] * Y.x + transform[9] * Y.y + transform[10] * Y.z + transform[11];
+
+    return center;
+}
+
+std::vector<helios::vec3> AdaptiveTile::getVertices() const {
+    std::vector<helios::vec3> vertices;
+    vertices.resize(4);
+
+    vec3 Y[4];
+    Y[0] = make_vec3(-0.5f, -0.5f, 0.f);
+    Y[1] = make_vec3(0.5f, -0.5f, 0.f);
+    Y[2] = make_vec3(0.5f, 0.5f, 0.f);
+    Y[3] = make_vec3(-0.5f, 0.5f, 0.f);
+
+    for (int i = 0; i < 4; i++) {
+        vertices[i].x = transform[0] * Y[i].x + transform[1] * Y[i].y + transform[2] * Y[i].z + transform[3];
+        vertices[i].y = transform[4] * Y[i].x + transform[5] * Y[i].y + transform[6] * Y[i].z + transform[7];
+        vertices[i].z = transform[8] * Y[i].x + transform[9] * Y[i].y + transform[10] * Y[i].z + transform[11];
+    }
+
+    return vertices;
+}
+
+vec3 AdaptiveTile::getNormal() const {
+    return context->getPrimitiveNormal(UUIDs.front());
+}
+
+std::vector<helios::vec2> AdaptiveTile::getTextureUV() const {
+    return {make_vec2(0, 0), make_vec2(1, 0), make_vec2(1, 1), make_vec2(0, 1)};
+}
+
+AdaptiveTileRefinement AdaptiveTile::getRefinement() const {
+    return refinement;
+}
+
+helios::int2 AdaptiveTile::getBaseSubdivisionCount() const {
+    return base_subdiv;
+}
+
+uint AdaptiveTile::getMaxRefinementLevel() const {
+    return max_level;
+}
+
+helios::vec2 AdaptiveTile::getSubpatchSizeRange() const {
+    return subpatch_size_range;
+}
+
+helios::int2 AdaptiveTile::getTextureRepeat() const {
+    return texture_repeat;
 }
 
 // ============== SPHERE CLASS METHOD DEFINITIONS ==============

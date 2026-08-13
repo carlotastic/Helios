@@ -394,9 +394,21 @@ void Visualizer::getWindowPixelsRGB(uint *buffer) const {
 
     glFinish();
 
-    for (int i = 0; i < 3 * Wframebuffer * Hframebuffer; i++) {
+    for (size_t i = 0; i < size_t(3) * size_t(Wframebuffer) * size_t(Hframebuffer); i++) {
         buffer[i] = (unsigned int) buff[i];
     }
+}
+
+void Visualizer::getWindowPixelsRGB(std::vector<uint> &pixel_data, uint &width_pixels, uint &height_pixels) const {
+    width_pixels = Wframebuffer;
+    height_pixels = Hframebuffer;
+
+    // Sizing the buffer here rather than trusting the caller removes the opportunity to undersize
+    // it: the framebuffer is larger than the requested window on a high-DPI display, so a buffer
+    // sized from the window dimensions is too small by the square of the DPI scale factor.
+    pixel_data.resize(size_t(3) * size_t(Wframebuffer) * size_t(Hframebuffer));
+
+    getWindowPixelsRGB(pixel_data.data());
 }
 
 void Visualizer::getDepthMap(float *buffer) {
@@ -659,6 +671,19 @@ std::vector<helios::vec3> Visualizer::plotInteractive() {
 
 void Visualizer::plotOnce(bool getKeystrokes) {
 
+    // plotOnce() is the body of plotInteractive()'s render loop, exposed so an external loop (e.g.
+    // ProjectBuilder's ImGui frame) can drive rendering itself. plotInteractive() uploads geometry
+    // once before entering its loop; an external caller has no such preamble, so the upload has to
+    // happen here. Without it, render() draws using the CPU-side primitive counts against GPU
+    // buffers that were only glGenBuffers'd and never filled - and a freshly constructed Visualizer
+    // always has at least the gradient background rectangle queued by initialize(), so
+    // glMultiDrawArrays() fetches from a zero-byte vertex buffer and the driver faults.
+    //
+    // Unlike plotUpdate(), this deliberately does NOT call buildContextGeometry_private():
+    // plotOnce() is the cheap re-render path and must not re-walk the Context. transferBufferData()
+    // returns immediately when no geometry is dirty, so the steady-state cost is a single branch.
+    transferBufferData();
+
     bool shadow_flag = (primaryLightingModel == Visualizer::LIGHTING_PHONG_SHADOWED);
 
     if (shadow_flag) {
@@ -698,9 +723,16 @@ void Visualizer::plotOnce(bool getKeystrokes) {
 
     assert(checkerrors());
 
-    // Render to the screen
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, Wframebuffer, Hframebuffer);
+    // Render to the screen or offscreen framebuffer depending on headless mode
+    if (headless && offscreenFramebufferID != 0) {
+        // Render to offscreen framebuffer for headless mode
+        glBindFramebuffer(GL_FRAMEBUFFER, offscreenFramebufferID);
+        glViewport(0, 0, Wframebuffer, Hframebuffer);
+    } else {
+        // Render to the default framebuffer for windowed mode
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, Wframebuffer, Hframebuffer);
+    }
 
     if (background_is_transparent) {
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -751,10 +783,16 @@ void Visualizer::plotOnce(bool getKeystrokes) {
         }
     }
 
-    int width, height;
-    glfwGetFramebufferSize((GLFWwindow *) window, &width, &height);
-    Wframebuffer = width;
-    Hframebuffer = height;
+    // Only track the window's framebuffer size in windowed mode. The headless context is backed by
+    // a 1x1 dummy window (see createOffscreenContext()), so querying it here would shrink
+    // Wframebuffer/Hframebuffer to 1x1 and corrupt every subsequent getWindowPixelsRGB(),
+    // printWindow() and depth-buffer call, all of which size themselves off these members.
+    if (!headless && window != nullptr) {
+        int width, height;
+        glfwGetFramebufferSize((GLFWwindow *) window, &width, &height);
+        Wframebuffer = width;
+        Hframebuffer = height;
+    }
 }
 
 void Visualizer::transferBufferData() {
@@ -762,6 +800,14 @@ void Visualizer::transferBufferData() {
 
     const auto &dirty = geometry_handler.getDirtyUUIDs();
     if (dirty.empty()) {
+        // No geometry changed, so the buffer rewrites below would all restore identical contents -
+        // skip them. The texture array is tracked by a separate flag and texArray==0 means the array
+        // object does not exist at all, so that check must not be skipped along with them. It is
+        // repeated verbatim after the geometry upload below.
+        if (textures_dirty || texArray == 0) {
+            transferTextureData();
+            textures_dirty = false;
+        }
         return;
     }
 
@@ -908,11 +954,47 @@ void Visualizer::transferBufferData() {
 
 void Visualizer::transferTextureData() {
 
+    // Glyphs are drawn with linear filtering so that the antialiased coverage mask FreeType
+    // produces is interpolated rather than point sampled. The rest of the texture array keeps
+    // GL_NEAREST, so this is applied through a sampler object bound only for glyph draws.
+    if (glyph_sampler == 0) {
+        glGenSamplers(1, &glyph_sampler);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    // The watermark is drawn well below the resolution of its source image, and point sampling a
+    // minified image keeps one source texel per output pixel and discards the rest, which is what
+    // makes its edges look jagged. Mipmaps are deliberately not used: every texture shares a layer
+    // with the unused remainder of that layer, and glGenerateMipmap reduces the layer as a whole,
+    // so each successive level would blend a texture with the region outside it.
+    if (image_sampler == 0) {
+        glGenSamplers(1, &image_sampler);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
     const size_t layers = std::max<size_t>(1, texture_manager.size());
 
+    // Every layer of a texture array has the same dimensions, so they are sized to the largest
+    // texture present rather than to maximum_texture_size. The latter is a clamp applied to
+    // oversized images when they are loaded, not a statement about what needs to be allocated:
+    // using it here gave every glyph a 2048x2048 RGBA8 layer, so a colorbar's worth of text cost
+    // hundreds of megabytes of VRAM to store a few kilobytes of coverage masks.
+    uint2 required_layer_size = make_uint2(1, 1);
+    for (const auto &[textureID, texture]: texture_manager) {
+        required_layer_size.x = std::max(required_layer_size.x, texture.texture_resolution.x);
+        required_layer_size.y = std::max(required_layer_size.y, texture.texture_resolution.y);
+    }
+
     // Check if texture needs recreation (Windows requires deleting and recreating texture
-    // when layer count changes due to glTexStorage3D immutable format restrictions)
-    if (texArray == 0 || layers != texture_array_layers) {
+    // when layer count changes due to glTexStorage3D immutable format restrictions). The storage
+    // is immutable, so a layer that no longer fits forces the same reallocation.
+    if (texArray == 0 || layers != texture_array_layers || required_layer_size.x != texture_array_layer_size.x || required_layer_size.y != texture_array_layer_size.y) {
         // Delete existing texture if it exists
         if (texArray != 0) {
             glDeleteTextures(1, &texArray);
@@ -921,8 +1003,20 @@ void Visualizer::transferTextureData() {
         // Create new texture
         glGenTextures(1, &texArray);
         glBindTexture(GL_TEXTURE_2D_ARRAY, texArray);
-        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, maximum_texture_size.x, maximum_texture_size.y, layers);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, required_layer_size.x, required_layer_size.y, layers);
+
+        // Textures smaller than the layer occupy only its lower-left corner, and glTexStorage3D
+        // leaves the remainder undefined. Nearest-neighbour sampling never reaches those texels
+        // because the UV rescale factors stop at the texture's own edge, but a linear filter taps
+        // one texel beyond it, so the array is cleared to fully transparent first. This makes the
+        // region outside every texture well defined rather than whatever the driver left there.
+        const std::vector<unsigned char> transparent_layer(size_t(required_layer_size.x) * size_t(required_layer_size.y) * 4, 0);
+        for (size_t layer = 0; layer < layers; layer++) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, GLint(layer), required_layer_size.x, required_layer_size.y, 1, GL_RGBA, GL_UNSIGNED_BYTE, transparent_layer.data());
+        }
+
         texture_array_layers = layers;
+        texture_array_layer_size = required_layer_size;
     } else {
         glBindTexture(GL_TEXTURE_2D_ARRAY, texArray);
     }
@@ -954,8 +1048,10 @@ void Visualizer::transferTextureData() {
 
         glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, textureID, texture.texture_resolution.x, texture.texture_resolution.y, 1, externalFormat, GL_UNSIGNED_BYTE, texture.texture_data.data());
 
-        uv_rescale.at(textureID * 2 + 0) = float(texture.texture_resolution.x) / float(maximum_texture_size.x);
-        uv_rescale.at(textureID * 2 + 1) = float(texture.texture_resolution.y) / float(maximum_texture_size.y);
+        // Confines sampling to the sub-rectangle this texture occupies within its layer. The
+        // divisor is the layer size actually allocated above, not maximum_texture_size.
+        uv_rescale.at(textureID * 2 + 0) = float(texture.texture_resolution.x) / float(texture_array_layer_size.x);
+        uv_rescale.at(textureID * 2 + 1) = float(texture.texture_resolution.y) / float(texture_array_layer_size.y);
     }
 
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
@@ -1076,6 +1172,8 @@ void Visualizer::render(bool shadow) const {
             float depth;
         };
         std::vector<TransparentRect> transparent_rects;
+        //! Opaque rectangles drawn individually so that a linear-filtering sampler can be bound
+        std::vector<size_t> linear_filtered_rects;
 
         const auto &texFlags = *geometry_handler.getTextureFlagData_ptr(GeometryHandler::GEOMETRY_TYPE_RECTANGLE);
         const auto &colors = *geometry_handler.getColorData_ptr(GeometryHandler::GEOMETRY_TYPE_RECTANGLE);
@@ -1094,7 +1192,15 @@ void Visualizer::render(bool shadow) const {
 
             bool isGlyph = texFlags.at(i) == 3;
             float alpha = colors.at(i * 4 + 3);
-            if (!isGlyph && alpha >= 1.f) {
+            // Alpha-blended image overlays are translucent at their edges, so like glyphs they are
+            // held out of the batched opaque draw. They are also drawn with linear filtering,
+            // which the rest of the batch must not use: everything else textured is alpha-masked
+            // against a fixed threshold, and interpolating those samples moves where that
+            // threshold falls and would alter leaf and bark cutouts.
+            const bool isBlendedImage = texFlags.at(i) == 4;
+            if (isBlendedImage) {
+                linear_filtered_rects.push_back(i);
+            } else if (!isGlyph && alpha >= 1.f) {
                 opaque_firsts.push_back(static_cast<GLint>(i * 4));
                 opaque_counts.push_back(4);
             } else {
@@ -1114,14 +1220,44 @@ void Visualizer::render(bool shadow) const {
             glMultiDrawArrays(GL_TRIANGLE_FAN, opaque_firsts.data(), opaque_counts.data(), static_cast<GLsizei>(opaque_firsts.size()));
         }
 
+        // Alpha-blended image overlays. Drawn after the opaque batch and with depth writes
+        // disabled, since their edges are partially transparent: writing depth would let an edge
+        // pixel occlude whatever is behind it and leave a halo. These are window-normalized
+        // overlays drawn in front of the scene, so they need no depth sorting among themselves.
+        if (!linear_filtered_rects.empty()) {
+            glDepthMask(GL_FALSE);
+            if (image_sampler != 0) {
+                glBindSampler(0, image_sampler);
+            }
+            for (const size_t index: linear_filtered_rects) {
+                glDrawArrays(GL_TRIANGLE_FAN, static_cast<GLint>(index * 4), 4);
+            }
+            if (image_sampler != 0) {
+                glBindSampler(0, 0);
+            }
+            glDepthMask(GL_TRUE);
+        }
+
         if (!transparent_rects.empty()) {
             std::sort(transparent_rects.begin(), transparent_rects.end(), [](const TransparentRect &a, const TransparentRect &b) {
                 return a.depth > b.depth; // farthest first
             });
 
             glDepthMask(GL_FALSE);
+            // Glyphs need linear filtering to keep their antialiased edges smooth, while the image
+            // textures interleaved with them in this list must stay point sampled. The sampler is
+            // bound and unbound as the list crosses between the two rather than per draw.
+            bool glyph_sampler_bound = false;
             for (const auto &tr: transparent_rects) {
+                const bool needs_glyph_sampler = glyph_sampler != 0 && texFlags.at(tr.index) == 3;
+                if (needs_glyph_sampler != glyph_sampler_bound) {
+                    glBindSampler(0, needs_glyph_sampler ? glyph_sampler : 0);
+                    glyph_sampler_bound = needs_glyph_sampler;
+                }
                 glDrawArrays(GL_TRIANGLE_FAN, static_cast<GLint>(tr.index * 4), 4);
+            }
+            if (glyph_sampler_bound) {
+                glBindSampler(0, 0);
             }
             glDepthMask(GL_TRUE);
         }
@@ -1924,17 +2060,20 @@ void Visualizer::windowResizeCallback(GLFWwindow *window, int width, int height)
     }
     auto *viz = static_cast<Visualizer *>(glfwGetWindowUserPointer(window));
     if (viz != nullptr) {
+        // The window size is in screen coordinates while the framebuffer is in pixels. On a
+        // high-DPI display the two differ by the display's content scale, which is a property of
+        // the monitor and cannot be changed by resizing the window, so the framebuffer size is
+        // queried rather than assumed to match.
         int fbw, fbh;
         glfwGetFramebufferSize(window, &fbw, &fbh);
-        if (fbw != width || fbh != height) {
-            glfwSetWindowSize(window, width, height);
-            fbw = width;
-            fbh = height;
-        }
         viz->Wdisplay = static_cast<uint>(width);
         viz->Hdisplay = static_cast<uint>(height);
-        viz->Wframebuffer = static_cast<uint>(fbw);
-        viz->Hframebuffer = static_cast<uint>(fbh);
+        // A minimized window reports a zero-sized framebuffer, which would otherwise be stored and
+        // used as a divisor by the DPI scale and the watermark/colorbar aspect calculations.
+        if (fbw > 0 && fbh > 0) {
+            viz->Wframebuffer = static_cast<uint>(fbw);
+            viz->Hframebuffer = static_cast<uint>(fbh);
+        }
         viz->updateWatermark();
         viz->updateNavigationGizmo();
         viz->transferBufferData();
@@ -1958,7 +2097,11 @@ void Visualizer::updateWatermark() {
         geometry_handler.deleteGeometry(watermark_ID);
     }
     std::string watermarkPath = helios::resolvePluginAsset("visualizer", "textures/Helios_watermark.png").string();
-    watermark_ID = addRectangleByCenter(make_vec3(0.75f * width, 0.95f, 0), make_vec2(width, 0.07), make_SphericalCoord(0, 0), watermarkPath.c_str(), COORDINATES_WINDOW_NORMALIZED);
+    // The watermark image is antialiased, so its alpha is blended rather than tested against a
+    // threshold. Testing it discards exactly the partially-transparent pixels that smooth the
+    // logo's edges, which is what made both the outer border and the black-on-white boundary
+    // inside it look jagged.
+    watermark_ID = addAlphaBlendedRectangleByCenter(make_vec3(0.75f * width, 0.95f, 0), make_vec2(width, 0.07), make_SphericalCoord(0, 0), watermarkPath.c_str(), COORDINATES_WINDOW_NORMALIZED);
 }
 
 void Visualizer::updateColorbar() {

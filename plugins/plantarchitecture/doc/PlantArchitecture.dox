@@ -919,6 +919,8 @@ uint plantID = plantarchitecture.buildPlantInstanceFromLibrary( nullorigin, 0 );
 plantarchitecture.setPlantPhenologicalThresholds( plantID, 0, 20, 10, 10, 5, 70 );
 ~~~~~~
 
+<b>Default phenology for manually-built plants.</b> Every plant model in the library calls \ref PlantArchitecture::setPlantPhenologicalThresholds() as part of its builder, so library-built plants always have thresholds configured. A plant assembled manually (\ref PlantArchitecture::addPlantInstance() together with \ref PlantArchitecture::addBaseStemShoot(), \ref PlantArchitecture::appendShoot(), and \ref PlantArchitecture::addChildShoot()) does not, and instead keeps the default thresholds, which encode "no phenology scheduled": the plant grows vegetatively and never flowers, sets fruit, or enters dormancy. This is the same configuration produced by \ref PlantArchitecture::disablePlantPhenology(). To give a manually-built plant a reproductive cycle or a dormancy period, call \ref PlantArchitecture::setPlantPhenologicalThresholds() on it explicitly.
+
 \section PlantArchAddingModels Adding New Plant Models to the Library
 
 The PlantArchitecture plugin includes a streamlined system for adding new plant species to the built-in library. This section describes the workflow for implementing a new plant model.

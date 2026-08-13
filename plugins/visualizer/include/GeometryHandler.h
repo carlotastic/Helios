@@ -88,9 +88,11 @@ public:
      * \param[in] iscontextgeometry True if geometry is from the Context, false if geometry is added manually through the visualizer
      * \param[in] isskygeometry True if geometry is part of the sky background (rendered with special transformations)
      * \param[in] size [optional] Size of the point or line in pixel units. This is ignored for GEOMETRY_TYPE_PATCH and GEOMETRY_TYPE_TRIANGLE.
+     * \param[in] blend_texture_alpha [optional] True to blend the texture's alpha channel rather than testing it against a fixed threshold. Set for image overlays whose edges are genuinely partially transparent, such as the watermark; leave false for the
+     * alpha-masked cutouts of leaf and bark textures, where thresholding is what produces the cutout.
      */
     void addGeometry(size_t UUID, const VisualizerGeometryType &geometry_type, const std::vector<helios::vec3> &vertices, const helios::RGBAcolor &color, const std::vector<helios::vec2> &uvs, int textureID, bool override_texture_color,
-                     bool has_glyph_texture, uint coordinate_system, bool visible_flag, bool iscontextgeometry, bool isskygeometry = false, float size = 0);
+                     bool has_glyph_texture, uint coordinate_system, bool visible_flag, bool iscontextgeometry, bool isskygeometry = false, float size = 0, bool blend_texture_alpha = false);
 
     //! Mark a geometry primitive as modified
     void markDirty(size_t UUID);

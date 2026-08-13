@@ -491,7 +491,7 @@ uint PlantArchitecture::buildAlmondTree(const helios::vec3 &base_position) {
 
     makePlantDormant(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 90, -1, 3, 7, 20, 275, false);
+    setPlantPhenologicalThresholds(plantID, 90, -1, 3, 7, 20, 275);
     plant_instances.at(plantID).max_age = 1825;
 
     return plantID;
@@ -666,7 +666,7 @@ uint PlantArchitecture::buildAlmondTreeAldrich(const helios::vec3 &base_position
 
     makePlantDormant(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 90, -1, 3, 7, 20, 275, false);
+    setPlantPhenologicalThresholds(plantID, 90, -1, 3, 7, 20, 275);
     plant_instances.at(plantID).max_age = 1825;
 
     return plantID;
@@ -842,7 +842,7 @@ uint PlantArchitecture::buildAlmondTreeWoodColony(const helios::vec3 &base_posit
 
     makePlantDormant(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 90, -1, 3, 7, 20, 275, false);
+    setPlantPhenologicalThresholds(plantID, 90, -1, 3, 7, 20, 275);
     plant_instances.at(plantID).max_age = 1825;
 
     return plantID;
@@ -1000,7 +1000,7 @@ uint PlantArchitecture::buildAppleTree(const helios::vec3 &base_position) {
 
     makePlantDormant(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 30, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 30, 200);
     plant_instances.at(plantID).max_age = 1460;
 
     return plantID;
@@ -1160,7 +1160,7 @@ uint PlantArchitecture::buildAppleFruitingWall(const helios::vec3 &base_position
     // Set plant-specific attraction points for this grapevine's trellis system
     setPlantAttractionPoints(plantID, flatten(trellis_points), 45.f, 1.f, 0.8);
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 30, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 30, 200);
     plant_instances.at(plantID).max_age = 730;
 
     return plantID;
@@ -1263,7 +1263,7 @@ uint PlantArchitecture::buildAsparagusPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, 5, 100, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, 5, 100);
 
     plant_instances.at(plantID).max_age = 20;
 
@@ -1373,7 +1373,7 @@ uint PlantArchitecture::buildBindweedPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, 14, -1, -1, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, 14, -1, -1, 1000);
 
     plant_instances.at(plantID).max_age = 50;
 
@@ -1528,7 +1528,7 @@ uint PlantArchitecture::buildBeanPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -1648,7 +1648,7 @@ uint PlantArchitecture::buildBougainvilleaPlant(const helios::vec3 &base_positio
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, 75, 1000, 1000, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, 75, 1000, 1000, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -1773,7 +1773,7 @@ uint PlantArchitecture::buildCapsicumPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 75, 14, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 75, 14, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -1846,7 +1846,7 @@ uint PlantArchitecture::buildCheeseweedPlant(const helios::vec3 &base_position) 
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, -1, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, -1, 1000);
 
     plant_instances.at(plantID).max_age = 40;
 
@@ -1999,7 +1999,7 @@ uint PlantArchitecture::buildCowpeaPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -2169,7 +2169,7 @@ uint PlantArchitecture::buildGrapevineVSP(const helios::vec3 &base_position) {
     removeShootLeaves(plantID, uID_cane_L);
     removeShootLeaves(plantID, uID_cane_R);
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, -1, 45, 45, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, -1, 45, 45, 200);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -2380,7 +2380,7 @@ uint PlantArchitecture::buildGrapevineWye(const helios::vec3 &base_position) {
     removeShootVegetativeBuds(plantID, uID_upright_L);
     removeShootVegetativeBuds(plantID, uID_upright_R);
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, -1, 45, 45, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, -1, 45, 45, 200);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -2495,7 +2495,7 @@ uint PlantArchitecture::buildGroundCherryWeedPlant(const helios::vec3 &base_posi
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, 20, -1, 20, 30, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, 20, -1, 20, 30, 1000);
 
     plant_instances.at(plantID).max_age = 80;
 
@@ -2603,7 +2603,7 @@ uint PlantArchitecture::buildMaizePlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -2927,7 +2927,7 @@ uint PlantArchitecture::buildPistachioTree(const helios::vec3 &base_position) {
 
     makePlantDormant(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, -1, 7, 20, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, -1, 7, 20, 200);
     plant_instances.at(plantID).max_age = 1460;
 
     return plantID;
@@ -3050,7 +3050,7 @@ uint PlantArchitecture::buildPuncturevinePlant(const helios::vec3 &base_position
 
     plant_instances.at(plantID).max_age = 45;
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, 14, -1, -1, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, 14, -1, -1, 1000);
 
     return plantID;
 }
@@ -3179,7 +3179,7 @@ uint PlantArchitecture::buildEasternRedbudPlant(const helios::vec3 &base_positio
         }
     }
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 30, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 30, 200);
 
     plant_instances.at(plantID).max_age = 1460;
 
@@ -3282,7 +3282,7 @@ uint PlantArchitecture::buildRicePlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -3362,7 +3362,7 @@ uint PlantArchitecture::buildButterLettucePlant(const helios::vec3 &base_positio
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, -1, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, -1, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -3465,7 +3465,7 @@ uint PlantArchitecture::buildSorghumPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 15, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 15, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -3608,7 +3608,7 @@ uint PlantArchitecture::buildSoybeanPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -3724,7 +3724,7 @@ uint PlantArchitecture::buildStrawberryPlant(const helios::vec3 &base_position) 
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000);
 
     plant_instances.at(plantID).max_age = 120;
 
@@ -3808,7 +3808,7 @@ uint PlantArchitecture::buildSugarbeetPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, -1, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, -1, -1, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -3925,7 +3925,7 @@ uint PlantArchitecture::buildTomatoPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, 40, 5, 5, 30, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -4218,7 +4218,7 @@ uint PlantArchitecture::buildWalnutTree(const helios::vec3 &base_position) {
 
     makePlantDormant(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 20, 200, false);
+    setPlantPhenologicalThresholds(plantID, 165, -1, 3, 7, 20, 200);
 
     plant_instances.at(plantID).max_age = 1460;
 
@@ -4319,7 +4319,7 @@ uint PlantArchitecture::buildWheatPlant(const helios::vec3 &base_position) {
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000, false);
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 

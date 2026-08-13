@@ -2708,6 +2708,92 @@ DOCTEST_TEST_CASE("ParameterOptimization CMAES explore vs exploit parameters") {
 }
 
 // ============================================================================
+// Tests 63-66: CMA-ES and Bayesian Optimization reject discrete parameter types
+//
+// Both algorithms operate on a continuous box defined by min/max and have no
+// representation for INTEGER rounding or CATEGORICAL category lookup, so they
+// must reject those types rather than silently returning a meaningless value.
+// The CATEGORICAL failure is especially quiet: min/max are documented as ignored
+// for that type, so the idiomatic declaration leaves them at zero and the
+// optimizer converges on the degenerate interval [0,0], reporting 0.0 for every
+// seed. GA remains the only algorithm supporting these types.
+//
+// setAlgorithm() is mandatory here: selectDefaultAlgorithm() routes discrete
+// parameters to GA, so omitting it would exercise GA and pass for the wrong
+// reason. Neither algorithm uses NLopt, so these need no HELIOS_HAVE_NLOPT guard.
+// ============================================================================
+
+// Test 63: CMA-ES rejects INTEGER parameters
+DOCTEST_TEST_CASE("ParameterOptimization CMAES rejects INTEGER params") {
+    auto sim = [](const ParametersToOptimize &p) { return 0.f; };
+
+    ParametersToOptimize params = {
+        {"x", {0.f, -5.f, 5.f}},
+        {"n", {1.f, 1.f, 10.f, ParameterType::INTEGER}}
+    };
+
+    ParameterOptimization popt;
+    CMAES cmaes;
+    cmaes.max_evaluations = 10;
+    popt.setAlgorithm(cmaes);
+
+    DOCTEST_CHECK_THROWS_AS(popt.run(sim, params), std::runtime_error);
+}
+
+// Test 64: CMA-ES rejects CATEGORICAL parameters
+DOCTEST_TEST_CASE("ParameterOptimization CMAES rejects CATEGORICAL params") {
+    auto sim = [](const ParametersToOptimize &p) { return 0.f; };
+
+    ParametersToOptimize params = {
+        {"x", {0.f, -5.f, 5.f}},
+        {"c", {5.f, 0.f, 0.f, ParameterType::CATEGORICAL, {5.f, 12.f, 20.f}}}
+    };
+
+    ParameterOptimization popt;
+    CMAES cmaes;
+    cmaes.max_evaluations = 10;
+    popt.setAlgorithm(cmaes);
+
+    DOCTEST_CHECK_THROWS_AS(popt.run(sim, params), std::runtime_error);
+}
+
+// Test 65: Bayesian Optimization rejects INTEGER parameters
+DOCTEST_TEST_CASE("ParameterOptimization BayesianOptimization rejects INTEGER params") {
+    auto sim = [](const ParametersToOptimize &p) { return 0.f; };
+
+    ParametersToOptimize params = {
+        {"x", {0.f, -5.f, 5.f}},
+        {"n", {1.f, 1.f, 10.f, ParameterType::INTEGER}}
+    };
+
+    ParameterOptimization popt;
+    BayesianOptimization bo;
+    bo.max_evaluations = 10;
+    bo.initial_samples = 5;
+    popt.setAlgorithm(bo);
+
+    DOCTEST_CHECK_THROWS_AS(popt.run(sim, params), std::runtime_error);
+}
+
+// Test 66: Bayesian Optimization rejects CATEGORICAL parameters
+DOCTEST_TEST_CASE("ParameterOptimization BayesianOptimization rejects CATEGORICAL params") {
+    auto sim = [](const ParametersToOptimize &p) { return 0.f; };
+
+    ParametersToOptimize params = {
+        {"x", {0.f, -5.f, 5.f}},
+        {"c", {5.f, 0.f, 0.f, ParameterType::CATEGORICAL, {5.f, 12.f, 20.f}}}
+    };
+
+    ParameterOptimization popt;
+    BayesianOptimization bo;
+    bo.max_evaluations = 10;
+    bo.initial_samples = 5;
+    popt.setAlgorithm(bo);
+
+    DOCTEST_CHECK_THROWS_AS(popt.run(sim, params), std::runtime_error);
+}
+
+// ============================================================================
 // I/O Tests
 // ============================================================================
 

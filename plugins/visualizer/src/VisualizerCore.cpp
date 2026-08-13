@@ -923,6 +923,7 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
 
     texArray = 0;
     texture_array_layers = 0;
+    texture_array_layer_size = make_uint2(0, 0);
     textures_dirty = false;
 
     // Initialize offscreen rendering variables
@@ -961,6 +962,7 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
 
     colorbar_min = 0.f;
     colorbar_max = 0.f;
+    colorbar_range_set = false;
     colorbar_integer_data = false;
 
     colorbar_title = "";
@@ -1485,6 +1487,14 @@ Visualizer::~Visualizer() {
         if (texArray != 0) {
             glDeleteTextures(1, &texArray);
         }
+        if (glyph_sampler != 0) {
+            glDeleteSamplers(1, &glyph_sampler);
+            glyph_sampler = 0;
+        }
+        if (image_sampler != 0) {
+            glDeleteSamplers(1, &image_sampler);
+            image_sampler = 0;
+        }
         glDeleteBuffers(1, &uv_rescale_buffer);
         glDeleteTextures(1, &uv_rescale_texture_object);
 
@@ -1997,12 +2007,17 @@ void Visualizer::setColorbarSize(vec2 size) {
 }
 
 void Visualizer::setColorbarRange(float cmin, float cmax) {
-    if (message_flag && cmin > cmax) {
-        std::cerr << "WARNING (Visualizer::setColorbarRange): Maximum colorbar value must be greater than minimum value...Ignoring command." << std::endl;
+    // The validation must not depend on message_flag: gating it there meant an inverted range was
+    // silently accepted whenever messages were disabled, and then fed into tick generation.
+    if (cmin > cmax) {
+        if (message_flag) {
+            std::cerr << "WARNING (Visualizer::setColorbarRange): Maximum colorbar value must be greater than minimum value...Ignoring command." << std::endl;
+        }
         return;
     }
     colorbar_min = cmin;
     colorbar_max = cmax;
+    colorbar_range_set = true;
 }
 
 void Visualizer::setColorbarTicks(const std::vector<float> &ticks) {
@@ -2012,22 +2027,26 @@ void Visualizer::setColorbarTicks(const std::vector<float> &ticks) {
     }
 
     // Check that ticks are monotonically increasing
-    for (int i = 1; i < ticks.size(); i++) {
+    for (size_t i = 1; i < ticks.size(); i++) {
         if (ticks.at(i) <= ticks.at(i - 1)) {
             helios_runtime_error("ERROR (Visualizer::setColorbarTicks): Colorbar ticks must be monotonically increasing.");
         }
     }
 
-    // Check that ticks are within the range of colorbar values
-    for (int i = ticks.size() - 1; i >= 0; i--) {
-        if (ticks.at(i) < colorbar_min) {
-            colorbar_min = ticks.at(i);
-        }
-    }
-    for (float tick: ticks) {
-        if (tick > colorbar_max) {
-            colorbar_max = tick;
-        }
+    // Expand the colorbar range to encompass any ticks that fall outside it, as documented. This
+    // also moves the colormap limits, so it changes the colors the colorbar shows and not just its
+    // labels - warn rather than doing it silently. Call setColorbarRange() afterwards to restore an
+    // explicit range.
+    const float lowest_tick = *std::min_element(ticks.begin(), ticks.end());
+    const float highest_tick = *std::max_element(ticks.begin(), ticks.end());
+    const bool range_expanded = (lowest_tick < colorbar_min) || (highest_tick > colorbar_max);
+
+    colorbar_min = std::min(colorbar_min, lowest_tick);
+    colorbar_max = std::max(colorbar_max, highest_tick);
+    colorbar_range_set = true;
+
+    if (range_expanded && message_flag) {
+        std::cerr << "WARNING (Visualizer::setColorbarTicks): One or more tick values fall outside the colorbar range. The range was expanded to [" << colorbar_min << ", " << colorbar_max << "] to fit them, which also changes the colors shown. Call setColorbarRange() after setColorbarTicks() to keep an explicit range." << std::endl;
     }
 
     colorbar_ticks = ticks;
@@ -2097,20 +2116,28 @@ std::string Visualizer::formatTickLabel(double value, double spacing, bool isInt
     // Use scientific notation for large values (>=10000) or very small values
     bool useScientific = (std::fabs(value) >= 1e4 || (std::fabs(value) < 1e-3 && value != 0.0));
 
+    // Decimal places needed to resolve the tick spacing. A non-finite or non-positive spacing has
+    // no logarithm, so fall back to whatever the value itself needs.
+    int decimalPlaces = 0;
+    if (std::isfinite(spacing) && spacing > 0.0) {
+        decimalPlaces = std::max(0, static_cast<int>(-std::floor(std::log10(std::fabs(spacing)))));
+        decimalPlaces = std::min(decimalPlaces, 6);
+    }
+
     if (useScientific) {
-        // Use scientific notation
-        int decimalPlaces = std::max(0, static_cast<int>(-std::floor(std::log10(std::fabs(spacing)))));
-        decimalPlaces = std::min(decimalPlaces, 6); // Cap at 6 decimal places
         oss << std::scientific << std::setprecision(decimalPlaces) << value;
     } else {
-        // Use fixed-point notation
-        // Calculate decimal places based on spacing
-        int decimalPlaces;
-        if (spacing >= 1.0) {
-            decimalPlaces = 0;
-        } else {
-            decimalPlaces = std::max(0, static_cast<int>(-std::floor(std::log10(spacing))));
-            decimalPlaces = std::min(decimalPlaces, 6); // Cap at 6 decimal places
+        // The spacing sets the baseline, but the value itself may carry more precision than that:
+        // a tick of 2.5 with spacing 1.0 would otherwise print as "2", stating a different number
+        // than the tick actually represents. Add places until the label round-trips, so labels are
+        // rounded but never wrong.
+        constexpr int max_decimal_places = 6;
+        while (decimalPlaces < max_decimal_places) {
+            const double rounding_scale = std::pow(10.0, decimalPlaces);
+            if (std::fabs(std::round(value * rounding_scale) / rounding_scale - value) < 1e-9 * std::max(1.0, std::fabs(value))) {
+                break;
+            }
+            decimalPlaces++;
         }
 
         oss << std::fixed << std::setprecision(decimalPlaces) << value;
@@ -2181,6 +2208,146 @@ std::vector<float> Visualizer::generateNiceTicks(float dataMin, float dataMax, b
     }
 
     return ticks;
+}
+
+//! Step a "nice" spacing (1, 2, or 5 times a power of ten) down to the next finer one
+/**
+ * The progression is 5 -> 2 -> 1 -> 0.5, each step reducing the spacing by a factor of at least
+ * two. Returns 0 for input that is not a usable positive spacing.
+ */
+static double nextFinerNiceSpacing(double spacing) {
+    if (!(spacing > 0.0) || !std::isfinite(spacing)) {
+        return 0.0;
+    }
+
+    // Decompose into mantissa (nominally 1, 2 or 5) and decade. The small offset keeps values that
+    // are exactly a power of ten from landing on the wrong side of the floor.
+    double decade = std::pow(10.0, std::floor(std::log10(spacing) + 1e-12));
+    long mantissa = std::lround(spacing / decade);
+    if (mantissa >= 10) { // guard against a log10 result that rounded the wrong way
+        mantissa = 1;
+        decade *= 10.0;
+    }
+
+    if (mantissa > 2) { // 5 -> 2
+        return 2.0 * decade;
+    } else if (mantissa > 1) { // 2 -> 1
+        return 1.0 * decade;
+    }
+    return 0.5 * decade; // 1 -> 0.5
+}
+
+std::vector<float> Visualizer::generateColorbarTicks(float cmin, float cmax, bool isIntegerData, int targetTicks, double *tick_spacing_out) {
+    // Bounds the refinement loop below. One step is always enough in practice (see the comment on
+    // the loop); this only exists so that pathological input cannot spin.
+    constexpr int max_refinement_iterations = 60;
+
+    auto emit = [tick_spacing_out](std::vector<float> ticks, double spacing) {
+        if (tick_spacing_out != nullptr) {
+            *tick_spacing_out = spacing;
+        }
+        return ticks;
+    };
+
+    // Degenerate limits. This is called from the rendering path on every colorbar update, so it
+    // degrades to a single tick rather than throwing, and never returns an empty vector - that
+    // would leave the colorbar with no labels at all. A positive spacing is always reported
+    // because formatTickLabel() takes its logarithm.
+    if (!std::isfinite(cmin) || !std::isfinite(cmax)) {
+        return emit({std::isfinite(cmin) ? cmin : 0.f}, 1.0);
+    }
+
+    const double range_min = cmin;
+    const double range_max = cmax;
+    const double range_width = range_max - range_min;
+    if (!(range_width > 1e-10)) { // covers cmax <= cmin as well as a vanishingly narrow range
+        return emit({cmin}, 1.0);
+    }
+
+    // Matches the tolerance addColorbarByCenter() uses to decide whether a tick sits on the bar.
+    const double range_epsilon = 1e-4 * std::max(std::fabs(range_width), 1.0);
+    const int tick_target = std::max(2, targetTicks);
+
+    double spacing = niceNumber(range_width / double(tick_target - 1), true);
+    if (!(spacing > 0.0) || !std::isfinite(spacing)) {
+        spacing = range_width / double(tick_target - 1);
+    }
+    if (isIntegerData) {
+        spacing = std::max(1.0, std::round(spacing));
+    }
+
+    // Walk to finer nice spacings until at least two multiples fall inside the range.
+    //
+    // The number of multiples of `spacing` within a range of width w is either floor(w/spacing) or
+    // floor(w/spacing)+1, so two or more are guaranteed once spacing <= w/2. niceNumber() can
+    // round its argument up by as much as ~1.43x, which puts the initial spacing as high as ~0.75w
+    // - inside the band where only a single multiple may land, and precisely the case that made an
+    // auto-ranged colorbar show one tick. Each refinement step divides the spacing by at least
+    // two, taking it below w/2 and making the count unconditional, so this loop runs at most once
+    // for any well-formed range.
+    std::vector<float> ticks;
+    for (int iteration = 0; iteration < max_refinement_iterations; iteration++) {
+        const double first_multiple = std::ceil((range_min - range_epsilon) / spacing);
+        const double last_multiple = std::floor((range_max + range_epsilon) / spacing);
+
+        // The count guard keeps a denormal spacing from producing an unbounded loop below.
+        if (last_multiple >= first_multiple && (last_multiple - first_multiple) < 1e6) {
+            ticks.clear();
+            ticks.reserve(size_t(last_multiple - first_multiple) + 1);
+            for (double multiple = first_multiple; multiple <= last_multiple; multiple += 1.0) {
+                // Accumulate in double and narrow once: at large magnitudes two adjacent multiples
+                // can round to the same float, which would break strict monotonicity.
+                const float tick_value = float(multiple * spacing);
+                if (ticks.empty() || tick_value > ticks.back()) {
+                    ticks.push_back(tick_value);
+                }
+            }
+            if (ticks.size() >= 2) {
+                return emit(ticks, spacing);
+            }
+        }
+
+        if (isIntegerData && spacing <= 1.0) {
+            break; // integer ticks cannot be spaced more finely than 1
+        }
+        double finer_spacing = nextFinerNiceSpacing(spacing);
+        if (isIntegerData) {
+            finer_spacing = std::max(1.0, std::floor(finer_spacing));
+        }
+        if (!(finer_spacing > 0.0) || !(finer_spacing < spacing) || !std::isfinite(finer_spacing)) {
+            break; // must strictly decrease, otherwise this would not terminate
+        }
+        spacing = finer_spacing;
+    }
+
+    // No nice grid fits inside the range.
+    if (isIntegerData) {
+        // The range spans less than two integers. Returning the one integer it contains (or the
+        // nearest one) is the honest answer - fractional ticks would contradict integer data.
+        const double lowest_integer = std::ceil(range_min - range_epsilon);
+        const double highest_integer = std::floor(range_max + range_epsilon);
+        if (highest_integer >= lowest_integer) {
+            return emit({float(lowest_integer)}, 1.0);
+        }
+        return emit({float(std::round(0.5 * (range_min + range_max)))}, 1.0);
+    }
+
+    // Fall back to the range endpoints. The reported spacing describes the gap between the values
+    // actually returned, so labels are formatted with enough precision to tell them apart.
+    const float low_tick = cmin;
+    const float high_tick = cmax;
+    if (high_tick > low_tick) {
+        if (tick_target >= 3) {
+            const float mid_tick = float(0.5 * (range_min + range_max));
+            if (mid_tick > low_tick && high_tick > mid_tick) {
+                return emit({low_tick, mid_tick, high_tick}, 0.5 * range_width);
+            }
+        }
+        return emit({low_tick, high_tick}, range_width);
+    }
+
+    // cmin and cmax are not distinguishable as float, so no two-tick vector can be monotonic.
+    return emit({low_tick}, std::max(range_width, 1e-10));
 }
 
 void Visualizer::setColorbarTitle(const char *title) {
@@ -2335,13 +2502,18 @@ Visualizer::Texture::Texture(const Glyph *glyph_ptr, uint textureID, const helio
 
     glyph = *glyph_ptr;
 
-    texture_resolution = glyph_ptr->size;
+    // The glyph occupies only a sub-rectangle of its texture array layer, and the surrounding
+    // texels of that layer are never written. A one-texel fully transparent border is added so
+    // that linear filtering at the glyph boundary interpolates toward transparency rather than
+    // toward whatever those unwritten texels happen to contain.
+    constexpr uint border = 1;
+    texture_resolution = make_uint2(glyph_ptr->size.x + 2 * border, glyph_ptr->size.y + 2 * border);
 
     // Texture only has 1 channel, and contains transparency data
-    texture_data.resize(texture_resolution.x * texture_resolution.y);
-    for (int j = 0; j < texture_resolution.y; j++) {
-        for (int i = 0; i < texture_resolution.x; i++) {
-            texture_data[i + j * texture_resolution.x] = glyph_ptr->data.at(j).at(i);
+    texture_data.assign(texture_resolution.x * texture_resolution.y, 0);
+    for (int j = 0; j < glyph_ptr->size.y; j++) {
+        for (int i = 0; i < glyph_ptr->size.x; i++) {
+            texture_data[(i + border) + (j + border) * texture_resolution.x] = glyph_ptr->data.at(j).at(i);
         }
     }
 
@@ -2480,6 +2652,7 @@ uint Visualizer::registerTextureGlyph(const Glyph *glyph) {
 
 helios::uint2 Visualizer::getTextureResolution(uint textureID) const {
     if (texture_manager.find(textureID) == texture_manager.end()) {
+        helios_runtime_error("ERROR (Visualizer::getTextureResolution): Texture ID " + std::to_string(textureID) + " does not exist.");
     }
     return texture_manager.at(textureID).texture_resolution;
 }
@@ -2521,6 +2694,17 @@ std::vector<uint> Visualizer::getFrameBufferSize() const {
 void Visualizer::setFrameBufferSize(int width, int height) {
     Wframebuffer = width;
     Hframebuffer = height;
+}
+
+float Visualizer::getDPIScale() const {
+    // A minimized window reports zero dimensions. Nothing is rendered in that state, so the
+    // identity scale is the correct answer rather than a division by zero.
+    if (Wdisplay == 0 || Hdisplay == 0 || Wframebuffer == 0 || Hframebuffer == 0) {
+        return 1.f;
+    }
+    // The scale can in principle differ between axes. Glyph rasterization takes a single size, so
+    // the larger of the two is used: over-sampling one axis is harmless, under-sampling is not.
+    return std::max(float(Wframebuffer) / float(Wdisplay), float(Hframebuffer) / float(Hdisplay));
 }
 
 helios::RGBcolor Visualizer::getBackgroundColor() const {

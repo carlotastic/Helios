@@ -1639,8 +1639,8 @@ DOCTEST_TEST_CASE("PlantArchitecture readPlantStructureXML preserves internode v
     // Guard against a vacuous pass if every tube happened to be absent.
     DOCTEST_REQUIRE(shoots_checked > 0);
 
-    // Sampled before any growth -- see the note further below on why post-growth leaf area is not a
-    // valid observable for a restored plant.
+    // Sampled before any growth -- see the note further below on why post-growth leaf *area* is not a
+    // valid observable for a restored plant (post-growth leaf survival is checked, and is valid).
     const float restored_leaf_area_at_load = plantarchitecture.sumPlantLeafArea(restored_plantID);
 
     // Growing a restored plant must work, and repeated steps must stay stable. On the buggy code the
@@ -1648,6 +1648,11 @@ DOCTEST_TEST_CASE("PlantArchitecture readPlantStructureXML preserves internode v
     // number of tube nodes."
     DOCTEST_CHECK_NOTHROW(plantarchitecture.advanceTime(restored_plantID, 5));
     DOCTEST_CHECK_NOTHROW(plantarchitecture.advanceTime(restored_plantID, 5));
+
+    // A restored plant must still have leaves after growing. This asserts non-collapse only, not a
+    // geometric quantity, so it is not subject to the RNG-divergence flakiness described above. Before
+    // phenological thresholds were persisted, growth defoliated the plant completely and this was 0.
+    DOCTEST_CHECK(plantarchitecture.getPlantLeafCount(restored_plantID) > 0);
     DOCTEST_CHECK_NOTHROW(plantarchitecture.advanceTime(restored_plantID, 5));
 
     // The invariant must still hold after growth: new phytomers are appended under the same
@@ -1678,14 +1683,16 @@ DOCTEST_TEST_CASE("PlantArchitecture readPlantStructureXML preserves internode v
     // Leaf area is checked at restore time, BEFORE growth, and must match the saved plant closely --
     // leaves are reconstructed from saved parameters, so this is a real fidelity check on the restore.
     //
-    // It is deliberately NOT checked after advanceTime(). Phenological thresholds are not part of the
-    // XML schema: setPlantPhenologicalThresholds() is called by the library plant builders (e.g.
-    // buildBeanPlant), never by readPlantStructureXML(), so a restored plant keeps the PlantInstance
-    // defaults, where dd_to_dormancy_break + dd_to_dormancy == 0. The dormancy check in advanceTime()
-    // is therefore satisfied on the very first step, which calls makeDormant() and harvestPlant() and
-    // drops every leaf. That is a separate pre-existing gap in the XML schema, independent of the
-    // internode node-count bug this test covers, and asserting post-growth leaf area here would
-    // conflate the two.
+    // Post-growth leaf *area* is deliberately NOT compared against the freshly-built plant: for the
+    // RNG-divergence reasons above that would be a flaky check. Post-growth leaf *survival* is checked
+    // below, which is not RNG-sensitive.
+    //
+    // Historical note: phenological thresholds used to be absent from the XML schema, so a restored
+    // plant kept the PlantInstance defaults, which were all zero. The dormancy check in advanceTime()
+    // was therefore satisfied on the very first step, calling makeDormant() and dropping every leaf.
+    // The thresholds are now persisted (and the defaults now encode "no phenology scheduled"), so a
+    // restored plant grows normally -- see the "XML round-trip preserves phenological thresholds" and
+    // "XML without phenology tags still loads" cases.
     DOCTEST_CHECK(restored_leaf_area_at_load > 0.f);
     DOCTEST_CHECK(std::isfinite(restored_leaf_area_at_load));
     DOCTEST_CHECK(restored_leaf_area_at_load == doctest::Approx(built_leaf_area).epsilon(0.25));
@@ -3530,6 +3537,166 @@ DOCTEST_TEST_CASE("Growth USD export error handling") {
         threw = true;
     }
     DOCTEST_CHECK(threw);
+}
+
+DOCTEST_TEST_CASE("PlantArchitecture manually-built plant survives advanceTime without phenological thresholds") {
+    Context context;
+    PlantArchitecture plantarchitecture(&context);
+    plantarchitecture.disableMessages();
+
+    // Regression test: a plant assembled through the manual API (addPlantInstance + addBaseStemShoot /
+    // appendShoot / addChildShoot) never has setPlantPhenologicalThresholds() called on it, so it keeps
+    // the PlantInstance defaults. When those defaults were all zero, the dormancy predicate in
+    // advanceTime() read "time_since_dormancy > 0" and was therefore satisfied on the very first
+    // timestep -- and again on every step after, since it resets time_since_dormancy to 0. Each firing
+    // called Shoot::makeDormant(), which removes every leaf and marks all non-dormant vegetative buds
+    // BUD_DEAD; breakDormancy() only revives buds that are not BUD_DEAD, so the plant was permanently
+    // defoliated and sterilized rather than growing. Leaf count collapsed to 0.
+    //
+    // Load the bean model only to register its shoot types ("unifoliate"/"trifoliate"). Going through
+    // buildPlantInstanceFromLibrary() instead would call setPlantPhenologicalThresholds() and mask the
+    // defect entirely, which is exactly why this bug survived: every existing growth test uses a
+    // library builder.
+    plantarchitecture.loadPlantModelFromLibrary("bean");
+
+    uint plantID = plantarchitecture.addPlantInstance(make_vec3(0, 0, 0), 0.f);
+
+    uint uID_unifoliate = plantarchitecture.addBaseStemShoot(plantID, 1, make_AxisRotation(0, 0, 0), 0.0005f, 0.03f, 0.01f, 0.01f, 0, "unifoliate");
+
+    uint uID_trifoliate = plantarchitecture.appendShoot(plantID, uID_unifoliate, 1, make_AxisRotation(0, 0, 0.5f * M_PI), 0.0005f, 0.03f, 0.1f, 0.1f, 0, "trifoliate");
+
+    DOCTEST_CHECK_NOTHROW(plantarchitecture.addChildShoot(plantID, uID_trifoliate, 0, 1, make_AxisRotation(0, 0, 0), 0.0005f, 0.03f, 0.1f, 0.1f, 0, "trifoliate", 0));
+
+    // Shoots are constructed dormant, so break dormancy before growing (buildBeanPlant does the same).
+    plantarchitecture.breakPlantDormancy(plantID);
+
+    uint leaf_count_before = plantarchitecture.getPlantLeafCount(plantID);
+    DOCTEST_REQUIRE(leaf_count_before > 0);
+
+    DOCTEST_CHECK_NOTHROW(plantarchitecture.advanceTime(plantID, 20.f));
+
+    uint leaf_count_after = plantarchitecture.getPlantLeafCount(plantID);
+
+    // The collapse detector: on the buggy defaults this is 0.
+    DOCTEST_CHECK(leaf_count_after > 0);
+    // The plant must not shrink. Deliberately >= rather than >: whether new phytomers appear within 20
+    // days depends on phyllochron and vegetative_bud_break_time, and a strict > would couple this test
+    // to growth-rate parameters. The > 0 check above carries the regression signal.
+    DOCTEST_CHECK(leaf_count_after >= leaf_count_before);
+    DOCTEST_CHECK(!plantarchitecture.getPlantPetioleObjectIDs(plantID).empty());
+}
+
+DOCTEST_TEST_CASE("PlantArchitecture library-built plant phenology is unaffected by PlantInstance defaults") {
+    Context context;
+    PlantArchitecture plantarchitecture(&context);
+    plantarchitecture.disableMessages();
+
+    // All 30 library builders call setPlantPhenologicalThresholds(), overwriting every default, so
+    // changing the PlantInstance defaults must not alter library-built plants. Almond is deciduous
+    // (dd_to_dormancy_break = 90, dd_to_dormancy = 275) and buildAlmondTree() calls makePlantDormant(),
+    // so it exercises the real dormancy machinery rather than the defaults.
+    plantarchitecture.loadPlantModelFromLibrary("almond");
+    uint plantID = plantarchitecture.buildPlantInstanceFromLibrary(make_vec3(0, 0, 0), 300);
+
+    uint leaf_count_before = plantarchitecture.getPlantLeafCount(plantID);
+
+    // The plant is built dormant, so 200 days -- past dd_to_dormancy_break = 90 but well short of the
+    // full 90 + 275 = 365 dormancy cycle -- must break dormancy and flush leaves. This pins the
+    // dormancy-break half of the cycle, which a guard that wrongly suppressed dormancy transitions
+    // would break. It also confirms library plants ignore the PlantInstance defaults entirely.
+    DOCTEST_CHECK_NOTHROW(plantarchitecture.advanceTime(plantID, 200.f));
+
+    DOCTEST_CHECK(plantarchitecture.getPlantLeafCount(plantID) > leaf_count_before);
+}
+
+DOCTEST_TEST_CASE("PlantArchitecture XML round-trip preserves phenological thresholds") {
+    Context context;
+    PlantArchitecture plantarchitecture(&context);
+    plantarchitecture.disableMessages();
+
+    // Phenological thresholds are not derivable from the shoot structure, so they must be written to and
+    // read back from the XML. Before they were part of the schema, a restored plant fell back to the
+    // PlantInstance defaults; combined with the old all-zero defaults that meant a restored plant was
+    // defoliated on its first growth step.
+    plantarchitecture.loadPlantModelFromLibrary("bean");
+    uint plantID = plantarchitecture.buildPlantInstanceFromLibrary(make_vec3(0, 0, 0), 10);
+
+    std::string xml_filename = "test_phenology_roundtrip.xml";
+    DOCTEST_CHECK_NOTHROW(plantarchitecture.writePlantStructureXML(plantID, xml_filename));
+
+    // The thresholds buildBeanPlant() sets must appear in the file.
+    {
+        std::ifstream f(xml_filename);
+        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+        DOCTEST_CHECK(content.find("dd_to_dormancy") != std::string::npos);
+        DOCTEST_CHECK(content.find("dd_to_flower_initiation") != std::string::npos);
+    }
+
+    Context restore_context;
+    PlantArchitecture restore_plantarchitecture(&restore_context);
+    restore_plantarchitecture.disableMessages();
+    restore_plantarchitecture.loadPlantModelFromLibrary("bean");
+
+    std::vector<uint> restored_IDs;
+    DOCTEST_CHECK_NOTHROW(restored_IDs = restore_plantarchitecture.readPlantStructureXML(xml_filename, true));
+    DOCTEST_REQUIRE(!restored_IDs.empty());
+
+    uint restored_plantID = restored_IDs.front();
+    uint leaf_count_at_load = restore_plantarchitecture.getPlantLeafCount(restored_plantID);
+    DOCTEST_REQUIRE(leaf_count_at_load > 0);
+
+    // With thresholds restored (bean: dd_to_dormancy = 1000), growth must not trigger the dormancy path.
+    DOCTEST_CHECK_NOTHROW(restore_plantarchitecture.advanceTime(restored_plantID, 20.f));
+    DOCTEST_CHECK(restore_plantarchitecture.getPlantLeafCount(restored_plantID) > 0);
+
+    std::remove(xml_filename.c_str());
+}
+
+DOCTEST_TEST_CASE("PlantArchitecture XML without phenology tags still loads") {
+    Context context;
+    PlantArchitecture plantarchitecture(&context);
+    plantarchitecture.disableMessages();
+
+    // Backward compatibility: the phenology tags are optional. An XML file written before they existed
+    // must still load and grow, falling back to the PlantInstance defaults. Simulate one by stripping
+    // every dd_to_* / max_leaf_lifespan / is_evergreen line from a freshly written file.
+    plantarchitecture.loadPlantModelFromLibrary("bean");
+    uint plantID = plantarchitecture.buildPlantInstanceFromLibrary(make_vec3(0, 0, 0), 10);
+
+    std::string xml_filename = "test_phenology_full.xml";
+    std::string legacy_filename = "test_phenology_legacy.xml";
+    plantarchitecture.writePlantStructureXML(plantID, xml_filename);
+
+    {
+        std::ifstream in(xml_filename);
+        std::ofstream out(legacy_filename);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.find("dd_to_") != std::string::npos || line.find("max_leaf_lifespan") != std::string::npos || line.find("is_evergreen") != std::string::npos) {
+                continue;
+            }
+            out << line << std::endl;
+        }
+    }
+
+    Context restore_context;
+    PlantArchitecture restore_plantarchitecture(&restore_context);
+    restore_plantarchitecture.disableMessages();
+    restore_plantarchitecture.loadPlantModelFromLibrary("bean");
+
+    std::vector<uint> restored_IDs;
+    DOCTEST_CHECK_NOTHROW(restored_IDs = restore_plantarchitecture.readPlantStructureXML(legacy_filename, true));
+    DOCTEST_REQUIRE(!restored_IDs.empty());
+
+    // The defaults now encode "no phenology scheduled", so a legacy file grows rather than defoliating.
+    uint restored_plantID = restored_IDs.front();
+    DOCTEST_REQUIRE(restore_plantarchitecture.getPlantLeafCount(restored_plantID) > 0);
+    DOCTEST_CHECK_NOTHROW(restore_plantarchitecture.advanceTime(restored_plantID, 20.f));
+    DOCTEST_CHECK(restore_plantarchitecture.getPlantLeafCount(restored_plantID) > 0);
+
+    std::remove(xml_filename.c_str());
+    std::remove(legacy_filename.c_str());
 }
 
 int PlantArchitecture::selfTest(int argc, char **argv) {

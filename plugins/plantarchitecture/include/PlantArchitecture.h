@@ -1738,13 +1738,29 @@ struct PlantInstance {
     std::string plant_name;
     std::pair<std::string, float> epicormic_shoot_probability_perlength_per_day; //.first is the epicormic shoot label string, .second is the probability
 
-    // Phenological thresholds
-    float dd_to_dormancy_break = 0;
-    float dd_to_flower_initiation = 0;
-    float dd_to_flower_opening = 0;
-    float dd_to_fruit_set = 0;
-    float dd_to_fruit_maturity = 0;
-    float dd_to_dormancy = 0;
+    // Phenological thresholds.
+    //
+    // These defaults encode "no phenology scheduled", mirroring disablePlantPhenology(). They are what
+    // advanceTime() sees for any plant that never has setPlantPhenologicalThresholds() called on it --
+    // i.e. a plant built through the manual API (addPlantInstance + addBaseStemShoot/appendShoot/
+    // addChildShoot), or one restored from an XML file predating the phenology tags. All library
+    // builders set every field explicitly, so they are unaffected by these values.
+    //
+    // A zero dd_to_dormancy made the dormancy predicate in advanceTime() true on the very first step
+    // and, because time_since_dormancy is reset there, on every step thereafter -- repeatedly calling
+    // Shoot::makeDormant(), which strips every leaf and marks all non-dormant buds BUD_DEAD. Since
+    // breakDormancy() only revives buds that are not BUD_DEAD, the plant was permanently defoliated
+    // and sterilized instead of growing.
+    float dd_to_dormancy_break = 0; //!< 0 = no chilling requirement; a dormant shoot may break immediately
+    float dd_to_flower_initiation = -1; //!< -1 = stage disabled (advanceTime() gates these on >= 0)
+    float dd_to_flower_opening = -1; //!< -1 = stage disabled
+    float dd_to_fruit_set = -1; //!< -1 = stage disabled
+    //! Deliberately 1e6 rather than -1: unlike the stages above, this field is used as a divisor in the
+    //! fruit-growth block of advanceTime(), and appendPhytomerToShoot() can set a bud BUD_FRUITING based
+    //! purely on shoot structure without consulting dd_to_fruit_set. A negative value would then produce
+    //! a negative scale factor and trip the assert in Phytomer::setInflorescenceScaleFraction().
+    float dd_to_fruit_maturity = 1e6;
+    float dd_to_dormancy = 1e6; //!< effectively "never", keeping the dormancy predicate false
     float max_leaf_lifespan = 1e6;
     bool is_evergreen = false;
 
@@ -3034,6 +3050,11 @@ public:
      * \param[in] filename Path to the XML file where the plant structure will be saved.
      * \note The function checks if the plant instance exists and if the output file path
      * is valid and writable. Errors related to invalid plant ID or file issues will throw exceptions.
+     * \note In addition to the shoot structure, the plant's phenological thresholds are written
+     * (dd_to_dormancy_break, dd_to_flower_initiation, dd_to_flower_opening, dd_to_fruit_set,
+     * dd_to_fruit_maturity, dd_to_dormancy, max_leaf_lifespan, is_evergreen). These are not derivable
+     * from the shoot structure, so without them a restored plant would fall back to the default
+     * thresholds rather than the ones it was built with.
      */
     void writePlantStructureXML(uint plantID, const std::string &filename) const;
 
@@ -3115,6 +3136,9 @@ public:
      * \param[in] quiet [optional] If true, suppresses console output of status messages.
      * \return A vector of unsigned integers representing the plant IDs parsed from the XML file.
      * \note Throws an exception if the file cannot be parsed or is missing required tags.
+     * \note The phenological threshold tags written by writePlantStructureXML() are optional on read,
+     * so files written before those tags existed still load. When they are absent, the restored plant
+     * keeps the default thresholds, which schedule no phenology.
      */
     std::vector<uint> readPlantStructureXML(const std::string &filename, bool quiet = false);
 

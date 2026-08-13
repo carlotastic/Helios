@@ -5346,7 +5346,12 @@ void PlantArchitecture::advanceTime(const std::vector<uint> &plantIDs, float tim
             plant_instance.current_age += dt_max_days;
             plant_instance.time_since_dormancy += dt_max_days;
 
-            if (plant_instance.time_since_dormancy > plant_instance.dd_to_dormancy_break + plant_instance.dd_to_dormancy) {
+            // A non-positive dormancy period means no dormancy cycle is scheduled. Without this guard the
+            // predicate is satisfied on the first timestep and -- because time_since_dormancy is reset to 0
+            // just below -- on every step thereafter, repeatedly stripping leaves and killing buds via
+            // makeDormant(). Every library plant supplies a positive dd_to_dormancy, so this is inert for them.
+            const float dormancy_period = plant_instance.dd_to_dormancy_break + plant_instance.dd_to_dormancy;
+            if (dormancy_period > 0.f && plant_instance.time_since_dormancy > dormancy_period) {
                 plant_instance.time_since_dormancy = 0;
                 for (const auto &shoot: *shoot_tree) {
                     shoot->makeDormant();

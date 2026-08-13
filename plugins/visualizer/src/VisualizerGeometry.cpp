@@ -33,6 +33,7 @@ void Visualizer::clearGeometry() {
     depth_buffer_data.clear();
     colorbar_min = 0;
     colorbar_max = 0;
+    colorbar_range_set = false;
 }
 
 size_t Visualizer::addRectangleByCenter(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const RGBcolor &color, CoordinateSystem coordFlag) {
@@ -207,6 +208,39 @@ size_t Visualizer::addRectangleByVertices(const std::vector<vec3> &vertices, con
 
     size_t UUID = geometry_handler.sampleUUID();
     geometry_handler.addGeometry(UUID, GeometryHandler::GEOMETRY_TYPE_RECTANGLE, vertices, RGBA::black, uvs, textureID, false, false, coordFlag, true, false);
+    return UUID;
+}
+
+size_t Visualizer::addAlphaBlendedRectangleByCenter(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const char *texture_file, CoordinateSystem coordFlag) {
+    std::vector<vec3> vertices;
+    vertices.resize(4);
+
+    vec3 v0 = make_vec3(-0.5f * size.x, -0.5f * size.y, 0.f);
+    v0 = rotatePointAboutLine(v0, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v0 = rotatePointAboutLine(v0, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(0) = center + v0;
+
+    vec3 v1 = make_vec3(+0.5f * size.x, -0.5f * size.y, 0.f);
+    v1 = rotatePointAboutLine(v1, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v1 = rotatePointAboutLine(v1, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(1) = center + v1;
+
+    vec3 v2 = make_vec3(+0.5f * size.x, +0.5f * size.y, 0.f);
+    v2 = rotatePointAboutLine(v2, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v2 = rotatePointAboutLine(v2, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(2) = center + v2;
+
+    vec3 v3 = make_vec3(-0.5f * size.x, +0.5f * size.y, 0.f);
+    v3 = rotatePointAboutLine(v3, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v3 = rotatePointAboutLine(v3, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(3) = center + v3;
+
+    const std::vector<vec2> uvs{{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+
+    uint textureID = registerTextureImage(texture_file);
+
+    size_t UUID = geometry_handler.sampleUUID();
+    geometry_handler.addGeometry(UUID, GeometryHandler::GEOMETRY_TYPE_RECTANGLE, vertices, RGBA::black, uvs, textureID, false, false, coordFlag, true, false, false, 0, true);
     return UUID;
 }
 
@@ -800,12 +834,21 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
         helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Could not open font '" + std::string(fontname) + "'");
     }
 
-    // Load the font size
-    FT_Set_Pixel_Sizes(face, 0, fontsize);
+    // Glyphs are rasterized at framebuffer resolution rather than at the window size in screen
+    // coordinates. On a high-DPI display the two differ, and a bitmap generated at window
+    // resolution is magnified when drawn into the larger framebuffer, which looks blocky. The quad
+    // the glyph is drawn on is sized in window-normalized coordinates below and is unaffected;
+    // only the resolution of the source bitmap changes.
+    const float dpi_scale = getDPIScale();
+    const uint fontsize_pixels = std::max(1u, static_cast<uint>(std::lround(fontsize * dpi_scale)));
 
-    // x- and y- size of a pixel in [0,1] normalized coordinates
-    float sx = 1.f / float(Wdisplay);
-    float sy = 1.f / float(Hdisplay);
+    // Load the font size
+    FT_Set_Pixel_Sizes(face, 0, fontsize_pixels);
+
+    // x- and y- size of a framebuffer pixel in [0,1] normalized coordinates. The FreeType glyph
+    // metrics used below are in framebuffer pixels, so these convert them directly.
+    float sx = 1.f / float(Wframebuffer);
+    float sy = 1.f / float(Hframebuffer);
 
     FT_GlyphSlot gg = face->glyph; // FreeType glyph for font `fontname' and size `fontsize'
 
@@ -814,19 +857,19 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
     float wtext = 0;
     float htext = 0;
     const char *textt = textstring;
+    float measure_scale = 1; // scaling factor for subscript/superscript
     for (const char *p = textt; *p; p++) { // looping over each letter in `textstring'
-        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
-            continue;
-        float scale = 1;
-        if (strncmp(p, "_", 1) == 0) { // subscript
-            scale = 0.5;
-            continue;
-        } else if (strncmp(p, "^", 1) == 0) { // superscript
-            scale = 0.5;
+        if (*p == '_' || *p == '^') { // subscript/superscript marker: occupies no width of its own
+            measure_scale = 0.5f;
             continue;
         }
-        wtext += gg->bitmap.width * sx * scale;
-        htext = std::max(gg->bitmap.rows * sy, htext);
+        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
+            continue;
+        // The advance is used rather than the bitmap width because it includes the side bearings.
+        // Summing bitmap widths underestimates the true extent and biases the text off-center.
+        wtext += float(gg->advance.x >> 6) * sx * measure_scale;
+        htext = std::max(float(gg->bitmap.rows) * sy * measure_scale, htext);
+        measure_scale = 1;
     }
 
     // location of the center of our textbox
@@ -859,18 +902,20 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
     float scale = 1; // scaling factor for subscript/superscript
     for (const char *p = text; *p; p++) { // looping over each letter in `textstring'
 
-        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
-            continue;
-
-        if (strncmp(p, "_", 1) == 0) { // subscript
-            offset = -0.3f * sy;
+        // The offset is a fraction of the em size, so that the sub/superscript displacement is
+        // independent of both the DPI scale and the window dimensions.
+        if (*p == '_') { // subscript
+            offset = -0.3f * float(fontsize_pixels) * sy;
             scale = 0.5f;
             continue;
-        } else if (strncmp(p, "^", 1) == 0) { // superscript
-            offset = 0.3f * sy;
+        } else if (*p == '^') { // superscript
+            offset = 0.3f * float(fontsize_pixels) * sy;
             scale = 0.5f;
             continue;
         }
+
+        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
+            continue;
 
         // Copy the letter's mask into 2D `maskData' structure
         uint2 tsize(g->bitmap.width, g->bitmap.rows);
@@ -882,15 +927,22 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
             }
         }
 
-        // size of this letter (i.e., the size of the rectangle we're going to make
-        vec2 lettersize = make_vec2(g->bitmap.width * scale * sx, g->bitmap.rows * scale * sy);
+        // size of this letter (i.e., the size of the rectangle we're going to make. The glyph
+        // texture carries a one-texel transparent border on each side (see Visualizer::Texture),
+        // so the rectangle is grown to match, leaving the glyph itself at its true size.
+        constexpr float glyph_texture_border = 1.f;
+        vec2 lettersize = make_vec2((float(g->bitmap.width) + 2.f * glyph_texture_border) * scale * sx, (float(g->bitmap.rows) + 2.f * glyph_texture_border) * scale * sy);
 
-        // position of this letter (i.e., the center of the rectangle we're going to make
-        vec3 letterposition = make_vec3(xt + g->bitmap_left * sx + 0.5 * lettersize.x, yt + g->bitmap_top * (sy + offset) - 0.5 * lettersize.y, center.z);
+        // position of this letter (i.e., the center of the rectangle we're going to make. The
+        // bearings are scaled alongside the glyph so that sub/superscripts are not positioned as
+        // though they were full size, and `offset' translates the baseline rather than scaling it.
+        // The bearings locate the glyph itself, so they are offset by the border to keep the glyph
+        // in the same place now that the rectangle extends beyond it.
+        vec3 letterposition = make_vec3(xt + (float(g->bitmap_left) - glyph_texture_border) * scale * sx + 0.5f * lettersize.x, yt + (float(g->bitmap_top) + glyph_texture_border) * scale * sy + offset - 0.5f * lettersize.y, center.z);
 
         // advance the x- and y- letter position
-        xt += (g->advance.x >> 6) * sx * scale;
-        yt += (g->advance.y >> 6) * sy * scale;
+        xt += float(g->advance.x >> 6) * sx * scale;
+        yt += float(g->advance.y >> 6) * sy * scale;
 
         // reset the offset and scale
         offset = 0;
@@ -934,26 +986,27 @@ std::vector<size_t> Visualizer::addColorbarByCenter(const char *title, const hel
 
     // Generate tick values - either user-specified or auto-generated
     std::vector<float> tick_values;
+    double tick_spacing = 1.0;
     if (!colorbar_ticks.empty()) {
         tick_values = colorbar_ticks;
+        // User-supplied ticks have no generating spacing, so derive it from the values themselves.
+        if (tick_values.size() > 1) {
+            tick_spacing = std::fabs(tick_values[1] - tick_values[0]);
+        }
     } else {
-        // Auto-generate nice tick values with adaptive count based on colorbar size
-        // Estimate: need ~0.04 normalized units per tick label vertically (based on font size)
-        // This accounts for font size, spacing, and readability
-        float estimated_tick_spacing = 0.04f * (colorbar_fontsize / 12.0f); // Scale with font size
-        int max_ticks = std::max(3, static_cast<int>(size.y / estimated_tick_spacing));
+        // Auto-generate nice tick values with adaptive count based on colorbar size.
+        // Tick labels are laid out along the length of the bar, so the space available for them is
+        // set by size.x - size.y is the bar's thickness and does not constrain the label count.
+        // Estimate ~0.06 normalized units of width per label, scaled with the font size.
+        float estimated_tick_spacing = 0.06f * (colorbar_fontsize / 12.0f);
+        int max_ticks = std::max(3, static_cast<int>(size.x / estimated_tick_spacing));
         max_ticks = std::min(max_ticks, 8); // Cap at 8 ticks maximum
 
-        tick_values = generateNiceTicks(cmin, cmax, colorbar_integer_data, max_ticks);
+        // Ticks are confined to [cmin, cmax] as they are generated. Filtering them afterwards -
+        // as this code used to - could delete every tick that generateNiceTicks() placed outside
+        // the range, leaving the colorbar with a single label and no sense of scale.
+        tick_values = generateColorbarTicks(cmin, cmax, colorbar_integer_data, max_ticks, &tick_spacing);
     }
-
-    // Filter out ticks that fall outside the colorbar range [cmin, cmax].
-    // generateNiceTicks() may extend tick bounds to the next "nice" number past the data range,
-    // which is desirable for general axis labeling but produces orphaned labels on a fixed-range colorbar.
-    const float range_epsilon = 1e-4f * std::max(std::fabs(cmax - cmin), 1.0f);
-    tick_values.erase(std::remove_if(tick_values.begin(), tick_values.end(),
-                                     [cmin, cmax, range_epsilon](float v) { return v < cmin - range_epsilon || v > cmax + range_epsilon; }),
-                      tick_values.end());
 
     uint Nticks = tick_values.size();
 
@@ -982,17 +1035,20 @@ std::vector<size_t> Visualizer::addColorbarByCenter(const char *title, const hel
         UUIDs.push_back(addLine(border.at(i), border.at(i + 1), font_color, COORDINATES_WINDOW_NORMALIZED));
     }
 
-    // Calculate tick spacing for formatting
-    double tick_spacing = 1.0;
-    if (Nticks > 1) {
-        tick_spacing = std::fabs(tick_values[1] - tick_values[0]);
-    }
+    // tick_spacing was set alongside tick_values above. It is the spacing used to generate them,
+    // not one recovered from the final vector, so it stays correct when there is only one tick or
+    // when the values are not uniformly spaced.
+
+    // Guard against a degenerate colormap range, which would otherwise divide by zero below and
+    // produce non-finite vertex coordinates.
+    const float colorbar_span = cmax - cmin;
+    const bool has_finite_span = std::isfinite(colorbar_span) && std::fabs(colorbar_span) > 0.f;
 
     std::vector<vec3> ticks;
     ticks.resize(2);
     for (uint i = 0; i < Nticks; i++) {
         float value = tick_values.at(i);
-        float x = center.x - 0.5f * size.x + (value - cmin) / (cmax - cmin) * size.x;
+        float x = has_finite_span ? center.x - 0.5f * size.x + (value - cmin) / colorbar_span * size.x : center.x;
 
         // Format tick label using new formatting function
         std::string label = formatTickLabel(value, tick_spacing, colorbar_integer_data);
@@ -1004,7 +1060,10 @@ std::vector<size_t> Visualizer::addColorbarByCenter(const char *title, const hel
         if (i > 0 && i < Nticks - 1) {
             ticks[0] = make_vec3(x, center.y - 0.25f * size.y, center.z - 0.001f);
             ticks[1] = make_vec3(x, center.y - 0.25f * size.y + 0.05f * size.y, center.z - 0.001f);
-            addLine(ticks[0], ticks[1], make_RGBcolor(0.25, 0.25, 0.25), COORDINATES_WINDOW_NORMALIZED);
+            // The returned UUID must be recorded like every other piece of colorbar geometry:
+            // updateColorbar() deletes the old colorbar by iterating colorbar_IDs, so a tick mark
+            // left out of this list is never deleted and accumulates on every colorbar refresh.
+            UUIDs.push_back(addLine(ticks[0], ticks[1], make_RGBcolor(0.25, 0.25, 0.25), COORDINATES_WINDOW_NORMALIZED));
             ticks[0] = make_vec3(x, center.y + 0.25f * size.y, center.z - 0.001f);
             ticks[1] = make_vec3(x, center.y + 0.25f * size.y - 0.05f * size.y, center.z - 0.001f);
             UUIDs.push_back(addLine(ticks[0], ticks[1], make_RGBcolor(0.25, 0.25, 0.25), COORDINATES_WINDOW_NORMALIZED));

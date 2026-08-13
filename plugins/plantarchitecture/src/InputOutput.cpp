@@ -496,6 +496,19 @@ void PlantArchitecture::writePlantStructureXML(uint plantID, const std::string &
     output_xml << "\t\t<base_position> " << plant_instances.at(plantID).base_position.x << " " << plant_instances.at(plantID).base_position.y << " " << plant_instances.at(plantID).base_position.z << " </base_position>" << std::endl;
     output_xml << "\t\t<plant_age> " << plant_instances.at(plantID).current_age << " </plant_age>" << std::endl;
 
+    // Phenological thresholds. These are set by setPlantPhenologicalThresholds() (called by every library
+    // builder) and are not derivable from the shoot structure, so they must be persisted or a restored
+    // plant silently falls back to the "no phenology scheduled" PlantInstance defaults. Readers treat
+    // these tags as optional, so files written before they existed still load.
+    output_xml << "\t\t<dd_to_dormancy_break> " << plant_instances.at(plantID).dd_to_dormancy_break << " </dd_to_dormancy_break>" << std::endl;
+    output_xml << "\t\t<dd_to_flower_initiation> " << plant_instances.at(plantID).dd_to_flower_initiation << " </dd_to_flower_initiation>" << std::endl;
+    output_xml << "\t\t<dd_to_flower_opening> " << plant_instances.at(plantID).dd_to_flower_opening << " </dd_to_flower_opening>" << std::endl;
+    output_xml << "\t\t<dd_to_fruit_set> " << plant_instances.at(plantID).dd_to_fruit_set << " </dd_to_fruit_set>" << std::endl;
+    output_xml << "\t\t<dd_to_fruit_maturity> " << plant_instances.at(plantID).dd_to_fruit_maturity << " </dd_to_fruit_maturity>" << std::endl;
+    output_xml << "\t\t<dd_to_dormancy> " << plant_instances.at(plantID).dd_to_dormancy << " </dd_to_dormancy>" << std::endl;
+    output_xml << "\t\t<max_leaf_lifespan> " << plant_instances.at(plantID).max_leaf_lifespan << " </max_leaf_lifespan>" << std::endl;
+    output_xml << "\t\t<is_evergreen> " << plant_instances.at(plantID).is_evergreen << " </is_evergreen>" << std::endl;
+
     for (auto &shoot: plant_instances.at(plantID).shoot_tree) {
 
         output_xml << "\t\t<shoot ID=\"" << shoot->ID << "\">" << std::endl;
@@ -936,6 +949,47 @@ std::vector<uint> PlantArchitecture::readPlantStructureXML(const std::string &fi
 
         plantID = addPlantInstance(base_position, plant_age);
         plantIDs.push_back(plantID);
+
+        // Phenological thresholds are optional: files written before these tags existed must still load,
+        // falling back to the PlantInstance defaults (which encode "no phenology scheduled"). Only apply
+        // them when the full set is present, since setPlantPhenologicalThresholds() writes all of them at
+        // once and a partial set has no meaningful interpretation.
+        if (plant.child("dd_to_dormancy_break") && plant.child("dd_to_flower_initiation") && plant.child("dd_to_flower_opening") && plant.child("dd_to_fruit_set") && plant.child("dd_to_fruit_maturity") && plant.child("dd_to_dormancy")) {
+
+            node_string = "dd_to_dormancy_break";
+            float dd_to_dormancy_break = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+
+            node_string = "dd_to_flower_initiation";
+            float dd_to_flower_initiation = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+
+            node_string = "dd_to_flower_opening";
+            float dd_to_flower_opening = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+
+            node_string = "dd_to_fruit_set";
+            float dd_to_fruit_set = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+
+            node_string = "dd_to_fruit_maturity";
+            float dd_to_fruit_maturity = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+
+            node_string = "dd_to_dormancy";
+            float dd_to_dormancy = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+
+            // max_leaf_lifespan and is_evergreen are independently optional so that a file carrying only the
+            // six thresholds still restores them.
+            float max_leaf_lifespan = plant_instances.at(plantID).max_leaf_lifespan;
+            if (plant.child("max_leaf_lifespan")) {
+                node_string = "max_leaf_lifespan";
+                max_leaf_lifespan = parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML");
+            }
+
+            bool is_evergreen = plant_instances.at(plantID).is_evergreen;
+            if (plant.child("is_evergreen")) {
+                node_string = "is_evergreen";
+                is_evergreen = (parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML") != 0.f);
+            }
+
+            setPlantPhenologicalThresholds(plantID, dd_to_dormancy_break, dd_to_flower_initiation, dd_to_flower_opening, dd_to_fruit_set, dd_to_fruit_maturity, dd_to_dormancy, max_leaf_lifespan, is_evergreen);
+        }
 
         int current_shoot_ID;
 

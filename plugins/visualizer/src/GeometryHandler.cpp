@@ -34,7 +34,7 @@ void GeometryHandler::allocateBufferSize(size_t primitive_count, VisualizerGeome
 }
 
 void GeometryHandler::addGeometry(size_t UUID, const VisualizerGeometryType &geometry_type, const std::vector<helios::vec3> &vertices, const helios::RGBAcolor &color, const std::vector<helios::vec2> &uvs, int textureID, bool override_texture_color,
-                                  bool has_glyph_texture, uint coordinate_system, bool visible_flag, bool iscontextgeometry, bool isskygeometry, float size) {
+                                  bool has_glyph_texture, uint coordinate_system, bool visible_flag, bool iscontextgeometry, bool isskygeometry, float size, bool blend_texture_alpha) {
 
     char vertex_count = getVertexCount(geometry_type);
 
@@ -96,6 +96,8 @@ void GeometryHandler::addGeometry(size_t UUID, const VisualizerGeometryType &geo
                         texture_flag_data[geometry_type].push_back(3); // 3 means use RGB for color and red channel of texture for alpha
                     } else if (override_texture_color) { // if texture color is overridden, color primitive based on RGB color but use texture transparence for alpha mask
                         texture_flag_data[geometry_type].push_back(2); // 2 means use RGB for color and texture transparency for alpha
+                    } else if (blend_texture_alpha) {
+                        texture_flag_data[geometry_type].push_back(4); // 4 means use texture for color and blend its alpha rather than thresholding it
                     } else {
                         texture_flag_data[geometry_type].push_back(1); // 1 means use texture for color and transparency for alpha
                     }
@@ -111,6 +113,8 @@ void GeometryHandler::addGeometry(size_t UUID, const VisualizerGeometryType &geo
                         texture_flag_data[geometry_type].at(texture_flag_index) = 3; // 3 means use RGB for color and red channel of texture for alpha
                     } else if (override_texture_color) { // if texture color is overridden, color primitive based on RGB color but use texture transparence for alpha mask
                         texture_flag_data[geometry_type].at(texture_flag_index) = 2; // 2 means use RGB for color and texture transparency for alpha
+                    } else if (blend_texture_alpha) {
+                        texture_flag_data[geometry_type].at(texture_flag_index) = 4; // 4 means use texture for color and blend its alpha rather than thresholding it
                     } else {
                         texture_flag_data[geometry_type].at(texture_flag_index) = 1; // 1 means use texture for color and transparency for alpha
                     }
