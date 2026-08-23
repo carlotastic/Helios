@@ -1801,7 +1801,7 @@ std::vector<uint> Context::loadXML(const char *filename, bool quiet) {
 
         if (has_material_vox) {
             // Material format: create voxel with default color, will assign material below
-            ID = addVoxel(make_vec3(0, 0, 0), make_vec3(0, 0, 0), 0, make_RGBAcolor(0, 0, 0, 1));
+            ID = addVoxel(make_vec3(0, 0, 0), make_vec3(1, 1, 1), 0, make_RGBAcolor(0, 0, 0, 1));
         } else {
             // Legacy format: parse color
             RGBAcolor color;
@@ -1815,7 +1815,7 @@ std::vector<uint> Context::loadXML(const char *filename, bool quiet) {
             }
 
             // * Add the Voxel * //
-            ID = addVoxel(make_vec3(0, 0, 0), make_vec3(0, 0, 0), 0, color);
+            ID = addVoxel(make_vec3(0, 0, 0), make_vec3(1, 1, 1), 0, color);
         }
 
         getPrimitivePointer_private(ID)->setTransformationMatrix(transform);

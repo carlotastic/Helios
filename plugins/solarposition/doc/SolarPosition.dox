@@ -369,7 +369,7 @@
 
  \subsection SpectralFlux Getting Spectral Solar Irradiance
 
- For applications requiring wavelength-resolved irradiance (e.g., photosynthesis models with wavelength-dependent quantum yield, remote sensing, hyperspectral image simulation), the \ref SolarPosition::calculateSpectralIrradiance() method computes high-resolution spectral irradiance using the SSolar-GOA model.
+ For applications requiring wavelength-resolved irradiance (e.g., photosynthesis models with wavelength-dependent quantum yield, remote sensing, hyperspectral image simulation), the \ref SolarPosition::calculateGlobalSolarSpectrum() "calculateGlobalSolarSpectrum()", \ref SolarPosition::calculateDirectSolarSpectrum() "calculateDirectSolarSpectrum()" and \ref SolarPosition::calculateDiffuseSolarSpectrum() "calculateDiffuseSolarSpectrum()" methods compute high-resolution spectral irradiance using the SSolar-GOA model.
 
  This method uses the same atmospheric conditions set via \ref SolarPosition::setAtmosphericConditions(), automatically deriving additional parameters (water vapor, ozone column) as needed. Results are stored in Context global data for use by other plugins (e.g., radiation plugin for ray tracing with spectral sources).
 

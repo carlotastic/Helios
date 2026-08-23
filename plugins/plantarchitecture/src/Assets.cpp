@@ -590,7 +590,26 @@ void MaizePhytomerCreationFunction(std::shared_ptr<Phytomer> phytomer, uint shoo
 
     phytomer->scaleLeafPrototypeScale(scale);
 
-    if (shoot_node_index > 8 && shoot_node_index < 12) {
+    // Maize forms an axillary ear meristem at every above-ground node except the upper six to eight
+    // below the tassel, and apical dominance means only the uppermost eligible node develops a
+    // harvestable ear. Anchoring the ear to the TOP of the shoot rather than to fixed node indices
+    // keeps it in the right part of the canopy when max_nodes is changed; an absolute window is only
+    // correct for one particular plant height.
+    //
+    // Computed in signed int deliberately: shoot_node_index and shoot_max_nodes are uint, so a plant
+    // shorter than nodes_below_tassel would wrap to a huge value in unsigned arithmetic. In signed
+    // arithmetic apical_ear_node simply goes negative and never matches, leaving a short shoot earless.
+    constexpr int nodes_below_tassel = 6;
+    const int apical_ear_node = int(shoot_max_nodes) - nodes_below_tassel;
+
+    // Number of ears borne on the plant. Commercial hybrids are near-strictly single-eared, so this
+    // is 1; a second sub-apical ear (seen at low planting density and high nitrogen) is obtained by
+    // setting this to 2, which additionally bears an ear at the node just below the apical one.
+    constexpr int ears_per_plant = 1;
+
+    const bool is_ear = shoot_max_nodes > 0 && (int(shoot_node_index) == apical_ear_node || (ears_per_plant >= 2 && int(shoot_node_index) == apical_ear_node - 1));
+
+    if (is_ear) {
         phytomer->phytomer_parameters.inflorescence.flowers_per_peduncle = 1;
         phytomer->phytomer_parameters.inflorescence.fruit_prototype_function = MaizeEarPrototype;
         phytomer->phytomer_parameters.inflorescence.fruit_prototype_scale = 0.2;

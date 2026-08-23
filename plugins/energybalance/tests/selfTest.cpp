@@ -731,3 +731,50 @@ DOCTEST_TEST_CASE("EnergyBalanceModel emissivity defined on multiple bands witho
 int EnergyBalanceModel::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);
 }
+
+DOCTEST_TEST_CASE("EnergyBalanceModel surface humidity scales surface vapor pressure") {
+    // Regression test: "surface_humidity" (f_s) must multiply the SURFACE saturation vapor pressure
+    // e_s(T_s), not the air vapor pressure e_s(T_a)*h. The buggy form computed
+    // (e_s(T_s) - e_s(T_a)*h*f_s), so drying the surface RAISED the vapor-pressure difference and
+    // increased evaporation, which is backwards.
+    //
+    // Because surface_humidity defaults to 1, both forms agree at the default and the error was
+    // invisible until a user set f_s < 1.
+    //
+    // The observable used here is the solved surface temperature, which is driven by the energy
+    // balance residual where the bug lives. Drying the surface suppresses evaporation, so it must
+    // remove evaporative cooling and WARM the surface. The buggy form cooled it instead:
+    //   fixed  288.68 K -> 295.55 K (warms, correct)
+    //   buggy  288.68 K -> 283.54 K (cools, backwards)
+    Context context;
+    uint UUID = context.addPatch(make_vec3(0, 0, 0), make_vec2(1, 1));
+
+    context.setPrimitiveData(UUID, "air_temperature", 300.f);
+    context.setPrimitiveData(UUID, "air_humidity", 0.5f);
+    context.setPrimitiveData(UUID, "boundarylayer_conductance", 1.f);
+    context.setPrimitiveData(UUID, "moisture_conductance", 1.f);
+    context.setPrimitiveData(UUID, "radiation_flux_LW", 459.3f);
+
+    EnergyBalanceModel model(&context);
+    model.disableMessages();
+    model.addRadiationBand("LW");
+
+    // Saturated surface (f_s = 1, the default) -- unaffected by the fix.
+    context.setPrimitiveData(UUID, "surface_humidity", 1.f);
+    DOCTEST_CHECK_NOTHROW(model.run());
+    float T_saturated;
+    DOCTEST_CHECK_NOTHROW(context.getPrimitiveData(UUID, "temperature", T_saturated));
+
+    // Dry surface (f_s = 0.2).
+    context.setPrimitiveData(UUID, "surface_humidity", 0.2f);
+    DOCTEST_CHECK_NOTHROW(model.run());
+    float T_dry;
+    DOCTEST_CHECK_NOTHROW(context.getPrimitiveData(UUID, "temperature", T_dry));
+
+    DOCTEST_CHECK(std::isfinite(T_saturated));
+    DOCTEST_CHECK(std::isfinite(T_dry));
+    // A surface that cannot evaporate freely loses less latent heat and must be warmer, not cooler.
+    DOCTEST_CHECK(T_dry > T_saturated);
+    // Guard the magnitude too, so a merely-marginal difference cannot pass.
+    DOCTEST_CHECK(T_dry - T_saturated > 1.f);
+}

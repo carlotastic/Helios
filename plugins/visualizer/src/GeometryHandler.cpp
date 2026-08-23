@@ -741,6 +741,11 @@ void GeometryHandler::clearAllGeometry() {
     UUID_map.clear();
 
     deleted_primitive_count = 0;
+
+    // Removing every primitive leaves no dirty UUIDs behind to signal that anything changed, so
+    // flag the buffers for a full re-upload. Without this the GPU keeps the previously uploaded
+    // geometry and continues to render the scene that was just cleared.
+    buffer_needs_full_update = true;
 }
 
 void GeometryHandler::clearContextGeometry() {
@@ -1005,4 +1010,9 @@ const std::unordered_set<size_t> &GeometryHandler::getDirtyUUIDs() const {
 
 void GeometryHandler::clearDirtyUUIDs() {
     dirty_UUIDs.clear();
+    buffer_needs_full_update = false;
+}
+
+bool GeometryHandler::doesBufferNeedFullUpdate() const {
+    return buffer_needs_full_update;
 }

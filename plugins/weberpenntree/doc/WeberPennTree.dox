@@ -15,7 +15,7 @@
 
  \section WPTissues Known Issues
 
- - The following parameters described in Weber and Penn (1995) are not implemented: nCurveBack, Flare. 
+ - The following parameters described in Weber and Penn (1995) are not implemented: nCurveBack. 
 
  \section WPTreeIntro Introduction
  
@@ -77,7 +77,7 @@
       <nSplitAngle> 40 10 10 0 </nSplitAngle>
       <nSplitAngleV> 0 0 0 0 </nSplitAngleV>
       <nCurveRes> 8 5 3 1 </nCurveRes>
-      <nCurve> -60 -40 10 </nCurve>
+      <nCurve> -60 -40 10 0 </nCurve>
       <nCurveV> 0 0 0 0 </nCurveV>
       <nCurveBack> 0 -70 0 0 </nCurveBack>
       <nLength> 1 0.6 0.4 0.3 </nLength>
@@ -172,7 +172,7 @@
 
  The trunk radius at the base is given as a fraction (Ratio) of the total height of the tree.  For example, Ratio = 0.05 gives a trunk radius that is 5% of the total height of the tree.  The trunk radius can taper along its lenght according to the parameter `0Taper', with 0<=0Taper<=1. 0Taper=0 gives no tapering, and 0Taper=1 tapers the trunk to a point (i.e., radius=0).
 
- The shape of the tree is given by the ID parameter 'Shape'.  There are 8 supported tree shapes, which are given in the table below.  One important caveat is when <b>BaseSplits</b> is greater than 0, in which case the shape applies to each individual split branch and not necessarily to the tree as a whole.  So BaseSplits=0 and Shape=1 (spherical) would result in one split and two spherical crown sub-shapes.
+ The shape of the tree is given by the ID parameter 'Shape'.  There are 8 supported tree shapes, which are given in the table below.  One important caveat is when <b>BaseSplits</b> is greater than 0, in which case the shape applies to each individual split branch and not necessarily to the tree as a whole.  So BaseSplits=1 and Shape=1 (spherical) would result in one split and two spherical crown sub-shapes.
 
  <table>
  <caption>Available tree crown shapes</caption>
@@ -203,7 +203,7 @@
 
   By default, the Weber-Penn tree model will create a semi-random leaf angle distribution by rotating leaves around its parent branch according to the parameters set for that particular tree. However, this is typically not realistic for how leaves arrange themselves in nature, and it is often desirable to specify a leaf angle distribution based on actual data. A custom leaf angle (inclination) distribution function can be specified for a given tree type in the tree library XML file using the tag '\<LeafAngleDist\> ... \</LeafAngleDist\>'. The elements within the tag should be probability densities of leaf inclination for discrete angle classes ranging from \f$\theta_L=0\f$ to \f$\theta_L=\pi\f$ rad.
 
-  Here is an example: Imagine that we wanted to have N=18 discrete leaf angle bins in our leaf angle PDF \f$g_L\f$. The width of one discrete bin would be \f$\Delta \theta_L=\pi/18\approx 0.1795\f$ rad. Each of the 18 bins of our PDF \f$g_L\f$ should give the probability density that we have a leaf inclination angle that falls within that bin. By definition, the following should hold for our PDF:
+  Here is an example: Imagine that we wanted to have N=18 discrete leaf angle bins in our leaf angle PDF \f$g_L\f$. The width of one discrete bin would be \f$\Delta \theta_L=\pi/18\approx 0.1745\f$ rad. Each of the 18 bins of our PDF \f$g_L\f$ should give the probability density that we have a leaf inclination angle that falls within that bin. By definition, the following should hold for our PDF:
 
   <center>\f$\sum\limits_{i=1}^N\,g_{L,i}\Delta \theta_L=1\f$</center>
 
@@ -250,7 +250,7 @@ For a typical almond tree, the PDF for N=18 is tabulated below. Note that we hav
       <!--
       Many other parameters here
       -->
-      <LeafAngleDist>0.2290 0.6650 0.9170 0.9450 0.8650 0.7450 0.6190 0.4240 0.3100 0 0 0 0 0 0 0 0 0</LeafAngleDist>
+      <LeafAngleDist>0.2294 0.6662 0.9187 0.9467 0.8666 0.7464 0.6201 0.4248 0.3106 0 0 0 0 0 0 0 0 0</LeafAngleDist>
     </WeberPennTree>
 
   </helios>

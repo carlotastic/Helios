@@ -393,6 +393,21 @@ void LeafOptics::PROSPECT(float numberlayers, float Chlorophyllcontent, float ca
     double k;
     double tau, ralf, r12, talf, t12, t21, r21, denom, Ta, Ra, t, r;
 
+    // PROSPECT() is a spectrum-computing entry point in its own right, so it must apply the
+    // same input validation as getLeafSpectra(). Validating through a LeafOpticsProperties
+    // struct keeps the rules in one place rather than duplicating them here.
+    LeafOpticsProperties validation_properties;
+    validation_properties.numberlayers = numberlayers;
+    validation_properties.chlorophyllcontent = Chlorophyllcontent;
+    validation_properties.carotenoidcontent = carotenoidcontent;
+    validation_properties.anthocyancontent = anthocyancontent;
+    validation_properties.brownpigments = brownpigments;
+    validation_properties.watermass = watermass;
+    validation_properties.drymass = drymass;
+    validation_properties.protein = protein;
+    validation_properties.carbonconstituents = carbonconstituents;
+    validateProperties(validation_properties);
+
     // These are output arguments - overwrite rather than append so that repeated
     // calls with the same vectors do not accumulate results.
     reflectivities_fit.clear();

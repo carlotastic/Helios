@@ -9,6 +9,19 @@ using namespace helios;
 
 float err_tol = 1e-3;
 
+//! Test-only accessor for LiDARcloud's private test/diagnostic state
+/**
+ * Declared a friend of LiDARcloud (see LiDAR.h) and defined only here, so none of this is
+ * exposed to users of the library. Forcing the brute-force leaf-area path exists purely so the
+ * self-tests can A/B it against the fast DDA path; it has no meaning in normal use.
+ */
+class LiDARTestHelper {
+public:
+    static void forceBruteForceLeafArea(LiDARcloud &pointcloud, bool force) {
+        pointcloud.force_bruteforce_LAD = force;
+    }
+};
+
 int LiDARcloud::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);
 }
@@ -3068,7 +3081,7 @@ DOCTEST_TEST_CASE("LiDAR Eight Voxel Multi-Return Gaussian Weighting Test") {
 DOCTEST_TEST_CASE("LiDAR LAD DDA vs Brute-Force Equivalence") {
     // The leaf-area inversion has two code paths that must produce identical results: the fast per-beam
     // 3D-DDA traversal (used for regular addGrid() lattices) and the brute-force per-cell slab loop
-    // (fallback for non-lattice grids). forceBruteForceLeafArea() forces the latter so we can A/B them
+    // (fallback for non-lattice grids). LiDARTestHelper::forceBruteForceLeafArea() forces the latter so we can A/B them
     // on identical input. Every per-cell output (leaf area, G(theta), beam count, LAD variance) must match
     // to floating-point tolerance. Several grid geometries are exercised: cubic multi-cell, non-cubic with
     // an off-center origin, a single-return scan, and a multi-return scan.
@@ -3095,7 +3108,7 @@ DOCTEST_TEST_CASE("LiDAR LAD DDA vs Brute-Force Equivalence") {
             }
             lidar.triangulateHitPoints(0.04, 10);
 
-            lidar.forceBruteForceLeafArea(force_bruteforce);
+            LiDARTestHelper::forceBruteForceLeafArea(lidar, force_bruteforce);
             lidar.calculateLeafArea(&context);
 
             uint Ncells = lidar.getGridCellCount();
@@ -3162,7 +3175,7 @@ DOCTEST_TEST_CASE("LiDAR LAD Non-Lattice Fallback") {
         lidar.syntheticScan(&context, true, true);
         lidar.triangulateHitPoints(0.04, 10);
 
-        lidar.forceBruteForceLeafArea(force_bruteforce);
+        LiDARTestHelper::forceBruteForceLeafArea(lidar, force_bruteforce);
         lidar.calculateLeafArea(&context);
 
         leaf_area.resize(lidar.getGridCellCount());

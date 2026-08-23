@@ -16,6 +16,12 @@ uniform int lightingModel;
 
 uniform float lightIntensity;
 
+//Multiplier applied to vertex-interpolated colors. Normally 1.5, which brightens ordinary
+//renders. Visualizer::enableExactColorMode() sets it to 1.0 so that a color written into the
+//Context is read back out of the framebuffer unchanged, which is required when the framebuffer
+//is used to carry data (e.g. object ID codes) rather than to be looked at.
+uniform float colorBoost;
+
 uniform int Rbound;
 
 uniform samplerBuffer color_texture_object;
@@ -94,14 +100,14 @@ void main(){
 
     if( textureFlag==0 ){//Color by interpolating the colors at vertices
         color = fragmentColor;
-        color.rgb = color.rgb*1.5;
+        color.rgb = color.rgb*colorBoost;
     }else if( textureFlag==1 ){//Color by texture map
         color = texture(textureSampler, texcoord3);
         if(color.a<0.5 ){
             discard;
         }
     }else if( textureFlag==2 ){//Color by interpolating the colors at vertices, and set the transparency according to the red channel of the texture map given by textureSampler
-        color = fragmentColor*1.5;
+        color = fragmentColor*colorBoost;
         color.a = texture(textureSampler, texcoord3).a;
         if( color.a<0.5 ){
             discard;

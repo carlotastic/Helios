@@ -109,19 +109,29 @@ An important verification test of the energy balance model, aside from verifying
 
 1 - <b>Grape Berry Temperature Measurements</b>
 
-<a href="https://doi.org/10.1016/j.agrformet.2021.108431">Ponce de León and Bailey (2021)</a>
+<a href="https://doi.org/10.1016/j.agrformet.2021.108431">Ponce de León and Bailey (2021)</a> validated the energy balance model against grape berry temperature measured with fine-wire thermocouples in four Cabernet Sauvignon vineyards, each with a different trellis system: VSP and Wye at Davis, CA (flat terrain), and Goblet and Unilateral at Napa, CA (terraced on a 30° east-facing slope). Thermocouples were inserted into berries in exposed clusters on both the east and west side of the vine, and a weather station adjacent to each vine supplied the ambient forcing so that only berry-scale transfer was being tested.
+
+This is a demanding test of the model because berry temperature is dominated by the sun-shade transitions produced by the surrounding leaves. Measurements showed that shaded berries closely track air temperature, while intermittent direct beam exposure can drive berries more than 10 °C above ambient. Reproducing this behavior requires the 3D geometry of the vine to be resolved accurately enough to predict when each individual berry is shaded. Agreement was very good across all four trellis systems, with \f$R^2\f$ between 0.94 and 0.97, index of agreement between 0.98 and 0.99, and NRMSE between 4.6% and 8.5%. The largest instantaneous errors occurred at rapid sun-shade transitions, where a modeled transition could lag the measured one by about an hour due to small errors in the assumed position of individual berries and leaves.
+
+The study also demonstrated the importance of the berry heat storage term in the energy balance. Without it, simulated berry temperature responded too quickly to changes in absorbed radiation and consistently over- and under-shot the measured extremes.
 
 \image html berry_temperature_validation.jpg width=700
 <b>Figure.</b> Daily course of simulated and average measured grape berry temperature in the east and west side of the vine for trellis systems (a) VSP, (b) Wye, (c) Goblet and (d) Unilateral.
 
-2 - <b>Cowpea Leaf Temperature Measurements</b>
+2 - <b>Sorghum Leaf Temperature Measurements</b>
 
-<a href="https://doi.org/10.34133/plantphenomics.0169">Mayanja et al. (2024)</a>
+<a href="https://doi.org/10.34133/plantphenomics.0169">Mayanja et al. (2024)</a> used Helios to analyze the sensitivity of leaf temperature to stomatal conductance, and as part of that work validated simulated leaf temperature against field measurements in four diverse sorghum lines from the sorghum Nested Association Mapping panel (PI656023, PI534133, PI656111, PI533766) grown at the UC Davis Agronomy fields. For each genotype, 30 paired measurements of leaf temperature and stomatal conductance were collected on healthy, fully expanded sunlit leaves using a LI-600 porometer, and the canopy geometry used in the simulation was measured directly in the field.
 
-\image html cowpea_leaf_temperature_validation.png width=400
-<b>Figure.</b> Measured and simulated cowpea leaf temperature (T<sub>leaf</sub>, °C) for four different cowpea genotypes.
+The model reproduced both the genotype-averaged leaf temperature and stomatal conductance, with a root mean square error of 0.95 °C for leaf temperature and 0.011 mol m<sup>-2</sup> s<sup>-1</sup> for stomatal conductance. As the figure below shows, the simulated spread across genotypes is larger than the measured spread, which is expected since the simulation resolves the full leaf-to-leaf variability within the canopy rather than a sample of sunlit leaves.
+
+\image html sorghum_leaf_temperature_validation.png width=400
+<b>Figure.</b> Measured and simulated leaf temperature (\f$\hat{T}_l\f$, °C) averaged across each of four sorghum genotypes. The hat operator denotes a spatial average, and error bars denote the standard deviation across samples.
 
 3 - <b>Redbud Tree Leaf Temperature Measurements</b>
+
+An additional validation was performed for an eastern redbud (<i>Cercis canadensis</i>) tree, in which simulated leaf temperature was compared against an ensemble of LI-600 porometer measurements collected across a single day (September 4, 2023). Because many leaves were sampled at each time, the measurements capture the spread in leaf temperature produced by variation in leaf orientation and shading within the crown, rather than a single canopy mean.
+
+The model reproduces the diurnal course of canopy-average leaf temperature closely, with a mean difference of 0.05 °C, an RMSE of 0.48 °C, and \f$R^2 = 0.99\f$ between the measured and modeled moving averages. The instantaneous scatter shows the expected behavior: the measured distribution is wider than the modeled one during the morning, when a few strongly sunlit leaves reach temperatures several degrees above the canopy average.
 
 \image html redbud_leaf_temperature_validation.png width=600
 <b>Figure.</b> Comparison between simulated leaf temperature and an ensemble of measurements using a LICOR LI-600 porometer across a day.
@@ -134,19 +144,51 @@ An important verification test of the energy balance model, aside from verifying
 
 \section PhotosynthesisValidation Canopy Photosynthesis Validation
 
+1 - <b>Soybean Eddy Covariance Measurements</b>
+
+   <a href="https://doi.org/10.1016/j.agrformet.2025.110941">Wang et al. (2026)</a> validated Helios-simulated gross primary productivity (GPP) against eddy covariance (EC) measurements over a soybean field at Bondville, Illinois during the 2024 growing season. Half-hourly GPP was simulated using the radiation, energy balance, stomatal conductance (Buckley-Mott-Farquhar), and photosynthesis (Farquhar-von Caemmerer-Berry) plug-ins, with a homogeneous canopy generated by the canopy generator plug-in using measured LAI, canopy height, and a planophile leaf angle distribution. The study is notable as a validation exercise because the same leaf-level optical and photosynthesis models were also run in the 1D SCOPE model, isolating the effect of the 3D radiation transfer representation.
+
+   The primary focus of the study was the sensitivity of simulated GPP to how leaf photosynthetic traits are parameterized. Ten schemes were tested, spanning combinations of uniform versus measured vertical profiles and constant versus seasonally varying values for the maximum carboxylation rate (\f$V_{cmax,25}\f$), leaf chlorophyll content, and leaf mass per area. Simulated GPP was found to be strongly sensitive to the vertical profile and seasonal variation of \f$V_{cmax,25}\f$, and largely insensitive to that of chlorophyll content and leaf mass per area. Under the most complete parameterization (scheme S10), Helios reproduced the EC GPP with \f$R^2 = 0.90\f$ and a bias of 0.22 \f$\mu\f$mol m<sup>-2</sup> s<sup>-1</sup> over the full season, comparable to or slightly better than SCOPE (\f$R^2 = 0.87\f$, bias 0.55 \f$\mu\f$mol m<sup>-2</sup> s<sup>-1</sup>).
+
+   The figure below illustrates the importance of the \f$V_{cmax,25}\f$ parameterization. Using a constant, vertically uniform trait value (S1) produced a substantial overestimation of GPP, which was progressively removed as seasonal variation (S4, S5) and then the measured vertical profile (S8, S10) were introduced. This is an important practical result for Helios users, since it indicates that the accuracy of simulated canopy photosynthesis is limited more by the specification of the vertical distribution of leaf photosynthetic capacity than by the representation of canopy architecture or radiation transfer.
+
+   \image html soybean_GPP_validation.jpg width=800
+   <b>Figure.</b> Scatter plots of Helios-simulated half-hourly GPP against eddy covariance GPP for leaf trait parameterization schemes S1, S4, S5, S8, and S10. (a-e) correspond to the early-season period (DOY 178 to 195) and (f-j) to the late-season period (DOY 240 to 255). Scheme S1 uses constant, vertically uniform leaf traits; S4 and S5 add seasonal variation; S8 adds the measured \f$V_{cmax,25}\f$ vertical profile; and S10 uses measured vertical profiles of all three traits. The dashed gray line is 1:1 and the solid red line is the fitted line. Reproduced from <a href="https://doi.org/10.1016/j.agrformet.2025.110941">Wang et al. (2026)</a>.
+
+   Aggregating the simulated half-hourly fluxes to a daily time step shows that Helios tracks the day-to-day variability in EC GPP throughout the season, including the sharp drops on overcast days and the decline through senescence. The overestimation by the uniform-trait scheme S1 is most apparent in the early season and again late in the season, which is where the sunlit fraction of the canopy is largest and the vertical gradient in \f$V_{cmax,25}\f$ therefore matters most.
+
+   \image html soybean_GPP_daily_validation.jpg width=800
+   <b>Figure.</b> Daily GPP simulated by (a) SCOPE and (b) Helios for schemes S1, S4, S5, S8, and S10, compared against daily eddy covariance GPP (black line). The simulated half-hourly GPP was integrated to a daily scale. Reproduced from <a href="https://doi.org/10.1016/j.agrformet.2025.110941">Wang et al. (2026)</a>.
+
 
 \section LiDARValidation LiDAR Canopy Measurement Validation
 
--# Leaf Angle Distribution Measurements
+1 - <b>Leaf Angle Distribution Measurements</b>
 
-    <a href="http://dx.doi.org/doi:10.1016/j.rse.2017.03.011">Bailey and Mahaffee (2017a)</a>
+   <a href="http://dx.doi.org/doi:10.1016/j.rse.2017.03.011">Bailey and Mahaffee (2017a)</a> developed and validated the method used by the LiDAR plug-in to measure the three-dimensional distribution of leaf orientation. The method triangulates the laser hit points to reconstruct continuous leaf surfaces, from which triangle normal vectors give the leaf angle probability density function. A critical detail is that each triangle must be weighted by its area projected in the direction of the scanner, otherwise the resulting distribution biases heavily toward normals pointed back at the LiDAR instrument.
 
--# Leaf Angle Distribution Method Intercomparison Study
+   The method was first verified using synthetic scans of circular disks with known orientation, generated in the same way as the synthetic scans produced by the plug-in. When the correct area weighting was applied, the computed distributions closely matched the exact distributions, whereas the unweighted distributions were strongly biased (e.g., incorrectly finding triangles inclined at 10° to be about three times more likely than those at 45°). Errors in the recovered distribution decreased as scan resolution or leaf area density was increased.
 
-    <a href="https://doi.org/10.1111/nph.70379">Mutugi Murithi et al. (2025)</a>
+   Field validation was performed in an isolated 6 m tall black cottonwood tree and in a VSP-trained grapevine canopy, comparing LiDAR-derived distributions against manual measurements made with a digital inclinometer and compass. Agreement was good in the tree, where leaves have little curvature. In the vineyard, agreement was poor, but a rater intercomparison in which nine individuals measured the same 20 leaves showed the manual measurements themselves to have standard deviations of 7.3° in inclination and 14.7° in azimuth due to the high curvature of grapevine leaves. This illustrates one of the primary advantages of the LiDAR method: it resolves leaf curvature rather than requiring an observer to assign a single subjective "average" normal to each leaf.
 
--# Leaf Area Measurements
+   \image html leafangle_lidar_validation.jpg width=700
+   <b>Figure.</b> Probability density functions of leaf inclination angle for 12 volumes within an isolated tree. Note that \f$\theta_L = 0\f$ and \f$\theta_L = 90^\circ\f$ correspond to horizontal and vertical leaves, respectively. Solid red lines represent the manually measured probability density functions (50 samples per zone), and gray columns are the LiDAR measurement. Columns correspond to the volume's azimuthal direction, and rows correspond to the volume's vertical level (\f$z_1\f$ is lowest, \f$z_3\f$ is highest). \f$N\f$ denotes the number of triangles comprising the density function. Reproduced from <a href="http://dx.doi.org/doi:10.1016/j.rse.2017.03.011">Bailey and Mahaffee (2017a)</a>.
 
-    <a href="http://dx.doi.org/doi:10.1088/1361-6501/aa5cfd">Bailey and Mahaffee (2017b)</a>
+2 - <b>Leaf Angle Distribution Method Intercomparison Study</b>
+
+   <a href="https://doi.org/10.1111/nph.70379">Mutugi Murithi et al. (2025)</a> conducted an independent intercomparison of six terrestrial LiDAR-based leaf inclination angle distribution (LIAD) algorithms, including the Helios method of Bailey and Mahaffee (2017a), along with the traditional leveled digital photography (LDP) approach. The algorithms were applied to point clouds of eight real tree species and of three synthetic trees constructed to span the range of classical distribution types.
+
+   The synthetic cases are the relevant validation test, since only there is the true distribution known exactly. Helios was used to generate the simulated LiDAR scans of the three synthetic canopies (four scanner positions, 5000 × 9000 zenithal × azimuthal points), which the algorithms were then applied to blind. For the average leaf inclination angle, the Helios method recovered 58.3° against a true value of 56.9° for the spherical tree, 42.0° against 39.7° for the uniform tree, and 68.4° against 66.4° for the erectophile tree — errors of roughly 2° in all three cases, and the smallest of any algorithm tested. The authors concluded that it "may currently be the best TLS-based method to estimate LIAD in tree canopies."
+
+3 - <b>Leaf Area Measurements</b>
+
+   <a href="http://dx.doi.org/doi:10.1088/1361-6501/aa5cfd">Bailey and Mahaffee (2017b)</a> validated the leaf area measurement method implemented in the plug-in. The novelty of this method is that the fraction of leaf area projected in the beam direction, \f$G\f$, is measured directly from the triangulated hit points rather than being assumed or measured separately, and that radiation transfer theory is used to invert the measured gap probability for leaf area density.
+
+   Synthetic scans of disks of known area were again used for verification. The measured \f$G\f$ was over-predicted by about 14% on average, which is expected since disks whose normals are nearly perpendicular to the beam are not fully triangulated, and the resulting leaf area was correspondingly under-predicted by about 15%. Importantly, the synthetic tests also demonstrated the advantage of the radiation transfer inversion over the conventional point quadrat analogy: the point quadrat approach degraded progressively as leaf area density increased, reaching a 35% negative bias at the highest density, because it assumes a beam can intersect at most one leaf within a voxel.
+
+   Field validation was performed by comparing LiDAR-measured leaf area against destructive sampling with a leaf area meter in six volumes of an isolated black cottonwood tree. Agreement was very good, with an index of agreement of 0.98 and a normalized RMSE of 13%.
+
+   \image html leafarea_lidar_validation.jpg width=450
+   <b>Figure.</b> Comparison of manual (destructive) leaf area measurements with the LiDAR measurements. Points correspond to the measured leaf area within a voxel and are labeled by the voxel number. The solid diagonal line corresponds to 1:1 or perfect agreement. Agreement is quantified by the index of agreement (\f$d\f$), the normalized root-mean-squared error (nRMSE), and mean bias. Reproduced from <a href="http://dx.doi.org/doi:10.1088/1361-6501/aa5cfd">Bailey and Mahaffee (2017b)</a>.
 
 */

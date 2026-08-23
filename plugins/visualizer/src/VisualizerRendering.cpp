@@ -140,6 +140,7 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
         primaryShader.enableTextureMasks();
         primaryShader.setLightingModel(primaryLightingModel);
         primaryShader.setLightIntensity(lightintensity);
+        primaryShader.setColorBoost(colorboost);
 
         render(false);
 
@@ -218,7 +219,8 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
             uvs = {helios::make_vec2(0.f, 0.f), helios::make_vec2(1.f, 0.f), helios::make_vec2(1.f, 1.f / aspect_ratio), helios::make_vec2(0.f, 1.f / aspect_ratio)};
         }
 
-        background_rectangle_ID = addRectangleByVertices(vertices, "plugins/visualizer/textures/transparent.jpg", uvs, COORDINATES_WINDOW_NORMALIZED);
+        std::string texture_path = helios::resolvePluginAsset("visualizer", "textures/transparent.jpg").string();
+        background_rectangle_ID = addRectangleByVertices(vertices, texture_path.c_str(), uvs, COORDINATES_WINDOW_NORMALIZED);
     }
 
     // Restore navigation gizmo state
@@ -227,7 +229,7 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
     }
 }
 
-void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
+helios::vec4 Visualizer::buildImageDisplayGeometry(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
     if (pixel_data.empty()) {
         helios_runtime_error("ERROR (Visualizer::displayImage): Pixel data was empty.");
     }
@@ -237,6 +239,8 @@ void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint
 
     // Clear out any existing geometry
     geometry_handler.clearAllGeometry();
+
+    resetCachedGeometryIDs();
 
     // Register the data as a texture
     uint textureID = registerTextureImage(pixel_data, helios::make_uint2(width_pixels, height_pixels));
@@ -267,6 +271,12 @@ void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint
     navigation_gizmo_was_enabled_before_image_display = navigation_gizmo_enabled;
     hideNavigationGizmo();
 
+    return make_vec4(center.x - 0.5f * image_size.x, center.y - 0.5f * image_size.y, center.x + 0.5f * image_size.x, center.y + 0.5f * image_size.y);
+}
+
+void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
+    buildImageDisplayGeometry(pixel_data, width_pixels, height_pixels);
+
     plotInteractive();
 }
 
@@ -286,6 +296,97 @@ void Visualizer::displayImage(const std::string &file_name) {
     }
 
     displayImage(image_data, image_width, image_height);
+}
+
+void Visualizer::displayImageWithBoundingBoxes(const std::string &image_file, const std::string &bbox_file, const std::string &classes_file, float line_width, uint fontsize) {
+
+    if (!validateTextureFile(image_file)) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithBoundingBoxes): File " + image_file + " does not exist or is not a valid image file.");
+    }
+
+    // Validated here rather than being left to addLine(), which would report the DPI-scaled width and not the value the caller passed.
+    if (line_width <= 0.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithBoundingBoxes): Line width must be positive (got " + std::to_string(line_width) + ").");
+    }
+    if (line_width * getDPIScale() > 100.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithBoundingBoxes): Line width " + std::to_string(line_width) + " scales to " + std::to_string(line_width * getDPIScale()) +
+                             " framebuffer pixels on this display, which exceeds the maximum supported width of 100. Please specify a smaller line width value.");
+    }
+
+    const std::vector<BoundingBox> bounding_boxes = readBoundingBoxFile(bbox_file);
+
+    // An explicitly given class name file must exist. When none is given, "classes.txt" beside the annotation file is used if it is there, and otherwise boxes are labeled with their numeric class ID.
+    std::map<uint, std::string> class_names;
+    if (!classes_file.empty()) {
+        class_names = readBoundingBoxClassNames(classes_file);
+    } else {
+        const std::string sibling_classes_file = helios::getFilePath(bbox_file, true) + "classes.txt";
+        if (std::filesystem::exists(sibling_classes_file)) {
+            class_names = readBoundingBoxClassNames(sibling_classes_file);
+        }
+    }
+
+    if (message_flag && bounding_boxes.empty()) {
+        std::cout << "Note (Visualizer::displayImageWithBoundingBoxes): The bounding box annotation file '" << bbox_file << "' contains no boxes, so the image is displayed without an overlay." << std::endl;
+    }
+
+    std::vector<unsigned char> image_data;
+    uint image_width, image_height;
+
+    if (image_file.substr(image_file.find_last_of('.') + 1) == "png") {
+        read_png_file(image_file.c_str(), image_data, image_height, image_width);
+    } else { // JPEG
+        read_JPEG_file(image_file.c_str(), image_data, image_height, image_width);
+    }
+
+    const vec4 image_extent = buildImageDisplayGeometry(image_data, image_width, image_height);
+
+    addBoundingBoxOverlay(bounding_boxes, class_names, image_extent, line_width, fontsize);
+
+    plotInteractive();
+}
+
+void Visualizer::displayImageWithSegmentationMasks(const std::string &image_file, const std::string &mask_file, float fill_opacity, float line_width, uint fontsize, bool show_labels) {
+
+    if (!validateTextureFile(image_file)) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): File " + image_file + " does not exist or is not a valid image file.");
+    }
+
+    if (fill_opacity < 0.f || fill_opacity > 1.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): Fill opacity must be between 0 and 1 (got " + std::to_string(fill_opacity) + ").");
+    }
+
+    // Validated here rather than being left to addLine(), which would report the DPI-scaled width and not the value the caller passed.
+    if (line_width <= 0.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): Line width must be positive (got " + std::to_string(line_width) + ").");
+    }
+    if (line_width * getDPIScale() > 100.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): Line width " + std::to_string(line_width) + " scales to " + std::to_string(line_width * getDPIScale()) +
+                             " framebuffer pixels on this display, which exceeds the maximum supported width of 100. Please specify a smaller line width value.");
+    }
+
+    // The image is named so that a mask file describing several images still resolves to the one being displayed.
+    const std::vector<SegmentationMask> masks = readSegmentationMaskFile(mask_file, image_file);
+
+    if (message_flag && masks.empty()) {
+        std::cout << "Note (Visualizer::displayImageWithSegmentationMasks): The segmentation mask file '" << mask_file << "' contains no masks for this image, so the image is displayed without an overlay."
+                  << std::endl;
+    }
+
+    std::vector<unsigned char> image_data;
+    uint image_width, image_height;
+
+    if (image_file.substr(image_file.find_last_of('.') + 1) == "png") {
+        read_png_file(image_file.c_str(), image_data, image_height, image_width);
+    } else { // JPEG
+        read_JPEG_file(image_file.c_str(), image_data, image_height, image_width);
+    }
+
+    const vec4 image_extent = buildImageDisplayGeometry(image_data, image_width, image_height);
+
+    addSegmentationMaskOverlay(masks, image_extent, fill_opacity, line_width, fontsize, show_labels);
+
+    plotInteractive();
 }
 
 void Visualizer::getWindowPixelsRGB(uint *buffer) const {
@@ -630,6 +731,7 @@ std::vector<helios::vec3> Visualizer::plotInteractive() {
 
         primaryShader.setLightingModel(primaryLightingModel);
         primaryShader.setLightIntensity(lightintensity);
+        primaryShader.setColorBoost(colorboost);
 
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, depthTexture);
@@ -654,6 +756,16 @@ std::vector<helios::vec3> Visualizer::plotInteractive() {
         Wframebuffer = width;
         Hframebuffer = height;
     } while (glfwGetKey((GLFWwindow *) window, GLFW_KEY_ESCAPE) != GLFW_PRESS && glfwWindowShouldClose((GLFWwindow *) window) == 0);
+
+    // Closing the window latches GLFW's should-close flag, and nothing else ever clears it. Leaving
+    // it set would make every later plotInteractive() on this Visualizer fall straight back out of
+    // the loop above, so a program that displays several images in sequence would block on the
+    // first and then flash the rest past in a single frame each. Closing with the escape key did
+    // not have that effect, because that condition is transient -- which made the behavior depend
+    // on how the user dismissed the window.
+    if (window != nullptr) {
+        glfwSetWindowShouldClose((GLFWwindow *) window, GLFW_FALSE);
+    }
 
     glfwPollEvents();
 
@@ -759,6 +871,7 @@ void Visualizer::plotOnce(bool getKeystrokes) {
 
     primaryShader.setLightingModel(primaryLightingModel);
     primaryShader.setLightIntensity(lightintensity);
+    primaryShader.setColorBoost(colorboost);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, depthTexture);
@@ -799,7 +912,7 @@ void Visualizer::transferBufferData() {
     assert(checkerrors());
 
     const auto &dirty = geometry_handler.getDirtyUUIDs();
-    if (dirty.empty()) {
+    if (dirty.empty() && !geometry_handler.doesBufferNeedFullUpdate()) {
         // No geometry changed, so the buffer rewrites below would all restore identical contents -
         // skip them. The texture array is tracked by a separate flag and texArray==0 means the array
         // object does not exist at all, so that check must not be skipped along with them. It is
@@ -1276,6 +1389,7 @@ void Visualizer::render(bool shadow) const {
             lineShader.setLightDirection(light_direction);
             lineShader.setLightingModel(primaryLightingModel);
             lineShader.setLightIntensity(lightintensity);
+            lineShader.setColorBoost(colorboost);
 
             // Set viewport size for geometry shader
             GLint viewportSizeLoc = glGetUniformLocation(lineShader.shaderID, "viewportSize");
@@ -1360,6 +1474,7 @@ void Visualizer::render(bool shadow) const {
             primaryShader.setDepthBiasMatrix(computeShadowDepthMVP());
             primaryShader.setLightDirection(light_direction);
             primaryShader.setLightIntensity(lightintensity);
+            primaryShader.setColorBoost(colorboost);
 
             // Rebind texture array and uv_rescale for primary shader
             glActiveTexture(GL_TEXTURE0);
@@ -1589,6 +1704,7 @@ void Visualizer::plotUpdate(bool hide_window) {
 
     primaryShader.setLightingModel(primaryLightingModel);
     primaryShader.setLightIntensity(lightintensity);
+    primaryShader.setColorBoost(colorboost);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, depthTexture);
@@ -1936,6 +2052,10 @@ void Shader::initialize(const char *vertex_shader_file, const char *fragment_sha
     lightIntensityUniform = glGetUniformLocation(shaderID, "lightIntensity");
     glUniform1f(lightIntensityUniform, 1.f);
 
+    // Multiplier applied to vertex-interpolated primitive colors
+    colorBoostUniform = glGetUniformLocation(shaderID, "colorBoost");
+    glUniform1f(colorBoostUniform, 1.5f); // Default brightens ordinary renders
+
     // Texture (u,v) rescaling factor
     uvRescaleUniform = glGetUniformLocation(shaderID, "uv_rescale");
 
@@ -2037,6 +2157,10 @@ void Shader::setLightingModel(uint lightingmodel) const {
 
 void Shader::setLightIntensity(float lightintensity) const {
     glUniform1f(lightIntensityUniform, lightintensity);
+}
+
+void Shader::setColorBoost(float colorboost) const {
+    glUniform1f(colorBoostUniform, colorboost);
 }
 
 void Shader::useShader() const {

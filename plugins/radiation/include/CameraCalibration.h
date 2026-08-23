@@ -62,12 +62,10 @@ struct CameraCalibration {
     std::vector<uint> addColorboard(const helios::vec3 &centrelocation, float patchsize, const helios::vec3 &rotationrad, const std::vector<std::vector<helios::RGBcolor>> &colorassignment,
                                     const std::vector<std::vector<std::string>> &spectrumassignment, const std::string &colorboard_type);
 
-    // //! Set reflectivity for a specific UUID
-    // /**
-    //  * \param[in] UUID: Corresponding UUID
-    //  * \param[in] filename: name with path of XML file
-    //  * \param[in] labelname: label name of data
-    // */
+    // Set reflectivity for a specific UUID
+    //   UUID: Corresponding UUID
+    //   filename: name with path of XML file
+    //   labelname: label name of data
     //    void setColorboardReflectivity(const uint &UUID, const std::string &filename, const std::string &labelname);
 
     //! Add default color board (DGK-DKK) with spectral reflectivity values
@@ -179,7 +177,6 @@ struct CameraCalibration {
      * \param[in] focalxy Focal length xy of camera.
      * \param[in] distCoeffs Distortion coefficients.
      * \param[in] cameraresolution Resolution of camera.
-     * \param[in] cameraresolution Resolution of camera for distortion.
      */
     void distortImage(const std::string &cameralabel, const std::vector<std::string> &bandlabels, const helios::vec2 &focalxy, std::vector<double> &distCoeffs, helios::int2 cameraresolution);
 

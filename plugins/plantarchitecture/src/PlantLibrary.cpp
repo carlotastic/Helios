@@ -2508,7 +2508,7 @@ void PlantArchitecture::initializeMaizeShoots() {
 
     LeafPrototype leaf_prototype(context_ptr->getRandomGenerator());
     leaf_prototype.leaf_texture_file[0] = "SorghumLeaf.png";
-    leaf_prototype.leaf_aspect_ratio = 0.25f;
+    leaf_prototype.leaf_aspect_ratio = 0.15f;
     leaf_prototype.midrib_fold_fraction = 0.3f;
     leaf_prototype.longitudinal_curvature.uniformDistribution(-0.45, -0.3);
     leaf_prototype.lateral_curvature = -0.3f;
@@ -2546,7 +2546,7 @@ void PlantArchitecture::initializeMaizeShoots() {
     phytomer_parameters_maize.leaf.pitch = 0;
     phytomer_parameters_maize.leaf.yaw = 0;
     phytomer_parameters_maize.leaf.roll = 0;
-    phytomer_parameters_maize.leaf.prototype_scale = 0.6;
+    phytomer_parameters_maize.leaf.prototype_scale = 0.9;
     phytomer_parameters_maize.leaf.prototype = leaf_prototype;
 
     phytomer_parameters_maize.peduncle.length = 0.14f;
@@ -2571,12 +2571,12 @@ void PlantArchitecture::initializeMaizeShoots() {
     shoot_parameters_mainstem.phytomer_parameters = phytomer_parameters_maize;
     shoot_parameters_mainstem.vegetative_bud_break_probability_min = 0.5;
     shoot_parameters_mainstem.flower_bud_break_probability = 1;
-    shoot_parameters_mainstem.phyllochron_min = 2;
+    shoot_parameters_mainstem.phyllochron_min = 3;
     shoot_parameters_mainstem.elongation_rate_max = 0.1;
     shoot_parameters_mainstem.girth_area_factor = 6.f;
-    shoot_parameters_mainstem.gravitropic_curvature.uniformDistribution(-500, 0);
-    shoot_parameters_mainstem.internode_length_max = 0.22;
-    shoot_parameters_mainstem.tortuosity = 1.f;
+    shoot_parameters_mainstem.gravitropic_curvature.uniformDistribution(-250, 0);
+    shoot_parameters_mainstem.internode_length_max = 0.1;
+    shoot_parameters_mainstem.tortuosity = 0.5f;
     shoot_parameters_mainstem.internode_length_decay_rate = 0;
     shoot_parameters_mainstem.flowers_require_dormancy = false;
     shoot_parameters_mainstem.growth_requires_dormancy = false;
@@ -2584,7 +2584,7 @@ void PlantArchitecture::initializeMaizeShoots() {
     shoot_parameters_mainstem.flower_bud_break_probability = 1.0;
     shoot_parameters_mainstem.fruit_set_probability = 1.0;
     shoot_parameters_mainstem.defineChildShootTypes({"mainstem"}, {1.0});
-    shoot_parameters_mainstem.max_nodes = 17;
+    shoot_parameters_mainstem.max_nodes = 20;
     shoot_parameters_mainstem.max_terminal_floral_buds = 1;
 
     defineShootType("mainstem", shoot_parameters_mainstem);
@@ -2599,11 +2599,14 @@ uint PlantArchitecture::buildMaizePlant(const helios::vec3 &base_position) {
 
     uint plantID = addPlantInstance(base_position, 0);
 
-    uint uID_stem = addBaseStemShoot(plantID, 1, make_AxisRotation(context_ptr->randu(0.f, 0.035f * M_PI), context_ptr->randu(0.f, 2.f * M_PI), context_ptr->randu(0.f, 2.f * M_PI)), 0.003, 0.08, 0.01, 0.01, 0.2, "mainstem");
+    uint uID_stem = addBaseStemShoot(plantID, 1, make_AxisRotation(context_ptr->randu(0.f, 0.035f * M_PI), context_ptr->randu(0.f, 2.f * M_PI), context_ptr->randu(0.f, 2.f * M_PI)), 0.003,
+                                     shoot_types.at("mainstem").internode_length_max.val(), 0.01, 0.01, 0.2, "mainstem");
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 10, 1000);
+    // Grain fill (R1 silking -> R6 physiological maturity) runs 55-65 days in the field
+    // (Ritchie et al. 1993; Abendroth et al. 2011), not the 10 days previously used here.
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 58, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 
@@ -3375,7 +3378,7 @@ void PlantArchitecture::initializeSorghumShoots() {
 
     LeafPrototype leaf_prototype(context_ptr->getRandomGenerator());
     leaf_prototype.leaf_texture_file[0] = "SorghumLeaf.png";
-    leaf_prototype.leaf_aspect_ratio = 0.2f;
+    leaf_prototype.leaf_aspect_ratio = 0.15f;
     leaf_prototype.midrib_fold_fraction = 0.3f;
     leaf_prototype.longitudinal_curvature.uniformDistribution(-0.4, -0.2);
     leaf_prototype.lateral_curvature = -0.3f;
@@ -3412,7 +3415,7 @@ void PlantArchitecture::initializeSorghumShoots() {
     phytomer_parameters_sorghum.leaf.pitch = 0;
     phytomer_parameters_sorghum.leaf.yaw = 0;
     phytomer_parameters_sorghum.leaf.roll = 0;
-    phytomer_parameters_sorghum.leaf.prototype_scale = 0.6;
+    phytomer_parameters_sorghum.leaf.prototype_scale = 0.65;
     phytomer_parameters_sorghum.leaf.prototype = leaf_prototype;
 
     phytomer_parameters_sorghum.peduncle.length = 0.3;
@@ -3434,11 +3437,11 @@ void PlantArchitecture::initializeSorghumShoots() {
     shoot_parameters_mainstem.phytomer_parameters = phytomer_parameters_sorghum;
     shoot_parameters_mainstem.vegetative_bud_break_probability_min = 0;
     shoot_parameters_mainstem.flower_bud_break_probability = 1;
-    shoot_parameters_mainstem.phyllochron_min = 2;
-    shoot_parameters_mainstem.elongation_rate_max = 0.1;
+    shoot_parameters_mainstem.phyllochron_min = 3.5;
+    shoot_parameters_mainstem.elongation_rate_max = 0.05;
     shoot_parameters_mainstem.girth_area_factor = 5.f;
-    shoot_parameters_mainstem.gravitropic_curvature.uniformDistribution(-1000, -400);
-    shoot_parameters_mainstem.internode_length_max = 0.26;
+    shoot_parameters_mainstem.gravitropic_curvature.uniformDistribution(-700, -200);
+    shoot_parameters_mainstem.internode_length_max = 0.06;
     shoot_parameters_mainstem.internode_length_decay_rate = 0;
     shoot_parameters_mainstem.flowers_require_dormancy = false;
     shoot_parameters_mainstem.growth_requires_dormancy = false;
@@ -3461,11 +3464,14 @@ uint PlantArchitecture::buildSorghumPlant(const helios::vec3 &base_position) {
 
     uint plantID = addPlantInstance(base_position - make_vec3(0, 0, 0.025), 0);
 
-    uint uID_stem = addBaseStemShoot(plantID, 1, make_AxisRotation(context_ptr->randu(0.f, 0.075f * M_PI), context_ptr->randu(0.f, 2.f * M_PI), context_ptr->randu(0.f, 2.f * M_PI)), 0.003, 0.06, 0.01, 0.01, 0, "mainstem");
+    uint uID_stem = addBaseStemShoot(plantID, 1, make_AxisRotation(context_ptr->randu(0.f, 0.075f * M_PI), context_ptr->randu(0.f, 2.f * M_PI), context_ptr->randu(0.f, 2.f * M_PI)), 0.003,
+                                     shoot_types.at("mainstem").internode_length_max.val(), 0.01, 0.01, 0, "mainstem");
 
     breakPlantDormancy(plantID);
 
-    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 15, 1000);
+    // Grain fill (GS6 half-bloom -> GS9 physiological maturity) takes about 35 days, within a
+    // reported 25-45 day range (Vanderlip, Kansas State S-3; Gerik et al., Texas A&M B-6137).
+    setPlantPhenologicalThresholds(plantID, 0, -1, -1, 4, 35, 1000);
 
     plant_instances.at(plantID).max_age = 365;
 

@@ -150,8 +150,8 @@ int main() {
         context.setTime(time);
 
         // this will query these timseries variables based on the date and time set in the Context
-        float air_temperature = context.queryTimeseriesData("air_temperature"); // degrees C
-        float air_humidity = context.queryTimeseriesData("humidity"); // Percent
+        float air_temperature = context.queryTimeseriesData("air_temperature"); // Kelvin
+        float air_humidity = context.queryTimeseriesData("humidity"); // relative humidity, fraction (0-1)
         float wind_speed = context.queryTimeseriesData("wind_speed"); // m/s
 
         // update our primitive data values on each timestep based on timeseries data

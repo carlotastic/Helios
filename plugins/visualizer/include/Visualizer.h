@@ -97,6 +97,12 @@ struct Shader {
     //! Set the intensity of the light source
     void setLightIntensity(float lightintensity) const;
 
+    //! Set the multiplier applied to vertex-interpolated primitive colors
+    /**
+     * \param[in] colorboost Multiplier applied to vertex colors in the fragment shader.
+     */
+    void setColorBoost(float colorboost) const;
+
     //! Set shader as current
     void useShader() const;
 
@@ -123,6 +129,7 @@ struct Shader {
     GLint lightingModelUniform;
     GLint RboundUniform;
     GLint lightIntensityUniform;
+    GLint colorBoostUniform;
     std::vector<GLuint> vertex_array_IDs;
     GLint uvRescaleUniform;
 
@@ -376,12 +383,74 @@ public:
     //! Coordinate system to be used when specifying spatial coordinates
     enum CoordinateSystem {
         //! Coordinates are normalized to unity and are window-aligned.  The point (x,y)=(0,0) is in the bottom left corner of the window, and (x,y)=(1,1) is in the upper right corner of the window.  The z-coordinate specifies the depth in the
-        //! screen-normal direction, with values ranging from -1 to 1.  For example, an object at z=0.5 would be in front of an object at z=0.
+        //! screen-normal direction, with values ranging from -1 to 1.  Smaller z is nearer to the viewer, so an object at z=0.5 would be behind an object at z=0.
         COORDINATES_WINDOW_NORMALIZED = 0,
 
         //! Coordinates are specified in a 3D Cartesian system (right-handed), where +z is vertical.
         COORDINATES_CARTESIAN = 1
     };
+
+    //! A single bounding box read from a bounding box annotation file
+    /**
+     * Coordinates follow the YOLO convention: normalized to [0,1] by the image width and height, with the origin at the TOP-LEFT corner of the image and y increasing downward. Note that this is not the
+     * convention of Visualizer::COORDINATES_WINDOW_NORMALIZED, whose origin is the bottom-left corner. This is the convention written by RadiationModel::writeImageBoundingBoxes().
+     */
+    struct BoundingBox {
+        //! Integer class identifier of the object enclosed by the box
+        uint class_ID = 0;
+        //! Center of the box, normalized by the image dimensions, with the origin at the top-left corner of the image
+        helios::vec2 center;
+        //! Width and height of the box, normalized by the image width and height respectively
+        helios::vec2 size;
+    };
+
+    //! Read a bounding box annotation file in Ultralytics YOLO format
+    /**
+     * Every non-blank line must hold exactly five whitespace-separated fields, `class_ID x_center y_center width height`, where the four geometry fields are normalized to [0,1] and are measured from the
+     * top-left corner of the image. Blank lines are ignored. Both plain and scientific float notation are accepted. This is the format written by RadiationModel::writeImageBoundingBoxes().
+     * \param[in] bbox_file Path to the bounding box annotation file.
+     * \return Boxes in the order they appear in the file. Empty if the file contains no boxes.
+     */
+    [[nodiscard]] static std::vector<BoundingBox> readBoundingBoxFile(const std::string &bbox_file);
+
+    //! Read a file mapping bounding box class IDs to class names
+    /**
+     * Two line formats are accepted, detected line by line. If the first whitespace-separated token is a non-negative integer and at least one more token follows, the line is read as `class_ID class_name`,
+     * which is the format written by RadiationModel::writeImageBoundingBoxes(); the name is the remainder of the line, so names may contain spaces. Otherwise the whole trimmed line is the class name and its
+     * class ID is the index of the line among the non-blank lines, counting from zero, which is the standard Ultralytics convention.
+     * \param[in] classes_file Path to the class name file.
+     * \return Map from class ID to class name.
+     * \note A line in the implicit format whose class name begins with a number is indistinguishable from the explicit format and will be read as the explicit format.
+     */
+    [[nodiscard]] static std::map<uint, std::string> readBoundingBoxClassNames(const std::string &classes_file);
+
+    //! A single segmentation mask read from a COCO JSON annotation file
+    /**
+     * Each mask holds one or more polygon contours whose vertices are in absolute pixel coordinates measured from the TOP-LEFT corner of the image, with y increasing downward. Note that this differs both
+     * from Visualizer::BoundingBox, whose coordinates are normalized to [0,1], and from Visualizer::COORDINATES_WINDOW_NORMALIZED, whose origin is the bottom-left corner. This is the convention written by
+     * RadiationModel::writeImageSegmentationMasks().
+     */
+    struct SegmentationMask {
+        //! Integer class identifier of the masked object, taken from the annotation's COCO "category_id"
+        uint class_ID = 0;
+        //! Name of the class, resolved from the "categories" array of the same file. Empty if the file declares no name for this class ID.
+        std::string class_name;
+        //! Polygon contours bounding the mask, in absolute pixel coordinates measured from the top-left corner of the image
+        std::vector<std::vector<helios::vec2>> polygons;
+        //! Width and height in pixels of the image the polygons were authored against, taken from the "images" entry the annotation refers to
+        helios::vec2 image_size;
+    };
+
+    //! Read a segmentation mask annotation file in COCO JSON format
+    /**
+     * The file must contain the "images", "annotations" and "categories" arrays of the COCO format. Each annotation contributes one mask, whose polygons come from its "segmentation" field: an array of
+     * contours, each a flat list of alternating x and y pixel coordinates. This is the format written by RadiationModel::writeImageSegmentationMasks().
+     * \param[in] mask_file Path to the COCO JSON annotation file.
+     * \param[in] image_file [optional] Path to the image whose annotations should be read. Only the file name is compared, so a path from a different directory still matches. If this is empty, which is the default, the file must describe exactly one image.
+     * \return Masks in the order their annotations appear in the file. Empty if no annotation refers to the selected image.
+     * \note Run-length encoded ("counts") segmentations are not supported, because RadiationModel::writeImageSegmentationMasks() never writes them.
+     */
+    [[nodiscard]] static std::vector<SegmentationMask> readSegmentationMaskFile(const std::string &mask_file, const std::string &image_file = "");
 
     //! Pseudocolor map tables
     enum Ctable {
@@ -454,24 +523,30 @@ public:
      */
     void setLightIntensityFactor(float lightintensityfactor);
 
-    //! Create the shadow-map framebuffer and depth texture
+    //! Render primitive colors exactly as they are set in the Context
     /**
-     * Called lazily the first time shadowed lighting is actually rendered, in both windowed
-     * and headless modes. The shadow map is large (see shadow_buffer_size), so deferring it
-     * avoids allocating it for the many Visualizer instances that never enable shadows.
-     * Does nothing if the framebuffer has already been created.
+     * By default the fragment shader multiplies vertex-interpolated primitive colors by 1.5, which
+     * brightens ordinary renders but means the color read back out of the framebuffer is not the
+     * color that was set on the primitive. This mode disables that multiplier so that a color
+     * written with \ref helios::Context::setPrimitiveColor() is reproduced exactly in the rendered
+     * image, which is required when the framebuffer is used to carry data rather than to be looked
+     * at -- for example when object ID codes are encoded as RGB values and decoded from the
+     * rendered pixels, as the synthetic annotation plug-in does.
+     *
+     * Note that exact color reproduction additionally requires that no lighting be applied (see
+     * \ref setLightingModel() with \ref LIGHTING_NONE, which is the default) and that the
+     * Visualizer be constructed with anti-aliasing disabled, since anti-aliasing blends colors at
+     * primitive edges and produces pixel values that decode to meaningless IDs.
+     *
+     * \sa disableExactColorMode()
      */
-    void createShadowFramebuffer();
+    void enableExactColorMode();
 
-    //! Setup offscreen framebuffer for headless rendering
-    void setupOffscreenFramebuffer();
-
-    //! Clean up offscreen framebuffer resources
-    void cleanupOffscreenFramebuffer();
-
-
-    //! Switch rendering target to offscreen buffer
-    void renderToOffscreenBuffer();
+    //! Restore the default brightening of primitive colors
+    /**
+     * \sa enableExactColorMode()
+     */
+    void disableExactColorMode();
 
     //! Set the background color for the visualizer window
     /**
@@ -807,6 +882,19 @@ public:
      */
     std::vector<size_t> addTextboxByCenter(const char *textstring, const helios::vec3 &center, const helios::SphericalCoord &rotation, const helios::RGBcolor &fontcolor, uint fontsize, const char *fontname, CoordinateSystem coordinate_system);
 
+    //! Measure the rendered size of a text string without adding it to the visualizer
+    /**
+     * Returns the extent that \ref addTextboxByCenter() would occupy for the same string, font and font size, in window-normalized units. The width is the sum of the glyph advances, so it includes the side
+     * bearings; the height is that of the tallest glyph in the string, so it depends on which characters the string contains. The '_' and '^' subscript and superscript markers are handled exactly as
+     * \ref addTextboxByCenter() handles them: they occupy no width themselves and halve the size of the character that follows.
+     * \param[in] textstring Text to be measured.
+     * \param[in] fontsize Size of the text font in points.
+     * \param[in] fontname Name of a font in the plugins/visualizer/fonts directory, for example "OpenSans-Regular".
+     * \return Width and height of the text in window-normalized units.
+     * \note The result depends on the current framebuffer dimensions and DPI scale, and therefore changes when the window is resized.
+     */
+    [[nodiscard]] helios::vec2 getTextboxSize(const char *textstring, uint fontsize, const char *fontname) const;
+
     //! Removes the geometry with the specified ID from the visualizer.
     /**
      * \param[in] geometry_id The unique identifier of the geometry to delete.
@@ -1087,6 +1175,37 @@ public:
      */
     void displayImage(const std::string &file_name);
 
+    //! Display an image file in the visualizer with bounding boxes overlaid
+    /**
+     * Loads and displays the image exactly as \ref displayImage( const std::string & ) does, then overlays every box in `bbox_file` as a colored outline with the class name drawn on a filled chip inside the
+     * box's top-left corner. Boxes are colored by class ID from a fixed palette of seven colors, so classes whose IDs differ by a multiple of seven share a color.
+     *
+     * \param[in] image_file Path to the image file (JPEG or PNG) to display.
+     * \param[in] bbox_file Path to the bounding box annotation file for this image. See \ref readBoundingBoxFile().
+     * \param[in] classes_file [optional] Path to the class name file. See \ref readBoundingBoxClassNames(). If this is empty, which is the default, a file named "classes.txt" in the same directory as `bbox_file` is used when one exists; when none exists, boxes are labeled with their numeric class ID.
+     * \param[in] line_width [optional] Width of the box outlines in screen pixels. Default is 2.
+     * \param[in] fontsize [optional] Size of the class label font in points. Default is 12.
+     * \note As with \ref displayImage(), this function clears any existing geometry and does not return until the window is closed.
+     */
+    void displayImageWithBoundingBoxes(const std::string &image_file, const std::string &bbox_file, const std::string &classes_file = "", float line_width = 2.f, uint fontsize = 12);
+
+    //! Display an image file in the visualizer with segmentation masks overlaid
+    /**
+     * Loads and displays the image exactly as \ref displayImage( const std::string & ) does, then overlays every mask in `mask_file` as a translucent filled polygon with a solid outline and the class name
+     * drawn on a filled chip. Masks are colored by their position in the file from a fixed palette of seven colors, so each mask is colored independently of its class and two touching objects of the same
+     * class remain distinguishable.
+     *
+     * \param[in] image_file Path to the image file (JPEG or PNG) to display.
+     * \param[in] mask_file Path to the COCO JSON segmentation mask file for this image. See \ref readSegmentationMaskFile().
+     * \param[in] fill_opacity [optional] Opacity of the translucent polygon fill, between 0 and 1. Default is 0.4. A value of 0 draws the outline without a fill.
+     * \param[in] line_width [optional] Width of the mask outlines in screen pixels. Default is 2.
+     * \param[in] fontsize [optional] Size of the class label font in points. Default is 12.
+     * \param[in] show_labels [optional] Whether to draw the class name chip on each mask. Default is true. Pass false to see the masks alone, which is useful when many masks overlap and their chips would cover the image.
+     * \note As with \ref displayImage(), this function clears any existing geometry and does not return until the window is closed.
+     * \note The fill is computed by an even-odd scanline fill in image pixel space, so it is correct even for a contour that crosses itself. The contours written by RadiationModel::writeImageSegmentationMasks() are traced around a pixel mask and are routinely not simple polygons, because a traced boundary crosses itself wherever the mask narrows to a one-pixel neck.
+     */
+    void displayImageWithSegmentationMasks(const std::string &image_file, const std::string &mask_file, float fill_opacity = 0.4f, float line_width = 2.f, uint fontsize = 12, bool show_labels = true);
+
     //! Get R-G-B pixel data in the current display window
     /**
      * \param[out] buffer Pixel data. The data is stored as r-g-b * column * row. So indices (0,1,2) would be the RGB values for row 0 and column 0, indices (3,4,5) would be RGB values for row 0 and column 1, and so on.
@@ -1308,6 +1427,24 @@ private:
 
     void createOffscreenContext();
 
+    //! Create the shadow-map framebuffer and depth texture
+    /**
+     * Called lazily the first time shadowed lighting is actually rendered, in both windowed
+     * and headless modes. The shadow map is large (see shadow_buffer_size), so deferring it
+     * avoids allocating it for the many Visualizer instances that never enable shadows.
+     * Does nothing if the framebuffer has already been created.
+     */
+    void createShadowFramebuffer();
+
+    //! Setup offscreen framebuffer for headless rendering
+    void setupOffscreenFramebuffer();
+
+    //! Clean up offscreen framebuffer resources
+    void cleanupOffscreenFramebuffer();
+
+    //! Switch rendering target to offscreen buffer
+    void renderToOffscreenBuffer();
+
     //! Remove background rectangle (helper for background mode switching)
     void removeBackgroundRectangle();
 
@@ -1420,6 +1557,50 @@ private:
      */
     std::vector<size_t> addColorbarByCenter(const char *title, const helios::vec2 &size, const helios::vec3 &center, const helios::RGBcolor &font_color, const Colormap &colormap);
 
+    //! Forget every cached identifier of geometry the visualizer manages internally
+    /**
+     * Call immediately after clearing all geometry. The watermark, background rectangle, background sky, coordinate axes, navigation gizmo and colorbar each cache the identifiers of the geometry they
+     * created, and clearing the geometry destroys those identifiers without resetting the caches. Deleting by a stale identifier afterwards indexes GeometryHandler's UUID_map with at() on a key that is
+     * no longer there, which throws.
+     */
+    void resetCachedGeometryIDs();
+
+    //! Clear existing geometry and add the quad that displays an image, without entering the render loop
+    /**
+     * This is the shared body of \ref displayImage() and \ref displayImageWithBoundingBoxes(): everything those two do apart from plotting. The extent is returned so that overlay geometry can be positioned
+     * against the displayed image rather than against the window, which differ whenever the image and window aspect ratios do not match.
+     *
+     * \param[in] pixel_data Pixel data of the image, of length 4*width_pixels*height_pixels.
+     * \param[in] width_pixels Width of the image in pixels.
+     * \param[in] height_pixels Height of the image in pixels.
+     * \return Extent of the image quad in window-normalized coordinates, ordered as x_min, y_min, x_max, y_max.
+     */
+    helios::vec4 buildImageDisplayGeometry(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels);
+
+    //! Add outline, label chip and label text geometry for a set of bounding boxes drawn over a displayed image
+    /**
+     * \param[in] bounding_boxes Boxes in normalized image coordinates, measured from the top-left corner of the image.
+     * \param[in] class_names Map from class ID to the name displayed on the label. If this is empty, boxes are labeled with their numeric class ID. If it is not empty, a box whose class ID it does not contain is an error, because that means the annotation file and the class name file do not correspond.
+     * \param[in] image_extent Extent of the displayed image quad in window-normalized coordinates, as returned by \ref buildImageDisplayGeometry().
+     * \param[in] line_width Width of the box outlines in screen pixels.
+     * \param[in] fontsize Size of the class label font in points.
+     * \return Identifiers of every geometry element added, per box in input order: the four outline lines, then the label chip, then one rectangle per glyph of the label.
+     */
+    std::vector<size_t> addBoundingBoxOverlay(const std::vector<BoundingBox> &bounding_boxes, const std::map<uint, std::string> &class_names, const helios::vec4 &image_extent, float line_width, uint fontsize);
+
+    //! Add fill, outline, label chip and label text geometry for a set of segmentation masks drawn over a displayed image
+    /**
+     * \param[in] masks Masks whose polygon vertices are in absolute pixel coordinates measured from the top-left corner of the image.
+     * \param[in] image_extent Extent of the displayed image quad in window-normalized coordinates, as returned by \ref buildImageDisplayGeometry().
+     * \param[in] fill_opacity Opacity of the translucent polygon fill, between 0 and 1. No fill geometry is added when this is 0.
+     * \param[in] line_width Width of the mask outlines in screen pixels.
+     * \param[in] fontsize Size of the class label font in points.
+     * \param[in] show_labels Whether to add the label chip and its text. When false, neither is added and a mask contributes only its fill and outline.
+     * \return Identifiers of every geometry element added, per mask in input order: the fill runs, then the outline lines, then the label chip, then one rectangle per glyph of the label.
+     * \note The fill is emitted as one rectangle per horizontal run of covered pixels, so its element count scales with the height of the mask rather than with its vertex count.
+     */
+    std::vector<size_t> addSegmentationMaskOverlay(const std::vector<SegmentationMask> &masks, const helios::vec4 &image_extent, float fill_opacity, float line_width, uint fontsize, bool show_labels);
+
     void updateDepthBuffer();
 
     //! Width of the display window in screen coordinates
@@ -1490,6 +1671,11 @@ private:
     LightingModel primaryLightingModel;
 
     float lightintensity = 1.f;
+
+    //! Multiplier applied to vertex-interpolated primitive colors in the fragment shader.
+    //! 1.5 by default to brighten ordinary renders; set to 1 by enableExactColorMode() so that
+    //! colors survive a Context -> framebuffer round trip unchanged.
+    float colorboost = 1.5f;
 
     bool isWatermarkVisible;
 

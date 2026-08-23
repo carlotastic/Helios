@@ -65,8 +65,12 @@ void PlantArchitecture::initializeCarbohydratePool(float carbohydrate_concentrat
             float shoot_volume = shoot->calculateShootInternodeVolume();
             // set carbon pool
             shoot->sugar_pool_molC = shoot_volume * carbohydrate_concentration_molC_m3;
-            context_ptr->setObjectData(shoot->internode_tube_objID, "carbohydrate_concentration", carbohydrate_concentration_molC_m3);
-            context_ptr->setObjectData(shoot->internode_tube_objID, "sugar_pool_molC", shoot->sugar_pool_molC);
+            // A pruned shoot, and any shoot built with internode context geometry disabled, has no tube
+            // object to carry the reported pool.
+            if (context_ptr->doesObjectExist(shoot->internode_tube_objID)) {
+                context_ptr->setObjectData(shoot->internode_tube_objID, "carbohydrate_concentration", carbohydrate_concentration_molC_m3);
+                context_ptr->setObjectData(shoot->internode_tube_objID, "sugar_pool_molC", shoot->sugar_pool_molC);
+            }
         }
     }
 }
@@ -107,6 +111,10 @@ void PlantArchitecture::accumulateHourlyLeafPhotosynthesis() const {
         auto shoot_tree = &plant_instance.shoot_tree;
 
         for (auto &shoot: *shoot_tree) {
+            if (shoot->isPruned()) {
+                continue; // a pruned shoot has no leaves left to accumulate photosynthesis from
+            }
+
             // Set cumulative photosynthesis of dormant shoots equal to zero.
             if (shoot->isdormant) {
                 for (const auto &phytomer: shoot->phytomers) {
@@ -151,6 +159,14 @@ void PlantArchitecture::accumulateShootPhotosynthesis() const {
         const auto shoot_tree = &plant_instance.shoot_tree;
 
         for (const auto &shoot: *shoot_tree) {
+            // A pruned shoot is left in the shoot tree as an empty shell with no phytomers, no volume
+            // and no internode tube object. It takes no part in carbon accounting: including it divides
+            // by a zero shoot volume, writes object data to a tube object that no longer exists, and
+            // lets its stale carbon pool re-trigger the instant-death prune below on every timestep.
+            if (shoot->isPruned()) {
+                continue;
+            }
+
             uint shootID = shoot->ID;
             float net_photosynthesis = 0;
             float shoot_volume = plant_instances.at(plantID).shoot_tree.at(shoot->ID)->calculateShootInternodeVolume();
@@ -205,6 +221,10 @@ void PlantArchitecture::subtractShootMaintenanceCarbon(float dt) const {
         float rho_cw = carbohydrate_params.stem_density * carbohydrate_params.stem_structural_carbon_percentage / C_molecular_wt; // Density of carbon in almond wood (mol C m^-3)
 
         for (auto &shoot: *shoot_tree) {
+            if (shoot->isPruned()) {
+                continue; // a pruned shoot has no living tissue to respire
+            }
+
             if (context_ptr->doesObjectExist(shoot->internode_tube_objID)) {
                 if (shoot->old_shoot_volume >= 0.f) {
                     shoot->sugar_pool_molC -= shoot->old_shoot_volume * rho_cw * plant_instances.at(plantID).stem_maintenance_respiration_rate * dt; // remove shoot maintenance respiration
@@ -226,8 +246,14 @@ void PlantArchitecture::subtractShootGrowthCarbon() {
         float rho_cw = carbohydrate_params.stem_density * carbohydrate_params.stem_structural_carbon_percentage / C_molecular_wt; // Mature density of carbon in almond wood (mol C m^-3)
 
         for (const auto &shoot: *shoot_tree) {
+            if (shoot->isPruned()) {
+                continue; // a pruned shoot has no phytomers left to grow
+            }
+
             float shoot_volume = plant_instances.at(plantID).shoot_tree.at(shoot->ID)->calculateShootInternodeVolume();
-            uint parentID = shoot->parent_shoot_ID;
+            // Negative for the base stem shoot, which has no parent. Kept signed: assigning -1 to a uint
+            // and using it as a shoot_tree index is what made this run off the end of the vector.
+            const int parentID = shoot->parent_shoot_ID;
             float shoot_growth = 0;
             float shoot_growth_respiration = 0;
 
@@ -257,12 +283,22 @@ void PlantArchitecture::subtractShootGrowthCarbon() {
                     shoot->sugar_pool_molC -= phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction  / carbohydrate_params.shoot_root_ratio;
                     shoot_growth_respiration += (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction) + (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction  / carbohydrate_params.shoot_root_ratio);
                 }else{
+                    // A shoot that has not grown before has no carbon pool of its own yet, so the full
+                    // construction cost of its first phytomers is charged to the shoot it grew out of.
+                    // The base stem shoot has no parent to charge: its initial growth comes from seed
+                    // reserves, which this model does not represent as a pool. The debit is therefore
+                    // skipped for it, mirroring how the child-to-parent flux further below is skipped for
+                    // a parentless shoot. The shoot is still credited its starting carbohydrate, exactly
+                    // as a child shoot is, so it enters subsequent timesteps on the same footing.
                     phytomer_growth_carbon_demand = rho_cw_dynamic * phytomer_volume;
-                    plant_instances.at(plantID).shoot_tree.at(parentID)->sugar_pool_molC -= phytomer_growth_carbon_demand;
-                    plant_instances.at(plantID).shoot_tree.at(parentID)->sugar_pool_molC -= phytomer_growth_carbon_demand  / carbohydrate_params.shoot_root_ratio;
-                    shoot_growth += (phytomer_growth_carbon_demand ) + (phytomer_growth_carbon_demand / carbohydrate_params.shoot_root_ratio);
-                    plant_instances.at(plantID).shoot_tree.at(parentID)->sugar_pool_molC -= (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction) + (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction  / carbohydrate_params.shoot_root_ratio);
-                    shoot_growth_respiration += (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction) + (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction  / carbohydrate_params.shoot_root_ratio);
+                    if (parentID >= 0) {
+                        const std::shared_ptr<Shoot> &parent_shoot = plant_instances.at(plantID).shoot_tree.at(parentID);
+                        parent_shoot->sugar_pool_molC -= phytomer_growth_carbon_demand; // construction carbon
+                        parent_shoot->sugar_pool_molC -= phytomer_growth_carbon_demand / carbohydrate_params.shoot_root_ratio; // construction carbon for the roots
+                        parent_shoot->sugar_pool_molC -= (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction) + (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction / carbohydrate_params.shoot_root_ratio);
+                    }
+                    shoot_growth += (phytomer_growth_carbon_demand) + (phytomer_growth_carbon_demand / carbohydrate_params.shoot_root_ratio);
+                    shoot_growth_respiration += (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction) + (phytomer_growth_carbon_demand * carbohydrate_params.growth_respiration_fraction / carbohydrate_params.shoot_root_ratio);
                     shoot->sugar_pool_molC += carbohydrate_params.stem_carbohydrate_percentage * phytomer_growth_carbon_demand;
                 }
 
@@ -307,6 +343,14 @@ void PlantArchitecture::checkCarbonPool_abortOrgans(float dt) {
         float fruit_construction_cost_base = carbohydrate_params.fruit_density * carbohydrate_params.fruit_carbon_percentage / C_molecular_wt; // mol C/m^3
 
         for (const auto &shoot: *shoot_tree) {
+            // A pruned shoot is left in the shoot tree as an empty shell with no phytomers, no volume
+            // and no internode tube object. It takes no part in carbon accounting: including it divides
+            // by a zero shoot volume, writes object data to a tube object that no longer exists, and
+            // lets its stale carbon pool re-trigger the instant-death prune below on every timestep.
+            if (shoot->isPruned()) {
+                continue;
+            }
+
             uint shootID = shoot->ID;
 
             shoot->total_carbohydrate_pool_molC = shoot->sugar_pool_molC + shoot->starch_pool_molC;
@@ -400,6 +444,10 @@ void PlantArchitecture::checkCarbonPool_adjustPhyllochron(float dt) {
         const CarbohydrateParameters &carbohydrate_params = plant_instances.at(plantID).carb_parameters;
 
         for (const auto &shoot: *shoot_tree) {
+            if (shoot->isPruned()) {
+                continue; // a pruned shoot has no meristem whose phyllochron could be adjusted
+            }
+
             uint shootID = shoot->ID;
 
             float shoot_volume = plant_instances.at(plantID).shoot_tree.at(shootID)->calculateShootInternodeVolume();
@@ -419,8 +467,8 @@ void PlantArchitecture::checkCarbonPool_transferCarbon(float dt) {
 
         // Transfer carbon from parent shoots to distal child shoots (gradient-driven flux)
         for (const auto &shoot_inner: *shoot_tree) {
-            if (!shoot_inner) {
-                continue; // Skip null shoots
+            if (!shoot_inner || shoot_inner->isPruned()) {
+                continue; // skip null shoots and pruned shells, which hold no transferable carbon
             }
             uint shootID_inner = shoot_inner->ID;
             float shoot_volume_inner = plant_instances.at(plantID).shoot_tree.at(shootID_inner)->calculateShootInternodeVolume();
@@ -479,11 +527,12 @@ void PlantArchitecture::checkCarbonPool_transferCarbon(float dt) {
 
         // Transfer carbon from distal child shoots to parent shoots (gradient-driven flux)
         for (const auto &shoot: *shoot_tree) {
-            if (!shoot) {
-                continue; // Skip null shoots
+            if (!shoot || shoot->isPruned()) {
+                continue; // skip null shoots and pruned shells, which hold no transferable carbon
             }
             uint shootID = shoot->ID;
-            uint parentID = shoot->parent_shoot_ID;
+            // Negative for the base stem shoot, which has no parent to transfer carbon up to.
+            const int parentID = shoot->parent_shoot_ID;
 
             float shoot_volume = plant_instances.at(plantID).shoot_tree.at(shootID)->calculateShootInternodeVolume();
 
@@ -497,7 +546,7 @@ void PlantArchitecture::checkCarbonPool_transferCarbon(float dt) {
             // Only transfer carbon if child shoot has greater carbon concentration than parent
             if (shoot_carb_pool_molC > carbohydrate_params.carbohydrate_transfer_threshold_down * shoot_volume * carbohydrate_params.stem_density / C_molecular_wt) {
                 float available_fraction_of_carb = (shoot->sugar_pool_molC - carbohydrate_params.carbohydrate_transfer_threshold_down * shoot_volume * carbohydrate_params.stem_density / C_molecular_wt) / shoot->sugar_pool_molC;
-                if (parentID < 10000000) {
+                if (parentID >= 0) {
                     float parent_shoot_volume = plant_instances.at(plantID).shoot_tree.at(parentID)->calculateShootInternodeVolume();
 
                     float parent_shoot_carb_pool_molC = plant_instances.at(plantID).shoot_tree.at(parentID)->sugar_pool_molC;

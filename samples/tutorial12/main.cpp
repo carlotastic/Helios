@@ -123,13 +123,19 @@ int main() {
     Visualizer vis(1000);
     vis.displayImage("../output/bunnycam_RGB.jpeg");
 
+    // Display the same image with the exported bounding boxes overlaid, to check them by eye.
+    // The accompanying classes.txt is found automatically, so the boxes are labeled by name.
+    vis.displayImageWithBoundingBoxes("../output/bunnycam_RGB.jpeg", "../output/bunnycam_RGB.txt");
+
+    // Display the same image with the exported segmentation masks overlaid. Class names come from the
+    // COCO file itself, and each mask is colored separately so that overlapping objects stay distinct.
+    vis.displayImageWithSegmentationMasks("../output/bunnycam_RGB.jpeg", "../output/bunnycam_segmentation.json");
+
     // Auto-calibrate camera image using colorboard reference values with quality report
     std::string corrected_image = radiation.autoCalibrateCameraImage("bunnycam", "red", "green", "blue", "../output/auto_calibrated_bunnycam.jpeg", true);
 
     // Display auto-calibrated image
     vis.displayImage(corrected_image);
-
-    // Note: Use the Python script 'visualize_segmentation.py' to view segmentation masks
 
     return 0;
 }

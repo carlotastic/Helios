@@ -159,7 +159,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>reflectivity\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Primitive reflectivity for band * (i.e., reflectivity for band 'PAR' would be 'reflectivity_PAR').</td>
+     <td>Primitive reflectivity for band <code>*</code> (i.e., reflectivity for band 'PAR' would be 'reflectivity_PAR').</td>
      <td>N/A</td>
      <td>0</td>
    </tr>
@@ -167,7 +167,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>transmissivity\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Primitive transmissivity for band * (i.e., transmissivity for band 'PAR' would be 'transmissivity_PAR').</td>
+     <td>Primitive transmissivity for band <code>*</code> (i.e., transmissivity for band 'PAR' would be 'transmissivity_PAR').</td>
      <td>N/A</td>
      <td>0</td>
    </tr>
@@ -175,7 +175,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>glass\_n\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Refractive index of a translucent cover (glass/plastic) for band *. <b>Setting this activates the Fresnel+Bouguer angular-transmittance model for the primitive in that band</b>, overriding any constant <code>reflectivity_*</code>/<code>transmissivity_*</code>. See Sect. \ref RadGlass.</td>
+     <td>Refractive index of a translucent cover (glass/plastic) for band <code>*</code>. <b>Setting this activates the Fresnel+Bouguer angular-transmittance model for the primitive in that band</b>, overriding any constant <code>reflectivity_*</code>/<code>transmissivity_*</code>. See Sect. \ref RadGlass.</td>
      <td>N/A</td>
      <td>N/A (model off)</td>
    </tr>
@@ -183,7 +183,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>glass\_KL\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Bouguer absorption product K·L (extinction coefficient × thickness) of a translucent cover for band *. Optional; only used when <code>glass_n_*</code> is set. Default 0 = lossless (non-absorbing) sheet. See Sect. \ref RadGlass.</td>
+     <td>Bouguer absorption product K·L (extinction coefficient × thickness) of a translucent cover for band <code>*</code>. Optional; only used when <code>glass_n_*</code> is set. Default 0 = lossless (non-absorbing) sheet. See Sect. \ref RadGlass.</td>
      <td>N/A</td>
      <td>0</td>
    </tr>
@@ -191,7 +191,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>emissivity\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Primitive emissivity for band * (i.e., emissivity for band 'PAR' would be 'emissivity_PAR'). <b>NOTE: Only needed if performing emission calculations.</b></td>
+     <td>Primitive emissivity for band <code>*</code> (i.e., emissivity for band 'PAR' would be 'emissivity_PAR'). <b>NOTE: Only needed if performing emission calculations.</b></td>
      <td>N/A</td>
      <td>1.0</td>
    </tr>
@@ -234,7 +234,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>radiation\_flux\_*</td>
      <td>W/m<sup>2</sup></td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Absorbed radiation flux for band * (i.e., the flux for band 'PAR' would be 'radiation_flux_PAR').</td>
+     <td>Absorbed radiation flux for band <code>*</code> (i.e., the flux for band 'PAR' would be 'radiation_flux_PAR').</td>
    </tr>
  </table>
 
@@ -926,7 +926,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  Inputting raw measured surface spectra and camera spectral response specified by the manufacturer will typically result in simulated camera images that look quite different from those of the real camera due to errors in measurements, internal camera corrections, and lens effects. As such, a calibration is generally needed to achieve acceptable image results.
 
- Pre-calibrated camera responses are available for a few cameras and light source combinations to use when direct calibration data is not available. These are for a Nikon B500 camera with the ASTMG173 solar spectrum or CREE 6500K LED. These calibrated camera spectra can be found in the included camera spectral library ("plugins/radiation/spectral_data/camera_spectral_library.xml") and has labels "calibrated_sun_NikonB500_spectral_response_[*]" or "calibrated_CREE6500K_NikonD700_spectral_response_[*]", where [*] is one of "red", "green", or "blue". These calibrated camera spectra can be used in place of the raw camera spectral response data, as illustrated below:
+ Measured camera spectral responses are available in the included camera spectral library ("plugins/radiation/spectral_data/camera_spectral_library.xml"). Labels take the form "<camera>_[*]", where [*] is one of "red", "green", or "blue" — for example "NikonD700_spectral_response_[*]", "Nikon_D700_[*]", "Nikon_D50_[*]", "Canon_20D_[*]", "iPhone11_[*]", "iPhone12ProMAX_[*]", "GalaxyS20_[*]", "Pixel4_[*]", "LeicaM8_spectral_response_[*]", "SONY_NEX5N_[*]" and "Basler_acA2500-20gc_[*]". (The monochrome and filtered Basler entries, "Basler_acA2500-20gm_mono", "..._730nm_filt" and "..._850nm_filt", define a single channel rather than three.) These spectra are used as illustrated below:
 
  By convention, the intensity spectra all sources other than the sun are normalized to 1.0. So when using camera calibrations based on these types of sources, you should set the source fluxes for each radiative band equal to 1.0. For solar sources, set the source flux for each band equal to the total solar flux integrated over all wavelengths.
 
@@ -936,9 +936,9 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  // Assuming radiation model and camera have already been set up here //
 
- radiationmodel.setCameraSpectralResponse("visible", "red", "calibrated_ASTMG173_NikonD700_spectral_response_red");
- radiationmodel.setCameraSpectralResponse("visible", "green", "calibrated_ASTMG173_NikonD700_spectral_response_green");
- radiationmodel.setCameraSpectralResponse("visible", "blue", "calibrated_ASTMG173_NikonD700_spectral_response_blue");
+ radiationmodel.setCameraSpectralResponse("visible", "red", "NikonD700_spectral_response_red");
+ radiationmodel.setCameraSpectralResponse("visible", "green", "NikonD700_spectral_response_green");
+ radiationmodel.setCameraSpectralResponse("visible", "blue", "NikonD700_spectral_response_blue");
  ~~~~~~
 
  When using a calibrated camera spectral response, you should set the source flux equal to 1.0 for all bands. This is because the calibrated camera spectral response is calibrated based on the actual intensity of the light source.
@@ -966,7 +966,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  3\. Set up the scene in Helios based on the geometry, radiative conditions, and camera(s) that will be present in the simulations. You must specify the spectral distribution of any radiation sources using \ref RadiationModel::setSourceSpectrum(), and specify an initial guess for the camera channel spectral distribution(s) using \ref RadiationModel::setCameraSpectralResponse().
 
- 4\. Add a simulated color calibration board to the scene. You can add the default color board (DGK Color Tools DKK Color Calibration Chart) using the method ef CameraCalibration::addDefaultColorboard(), or a custom color board ef CameraCalibration::addColorboard().
+ 4\. Add a simulated color calibration board to the scene. You can add the default color board (DGK Color Tools DKK Color Calibration Chart) using the method \ref CameraCalibration::addDefaultColorboard(), or a custom color board \ref CameraCalibration::addColorboard().
 
  \subsubsection RadCamMetadata Exporting Camera Metadata
 
@@ -983,15 +983,17 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  \paragraph RadCamMetadataAuto Auto-populating Metadata
 
- The easiest way to populate camera metadata is to use the \ref RadiationModel::populateCameraMetadata() method, which automatically fills all fields from the camera parameters and simulation context:
+ The easiest way to populate camera metadata is to use the \ref RadiationModel::getCameraMetadata() method, which returns a CameraMetadata struct with all fields already filled in from the camera parameters and simulation context:
 
  ~~~~~~{.cpp}
  // Assume camera has already been added with label "RGB_camera"
- CameraMetadata metadata;
- radiationmodel.populateCameraMetadata("RGB_camera", metadata);
+ CameraMetadata metadata = radiationmodel.getCameraMetadata("RGB_camera");
 
  // Set the metadata for this camera
  radiationmodel.setCameraMetadata("RGB_camera", metadata);
+
+ // Metadata is only written to file for cameras where export has been enabled
+ radiationmodel.enableCameraMetadata("RGB_camera");
  ~~~~~~
 
  The auto-population calculates:
@@ -1039,7 +1041,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  \paragraph RadCamMetadataExport Automatic JSON Export
 
- Once metadata has been set for a camera using \ref RadiationModel::setCameraMetadata(), a JSON metadata file will be automatically written whenever \ref RadiationModel::writeCameraImage() is called for that camera. The JSON file will have the same base name as the image but with a .json extension.
+ Once metadata export has been enabled for a camera using \ref RadiationModel::enableCameraMetadata(), a JSON metadata file will be automatically written whenever \ref RadiationModel::writeCameraImage() is called for that camera. The JSON file will have the same base name as the image but with a .json extension. Note that \ref RadiationModel::setCameraMetadata() only stores the metadata values; it does not by itself enable the JSON file to be written.
 
  ~~~~~~{.cpp}
  // After running simulation...
@@ -1394,20 +1396,23 @@ The above example assumes that we have already added some geometry to the Contex
 
  Both methods take the following arguments: 1) a string denoting the camera label, 2) a string denoting the primitive/object data label to use for segmentation, 3) an integer object class ID for COCO annotations, 4) a string denoting the JSON output filename (can include a relative path), 5) a string denoting the image file corresponding to these labels, 6) an optional vector of strings specifying primitive or object data labels whose mean values will be calculated for each mask and written as attributes (defaults to empty vector), and 7) an optional boolean flag to append to existing JSON files (defaults to false for new files).
 
- The segmentation masks are generated using boundary tracing algorithms that identify connected regions of pixels with the same data label values. Each unique label value becomes a separate annotation in the COCO JSON output, with precise polygon boundaries traced around the object regions.
+ The segmentation masks are generated using boundary tracing algorithms that identify connected regions of pixels with the same data label values. Each connected region becomes a separate annotation in the COCO JSON output, with precise polygon boundaries traced around it. Note that one label value can produce more than one annotation: an object partially hidden behind something closer to the camera is visible as several separate regions, and each is annotated in its own right.
 
  When the append flag is set to true, new annotations are added to existing JSON files, allowing multiple primitive/object types to be combined into a single segmentation dataset. This is useful for creating comprehensive annotations that include both foreground objects and background elements like ground surfaces.
 
  ~~~~~~{.cpp}
- // Write segmentation masks for bunny objects (primitive data approach)
- radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "bunny_masks", "./");
+ // The rendered image these annotations describe. Its name is recorded in the JSON, so it must be written first.
+ std::string image_file = radiationmodel.writeCameraImage( "visible", {"red","green","blue"}, "RGB", "./" );
 
- // Write segmentation masks for ground surfaces  
- radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "ground_masks", "./");
+ // Write segmentation masks for bunny objects (primitive data approach)
+ radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "bunny_masks.json", image_file);
+
+ // Write segmentation masks for ground surfaces
+ radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "ground_masks.json", image_file);
 
  // Append both to create combined annotations
- radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "combined_masks", "./", false);
- radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "combined_masks", "./", true);
+ radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "combined_masks.json", image_file, {}, false);
+ radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "combined_masks.json", image_file, {}, true);
  ~~~~~~
 
  Below is example code of writing an RGB image (3 spectral bands).
@@ -1464,9 +1469,9 @@ The above example assumes that we have already added some geometry to the Contex
 
     radiationmodel.addRadiationCamera("visible", {"red","green","blue"}, camera_position, camera_lookat, properties, antialiasing_samples );
 
-    // Load and set calibrated camera spectral response for Nikon B500 camera and ASTMG173 solar spectrum
+    // Load and set the measured camera spectral response for a Nikon D700 camera
     context.loadXML("plugins/radiation/spectral_data/camera_spectral_library.xml");
-    std::string camera_spectrum_base = "calibrated_sun_NikonB500_spectral_response";
+    std::string camera_spectrum_base = "NikonD700_spectral_response";
     radiationmodel.setCameraSpectralResponse("visible", "red", camera_spectrum_base+"_red");
     radiationmodel.setCameraSpectralResponse("visible", "green", camera_spectrum_base+"_green");
     radiationmodel.setCameraSpectralResponse("visible", "blue", camera_spectrum_base+"_blue");

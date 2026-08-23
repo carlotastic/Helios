@@ -7,6 +7,35 @@
 
 using namespace helios;
 
+//! Returns true if a windowed OpenGL context can be created on this machine
+/**
+ * The test cases that construct a non-headless Visualizer cannot run where no OpenGL context can be
+ * created. This check is a probe rather than a platform assumption: it constructs a Visualizer with
+ * the same arguments those tests use and reports whether that succeeded.
+ *
+ * Inspecting DISPLAY/WAYLAND_DISPLAY cannot answer the question on macOS or Windows, which never
+ * set either variable. Assuming a context is always available there is what broke the macOS,
+ * Windows and Windows GPU runners in v1.3.82, where the same assumption had been copied into the
+ * synthetic annotation tests -- those runners create no OpenGL context at all. These visualizer
+ * tests did not fail then only because CI runs `run_tests.sh --visbuildonly`, which skips
+ * executables whose name contains "visualizer"; the guard itself was equally wrong.
+ *
+ * The result is computed once and cached: each probe builds and tears down a real GL context, and
+ * repeating that per test case is slow and needlessly re-enters GLFW init/terminate.
+ */
+static bool windowedContextAvailable() {
+    static const bool context_available = []() {
+        try {
+            Visualizer probe(16, 16, 0, true, false); // NON-headless, matching the guarded tests
+            probe.disableMessages();
+        } catch (...) {
+            return false;
+        }
+        return true;
+    }();
+    return context_available;
+}
+
 //! Test-only accessor for Visualizer's private tick-generation helpers and colorbar state
 /**
  * Declared a friend of Visualizer (see Visualizer.h) and defined only here, so none of this is
@@ -53,6 +82,11 @@ public:
         return visualizer.geometry_handler.getPrimitiveCount(false);
     }
 
+    //! Color of one geometry element, which the Visualizer itself exposes no getter for
+    static helios::RGBAcolor getGeometryColor(const Visualizer &visualizer, size_t geometry_id) {
+        return visualizer.geometry_handler.getColor(geometry_id);
+    }
+
     static void updateColorbar(Visualizer &visualizer) {
         visualizer.updateColorbar();
     }
@@ -87,6 +121,32 @@ public:
 
     static helios::uint2 getMaximumTextureSize(const Visualizer &visualizer) {
         return visualizer.maximum_texture_size;
+    }
+
+    //! The geometry half of displayImage(), reachable without entering plotInteractive()'s blocking render loop
+    static helios::vec4 buildImageDisplayGeometry(Visualizer &visualizer, const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
+        return visualizer.buildImageDisplayGeometry(pixel_data, width_pixels, height_pixels);
+    }
+
+    //! The overlay half of displayImageWithBoundingBoxes(), likewise reachable without blocking
+    static std::vector<size_t> addBoundingBoxOverlay(Visualizer &visualizer, const std::vector<Visualizer::BoundingBox> &bounding_boxes, const std::map<uint, std::string> &class_names, const helios::vec4 &image_extent,
+                                                    float line_width, uint fontsize) {
+        return visualizer.addBoundingBoxOverlay(bounding_boxes, class_names, image_extent, line_width, fontsize);
+    }
+
+    //! The overlay half of displayImageWithSegmentationMasks(), likewise reachable without blocking
+    static std::vector<size_t> addSegmentationMaskOverlay(Visualizer &visualizer, const std::vector<Visualizer::SegmentationMask> &masks, const helios::vec4 &image_extent, float fill_opacity, float line_width,
+                                                          uint fontsize, bool show_labels = true) {
+        return visualizer.addSegmentationMaskOverlay(masks, image_extent, fill_opacity, line_width, fontsize, show_labels);
+    }
+
+    //! Switch the rendering target to the offscreen buffer
+    /**
+     * The offscreen framebuffer is internal lifecycle machinery driven by headless mode; this
+     * forwarder exists so the test can verify the switch does not throw.
+     */
+    static void renderToOffscreenBuffer(Visualizer &visualizer) {
+        visualizer.renderToOffscreenBuffer();
     }
 
 };
@@ -1143,7 +1203,7 @@ TEST_CASE("CI/Offscreen - Render Target Switching") {
     Visualizer visualizer(64, 64, 0, true, true);
 
     // Test switching to offscreen buffer
-    DOCTEST_CHECK_NOTHROW(visualizer.renderToOffscreenBuffer());
+    DOCTEST_CHECK_NOTHROW(VisualizerTestHelper::renderToOffscreenBuffer(visualizer));
 
     // Test that we can add geometry after switching render targets
     size_t triangle = visualizer.addTriangle(make_vec3(0, 0, 0), make_vec3(1, 0, 0), make_vec3(0.5, 1, 0), make_RGBcolor(1, 1, 1), Visualizer::COORDINATES_CARTESIAN);
@@ -1241,22 +1301,10 @@ TEST_CASE("Visualizer::printWindow after plotUpdate regression test") {
 
 TEST_CASE("Visualizer::printWindow after plotUpdate non-headless regression test") {
     // Regression test for the black image issue when calling printWindow() after plotUpdate(true)
-    // in non-headless mode. Only runs when a display is available.
+    // in non-headless mode. Only runs where a windowed OpenGL context can be created.
 
-    // Check if we have a display available (skip test if running in headless environment)
-    const char *display = std::getenv("DISPLAY");
-    const char *wayland_display = std::getenv("WAYLAND_DISPLAY");
-
-#ifdef __APPLE__
-    // On macOS, we can always create a window context
-    bool has_display = true;
-#else
-    // On Linux, check for X11 or Wayland display
-    bool has_display = (display != nullptr && strlen(display) > 0) || (wayland_display != nullptr && strlen(wayland_display) > 0);
-#endif
-
-    if (!has_display) {
-        // Skip test silently when no display is available
+    if (!windowedContextAvailable()) {
+        // Skip test silently when no windowed OpenGL context can be created
         return;
     }
 
@@ -2212,19 +2260,8 @@ TEST_CASE("Visualizer::plotOnce on a freshly constructed visualizer (windowed)")
     // Same regression as the headless case above, in windowed mode. The reported crash reproduced
     // in both modes, so both are covered here.
 
-    const char *display = std::getenv("DISPLAY");
-    const char *wayland_display = std::getenv("WAYLAND_DISPLAY");
-
-#ifdef __APPLE__
-    // On macOS, we can always create a window context
-    bool has_display = true;
-#else
-    // On Linux, check for X11 or Wayland display
-    bool has_display = (display != nullptr && strlen(display) > 0) || (wayland_display != nullptr && strlen(wayland_display) > 0);
-#endif
-
-    if (!has_display) {
-        // Skip test silently when no display is available
+    if (!windowedContextAvailable()) {
+        // Skip test silently when no windowed OpenGL context can be created
         return;
     }
 
@@ -2232,6 +2269,119 @@ TEST_CASE("Visualizer::plotOnce on a freshly constructed visualizer (windowed)")
     visualizer.disableMessages();
 
     DOCTEST_CHECK_NOTHROW(visualizer.plotOnce(false));
+}
+
+namespace {
+    void setEnvironmentVariable(const char *name, const char *value) {
+#ifdef _WIN32
+        _putenv_s(name, value);
+#else
+        setenv(name, value, 1);
+#endif
+    }
+
+    void unsetEnvironmentVariable(const char *name) {
+#ifdef _WIN32
+        _putenv_s(name, "");
+#else
+        unsetenv(name);
+#endif
+    }
+
+    //! Restores the working directory and HELIOS_BUILD on scope exit
+    /**
+     * doctest runs every case in this file in one process, so a test that changes either piece of
+     * global state must put it back even if an assertion aborts the case partway through.
+     */
+    struct ProcessStateGuard {
+        std::filesystem::path working_directory;
+        bool build_variable_was_set;
+        std::string build_variable;
+
+        explicit ProcessStateGuard(std::filesystem::path directory) : working_directory(std::move(directory)) {
+            const char *existing = std::getenv("HELIOS_BUILD");
+            build_variable_was_set = (existing != nullptr);
+            if (build_variable_was_set) {
+                build_variable = existing;
+            }
+        }
+
+        ~ProcessStateGuard() {
+            std::error_code ec;
+            std::filesystem::current_path(working_directory, ec);
+            if (build_variable_was_set) {
+                setEnvironmentVariable("HELIOS_BUILD", build_variable.c_str());
+            } else {
+                unsetEnvironmentVariable("HELIOS_BUILD");
+            }
+        }
+    };
+} // namespace
+
+TEST_CASE("Visualizer construction does not change the working directory") {
+    // On macOS, glfwInit() moves the process working directory to the host bundle's
+    // Contents/Resources unless GLFW_COCOA_CHDIR_RESOURCES is turned off first -- see the init hint
+    // set in Visualizer::initialize(). Helios resolves assets relative to the working directory, so
+    // a Visualizer silently relocating the whole process breaks every later relative path in the
+    // host application, not just the visualizer's own.
+    //
+    // Honest about its reach: GLFW only performs the chdir when the host process has an application
+    // bundle, so on a bare test binary this passes whether or not the hint is set. It fails on a
+    // bundled host -- a macOS framework-build Python interpreter, or any .app-packaged tool linking
+    // the visualizer -- which is where the defect was originally observed.
+    std::filesystem::path working_directory_before = std::filesystem::current_path();
+
+    {
+        Visualizer visualizer(64, 64, 0, true, true);
+        visualizer.disableMessages();
+    }
+
+    std::filesystem::path working_directory_after = std::filesystem::current_path();
+
+    DOCTEST_CHECK(working_directory_after == working_directory_before);
+}
+
+TEST_CASE("Visualizer resolves its assets independently of the working directory") {
+    // The visualizer loaded six textures by paths relative to the process working directory, passed
+    // straight to fopen(). That works only because the test runner happens to launch from the build
+    // directory; any host that had changed directory got "File plugins/visualizer/textures/
+    // gradient_background.jpg could not be opened" from a file that exists and is readable.
+    //
+    // Those sites now go through helios::resolvePluginAsset(), which honors HELIOS_BUILD. This test
+    // sets HELIOS_BUILD to the build directory, moves the working directory elsewhere, and requires
+    // that a Visualizer still constructs and loads every texture it owns.
+    std::filesystem::path build_directory = std::filesystem::current_path();
+
+    // Precondition: the assets really are where the test believes they are, so that a failure below
+    // means the resolution logic is wrong rather than the build tree being incomplete.
+    DOCTEST_REQUIRE(std::filesystem::exists(build_directory / "plugins/visualizer/textures/gradient_background.jpg"));
+
+    std::filesystem::path scratch_directory = std::filesystem::temp_directory_path() / "helios_visualizer_asset_resolution";
+    std::error_code ec;
+    std::filesystem::create_directories(scratch_directory, ec);
+    DOCTEST_REQUIRE(std::filesystem::exists(scratch_directory));
+
+    {
+        ProcessStateGuard guard(build_directory);
+
+        setEnvironmentVariable("HELIOS_BUILD", build_directory.string().c_str());
+        std::filesystem::current_path(scratch_directory);
+
+        // Construction alone loads the shaders and the gradient background.
+        std::unique_ptr<Visualizer> visualizer;
+        DOCTEST_CHECK_NOTHROW(visualizer = std::make_unique<Visualizer>(64, 64, 0, true, true));
+        DOCTEST_REQUIRE(visualizer != nullptr);
+        visualizer->disableMessages();
+
+        // The three navigation gizmo bubbles.
+        DOCTEST_CHECK_NOTHROW(visualizer->showNavigationGizmo());
+
+        // The transparent background texture, on both of the paths that load it.
+        DOCTEST_CHECK_NOTHROW(visualizer->setBackgroundTransparent());
+        DOCTEST_CHECK_NOTHROW(visualizer->printWindow("test_asset_resolution.png", "png"));
+    }
+
+    std::filesystem::remove_all(scratch_directory, ec);
 }
 
 #ifndef _WIN32
@@ -2293,4 +2443,969 @@ DOCTEST_TEST_CASE("Visualizer::plotOnce does not terminate the process") {
 
 int Visualizer::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Image display with bounding box overlays.
+//
+// Nothing below calls displayImage() or displayImageWithBoundingBoxes(): both end in
+// plotInteractive(), which spins until the window is closed and would hang the suite. The parsing
+// and the geometry construction are reachable on their own precisely so that they can be tested,
+// through the public readers and through VisualizerTestHelper for the two private builders.
+// ---------------------------------------------------------------------------------------------
+
+//! Directory for the label and class name fixtures used by the bounding box tests
+/**
+ * The class name lookup searches the directory containing the annotation file, so each fixture needs
+ * a directory it controls exclusively; a stray classes.txt in a shared directory would silently
+ * change what is being exercised.
+ */
+static std::filesystem::path makeBoundingBoxFixtureDirectory(const std::string &name) {
+    std::filesystem::path directory = std::filesystem::temp_directory_path() / ("helios_visualizer_bbox_" + name);
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    return directory;
+}
+
+static void writeBoundingBoxFixture(const std::filesystem::path &file, const std::string &contents) {
+    std::ofstream stream(file);
+    stream << contents;
+}
+
+TEST_CASE("Visualizer::buildImageDisplayGeometry after a plot does not throw on stale geometry IDs") {
+    // Regression test: clearAllGeometry() destroys every geometry ID but does not reset the IDs the
+    // visualizer has cached for the watermark, background rectangle and colorbar. hideWatermark()
+    // then deletes by an ID that no longer exists, and GeometryHandler::deleteGeometry() indexes
+    // UUID_map with at(), so it threw std::out_of_range. Reached through the public API as
+    // `vis.plotUpdate(true); vis.displayImage(file);`, which aborted instead of displaying anything.
+    //
+    // plotUpdate() is what creates the watermark and records its ID, so it is the step that arms the
+    // bug; a freshly constructed visualizer has watermark_ID == 0 and is unaffected.
+
+    Visualizer visualizer(800, 800, 0, true, true); // headless
+    visualizer.disableMessages();
+
+    visualizer.plotUpdate(true);
+
+    std::vector<unsigned char> pixel_data(4 * 16 * 16, 255);
+    DOCTEST_CHECK_NOTHROW(VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 16, 16));
+}
+
+TEST_CASE("Visualizer::readBoundingBoxFile parses YOLO annotation lines") {
+    const std::filesystem::path directory = makeBoundingBoxFixtureDirectory("read");
+    const std::filesystem::path bbox_file = directory / "image.txt";
+
+    // RadiationModel::writeImageBoundingBoxes() applies std::fixed only after streaming the two center
+    // fields, so on the first line of every file they carry default ostream formatting and a small
+    // value appears in scientific notation. The trailing blank line is likewise what a real file has,
+    // because every line is terminated with std::endl.
+    writeBoundingBoxFixture(bbox_file, "0 1.5e-05 0.274926 0.309193 0.156994\n1 0.636739 0.733507 0.312500 0.225446\n\n   \n");
+
+    std::vector<Visualizer::BoundingBox> boxes;
+    DOCTEST_CHECK_NOTHROW(boxes = Visualizer::readBoundingBoxFile(bbox_file.string()));
+
+    DOCTEST_REQUIRE(boxes.size() == 2);
+
+    DOCTEST_CHECK(boxes.at(0).class_ID == 0);
+    DOCTEST_CHECK(boxes.at(0).center.x == doctest::Approx(1.5e-05f));
+    DOCTEST_CHECK(boxes.at(0).center.y == doctest::Approx(0.274926f));
+    DOCTEST_CHECK(boxes.at(0).size.x == doctest::Approx(0.309193f));
+    DOCTEST_CHECK(boxes.at(0).size.y == doctest::Approx(0.156994f));
+
+    DOCTEST_CHECK(boxes.at(1).class_ID == 1);
+    DOCTEST_CHECK(boxes.at(1).center.x == doctest::Approx(0.636739f));
+    DOCTEST_CHECK(boxes.at(1).size.y == doctest::Approx(0.225446f));
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Visualizer::readBoundingBoxFile accepts an annotation file with no boxes") {
+    // RadiationModel::writeImageBoundingBoxes() writes an empty file when no primitive carried the
+    // requested data label. An image in which nothing was detected is legitimate, not an error.
+    const std::filesystem::path directory = makeBoundingBoxFixtureDirectory("empty");
+    const std::filesystem::path bbox_file = directory / "image.txt";
+    writeBoundingBoxFixture(bbox_file, "");
+
+    std::vector<Visualizer::BoundingBox> boxes;
+    DOCTEST_CHECK_NOTHROW(boxes = Visualizer::readBoundingBoxFile(bbox_file.string()));
+    DOCTEST_CHECK(boxes.empty());
+
+    writeBoundingBoxFixture(bbox_file, "\n  \n\t\n");
+    DOCTEST_CHECK_NOTHROW(boxes = Visualizer::readBoundingBoxFile(bbox_file.string()));
+    DOCTEST_CHECK(boxes.empty());
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Visualizer::readBoundingBoxFile rejects malformed annotation files") {
+    const std::filesystem::path directory = makeBoundingBoxFixtureDirectory("malformed");
+    const std::filesystem::path bbox_file = directory / "image.txt";
+
+    DOCTEST_SUBCASE("too few fields") {
+        writeBoundingBoxFixture(bbox_file, "0 0.5 0.5 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("too many fields") {
+        writeBoundingBoxFixture(bbox_file, "0 0.5 0.5 0.1 0.1 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("non-numeric geometry field") {
+        writeBoundingBoxFixture(bbox_file, "0 abc 0.5 0.1 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("negative class ID") {
+        writeBoundingBoxFixture(bbox_file, "-1 0.5 0.5 0.1 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("class ID too large for an int") {
+        // helios::parse_int() catches std::invalid_argument but not std::out_of_range, so this must be
+        // rejected before it reaches parse_int() or it escapes as a bare std::out_of_range.
+        writeBoundingBoxFixture(bbox_file, "99999999999999999999 0.5 0.5 0.1 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("center outside the normalized range") {
+        writeBoundingBoxFixture(bbox_file, "0 1.5 0.5 0.1 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("degenerate box") {
+        writeBoundingBoxFixture(bbox_file, "0 0.5 0.5 0 0.1\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile(bbox_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("file does not exist") {
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxFile((directory / "missing.txt").string()), std::runtime_error);
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Visualizer::readBoundingBoxClassNames accepts both class file formats") {
+    const std::filesystem::path directory = makeBoundingBoxFixtureDirectory("classes");
+    const std::filesystem::path classes_file = directory / "classes.txt";
+
+    DOCTEST_SUBCASE("explicit class IDs, as written by RadiationModel") {
+        writeBoundingBoxFixture(classes_file, "0 bunny\n1 dragon\n");
+        const std::map<uint, std::string> names = Visualizer::readBoundingBoxClassNames(classes_file.string());
+        DOCTEST_CHECK(names.size() == 2);
+        DOCTEST_CHECK(names.at(0) == "bunny");
+        DOCTEST_CHECK(names.at(1) == "dragon");
+    }
+    DOCTEST_SUBCASE("implicit class IDs, the Ultralytics convention") {
+        writeBoundingBoxFixture(classes_file, "bunny\ndragon\n");
+        const std::map<uint, std::string> names = Visualizer::readBoundingBoxClassNames(classes_file.string());
+        DOCTEST_CHECK(names.size() == 2);
+        DOCTEST_CHECK(names.at(0) == "bunny");
+        DOCTEST_CHECK(names.at(1) == "dragon");
+    }
+    DOCTEST_SUBCASE("explicit class IDs need not be contiguous") {
+        // Proves the leading integer is read as the ID rather than the line being counted.
+        writeBoundingBoxFixture(classes_file, "3 corn\n7 wheat\n");
+        const std::map<uint, std::string> names = Visualizer::readBoundingBoxClassNames(classes_file.string());
+        DOCTEST_CHECK(names.size() == 2);
+        DOCTEST_CHECK(names.at(3) == "corn");
+        DOCTEST_CHECK(names.at(7) == "wheat");
+    }
+    DOCTEST_SUBCASE("an implicit class name may contain spaces") {
+        // The name is the remainder of the line, not the second token.
+        writeBoundingBoxFixture(classes_file, "sweet corn\n");
+        const std::map<uint, std::string> names = Visualizer::readBoundingBoxClassNames(classes_file.string());
+        DOCTEST_CHECK(names.size() == 1);
+        DOCTEST_CHECK(names.at(0) == "sweet corn");
+    }
+    DOCTEST_SUBCASE("an explicit class name may contain spaces") {
+        writeBoundingBoxFixture(classes_file, "2 sweet corn\n");
+        const std::map<uint, std::string> names = Visualizer::readBoundingBoxClassNames(classes_file.string());
+        DOCTEST_CHECK(names.size() == 1);
+        DOCTEST_CHECK(names.at(2) == "sweet corn");
+    }
+    DOCTEST_SUBCASE("blank lines do not advance the implicit class ID") {
+        writeBoundingBoxFixture(classes_file, "bunny\n\n   \ndragon\n");
+        const std::map<uint, std::string> names = Visualizer::readBoundingBoxClassNames(classes_file.string());
+        DOCTEST_CHECK(names.size() == 2);
+        DOCTEST_CHECK(names.at(1) == "dragon");
+    }
+    DOCTEST_SUBCASE("an empty class file is an error") {
+        // The file exists, so it is corrupt rather than absent. An absent file is the benign case and
+        // is handled by falling back to numeric class IDs.
+        writeBoundingBoxFixture(classes_file, "\n\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxClassNames(classes_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("a class ID given two different names is an error") {
+        writeBoundingBoxFixture(classes_file, "0 bunny\n0 dragon\n");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxClassNames(classes_file.string()), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("class file does not exist") {
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readBoundingBoxClassNames((directory / "missing.txt").string()), std::runtime_error);
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Visualizer::getTextboxSize measures text extent") {
+    Visualizer visualizer(1000, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const vec2 size_M = visualizer.getTextboxSize("M", 20, "OpenSans-Regular");
+    const vec2 size_MM = visualizer.getTextboxSize("MM", 20, "OpenSans-Regular");
+
+    DOCTEST_CHECK(size_M.x > 0.f);
+    DOCTEST_CHECK(size_M.y > 0.f);
+    DOCTEST_CHECK(size_MM.x > size_M.x);
+
+    // An empty string occupies nothing.
+    const vec2 size_empty = visualizer.getTextboxSize("", 20, "OpenSans-Regular");
+    DOCTEST_CHECK(size_empty.x == doctest::Approx(0.f));
+    DOCTEST_CHECK(size_empty.y == doctest::Approx(0.f));
+
+    // The subscript marker itself takes no width and halves the character that follows.
+    DOCTEST_CHECK(visualizer.getTextboxSize("A_1", 20, "OpenSans-Regular").x < visualizer.getTextboxSize("A1", 20, "OpenSans-Regular").x);
+
+    // A larger font measures wider.
+    DOCTEST_CHECK(visualizer.getTextboxSize("M", 40, "OpenSans-Regular").x > size_M.x);
+
+    DOCTEST_CHECK_THROWS_AS(std::ignore = visualizer.getTextboxSize("M", 20, "ThisFontDoesNotExist"), std::runtime_error);
+}
+
+TEST_CASE("Visualizer::getTextboxSize agrees with the text addTextboxByCenter renders") {
+    // The measurement was factored out of addTextboxByCenter, so the two must still agree. This is a
+    // loose bound rather than an equality: the union of the glyph quads excludes the trailing advance
+    // of the final character and includes the one-texel border each glyph texture carries.
+    Visualizer visualizer(1000, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const char *teststring = "Wg";
+    const vec2 measured = visualizer.getTextboxSize(teststring, 24, "OpenSans-Regular");
+
+    const std::vector<size_t> UUIDs = visualizer.addTextboxByCenter(teststring, make_vec3(0.5f, 0.5f, 0.f), make_SphericalCoord(0, 0), RGB::black, 24, "OpenSans-Regular", Visualizer::COORDINATES_WINDOW_NORMALIZED);
+    DOCTEST_REQUIRE(UUIDs.size() == std::strlen(teststring));
+
+    float glyph_x_min = 1.f;
+    float glyph_x_max = 0.f;
+    for (size_t UUID: UUIDs) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUID)) {
+            glyph_x_min = std::min(glyph_x_min, vertex.x);
+            glyph_x_max = std::max(glyph_x_max, vertex.x);
+        }
+    }
+    const float rendered_width = glyph_x_max - glyph_x_min;
+
+    DOCTEST_CHECK(rendered_width > 0.5f * measured.x);
+    DOCTEST_CHECK(rendered_width <= measured.x + 4.f / 1000.f);
+
+    // The string is centered on the point it was given, so the measured width also predicts where it starts.
+    DOCTEST_CHECK(glyph_x_min == doctest::Approx(0.5f - 0.5f * measured.x).epsilon(0.05));
+}
+
+TEST_CASE("Visualizer::buildImageDisplayGeometry returns the displayed image extent") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless, square window
+    visualizer.disableMessages();
+
+    DOCTEST_SUBCASE("an image wider than the window is letterboxed top and bottom") {
+        const std::vector<unsigned char> pixel_data(4 * 200 * 100, 255);
+        const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 200, 100);
+        DOCTEST_CHECK(extent.x == doctest::Approx(0.f));
+        DOCTEST_CHECK(extent.y == doctest::Approx(0.25f));
+        DOCTEST_CHECK(extent.z == doctest::Approx(1.f));
+        DOCTEST_CHECK(extent.w == doctest::Approx(0.75f));
+    }
+    DOCTEST_SUBCASE("an image taller than the window is letterboxed left and right") {
+        const std::vector<unsigned char> pixel_data(4 * 100 * 200, 255);
+        const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 200);
+        DOCTEST_CHECK(extent.x == doctest::Approx(0.25f));
+        DOCTEST_CHECK(extent.y == doctest::Approx(0.f));
+        DOCTEST_CHECK(extent.z == doctest::Approx(0.75f));
+        DOCTEST_CHECK(extent.w == doctest::Approx(1.f));
+    }
+    DOCTEST_SUBCASE("an image matching the window aspect ratio fills it") {
+        const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+        const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+        DOCTEST_CHECK(extent.x == doctest::Approx(0.f));
+        DOCTEST_CHECK(extent.y == doctest::Approx(0.f));
+        DOCTEST_CHECK(extent.z == doctest::Approx(1.f));
+        DOCTEST_CHECK(extent.w == doctest::Approx(1.f));
+
+        // The image quad, and nothing else: prior geometry was cleared and the watermark hidden,
+        // without entering a render loop.
+        DOCTEST_CHECK(VisualizerTestHelper::getLiveGeometryCount(visualizer) == 1);
+    }
+
+    DOCTEST_CHECK_THROWS_AS(std::ignore = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, {}, 10, 10), std::runtime_error);
+    DOCTEST_CHECK_THROWS_AS(std::ignore = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, std::vector<unsigned char>(10, 255), 10, 10), std::runtime_error);
+}
+
+TEST_CASE("Visualizer::addBoundingBoxOverlay maps boxes into image coordinates with y flipped") {
+    // A square image in a square window maps the image extent onto the whole window, so window
+    // coordinates equal normalized image coordinates apart from the vertical flip, and the flip is
+    // the only thing under test.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    // Top-left quadrant in YOLO terms, whose origin is the top-left corner of the image.
+    Visualizer::BoundingBox box;
+    box.class_ID = 0;
+    box.center = make_vec2(0.25f, 0.25f);
+    box.size = make_vec2(0.5f, 0.5f);
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {box}, {}, extent, 2.f, 12);
+    DOCTEST_REQUIRE(UUIDs.size() > 5); // four outline lines, the label chip, and at least one glyph
+
+    // The first four identifiers are the outline lines, in the documented order.
+    float x_min = 1.f, x_max = 0.f, y_min = 1.f, y_max = 0.f;
+    for (size_t i = 0; i < 4; i++) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUIDs.at(i))) {
+            x_min = std::min(x_min, vertex.x);
+            x_max = std::max(x_max, vertex.x);
+            y_min = std::min(y_min, vertex.y);
+            y_max = std::max(y_max, vertex.y);
+        }
+    }
+
+    DOCTEST_CHECK(x_min == doctest::Approx(0.f));
+    DOCTEST_CHECK(x_max == doctest::Approx(0.5f));
+
+    // The assertion that matters. A box in the TOP half of the image must land in the UPPER half of
+    // the window, because window coordinates run bottom-up and YOLO coordinates run top-down. Without
+    // the flip this box would sit at y in [0, 0.5] -- half a window away.
+    DOCTEST_CHECK(y_min == doctest::Approx(0.5f));
+    DOCTEST_CHECK(y_max == doctest::Approx(1.f));
+}
+
+TEST_CASE("Visualizer::addBoundingBoxOverlay maps boxes onto a letterboxed image") {
+    // The mapping must be relative to the image, not to the window: a box covering the whole image
+    // must trace the image extent exactly, leaving the letterboxed margin untouched.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 200 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 200, 100);
+
+    Visualizer::BoundingBox box;
+    box.class_ID = 0;
+    box.center = make_vec2(0.5f, 0.5f);
+    box.size = make_vec2(1.f, 1.f);
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {box}, {}, extent, 2.f, 12);
+
+    float x_min = 1.f, x_max = 0.f, y_min = 1.f, y_max = 0.f;
+    for (size_t i = 0; i < 4; i++) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUIDs.at(i))) {
+            x_min = std::min(x_min, vertex.x);
+            x_max = std::max(x_max, vertex.x);
+            y_min = std::min(y_min, vertex.y);
+            y_max = std::max(y_max, vertex.y);
+        }
+    }
+
+    DOCTEST_CHECK(x_min == doctest::Approx(extent.x));
+    DOCTEST_CHECK(x_max == doctest::Approx(extent.z));
+    DOCTEST_CHECK(y_min == doctest::Approx(extent.y));
+    DOCTEST_CHECK(y_max == doctest::Approx(extent.w));
+}
+
+TEST_CASE("Visualizer::addBoundingBoxOverlay layers the overlay in front of the image") {
+    // Window-normalized z passes straight through to normalized device coordinates and the depth test
+    // is GL_LEQUAL, so every overlay element must sit at negative z to be in front of the image quad
+    // at z=0, and the text must be nearer than its own chip or the chip discards it.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    Visualizer::BoundingBox box;
+    box.class_ID = 0;
+    box.center = make_vec2(0.5f, 0.5f);
+    box.size = make_vec2(0.4f, 0.4f);
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {box}, {}, extent, 2.f, 12);
+    DOCTEST_REQUIRE(UUIDs.size() > 5);
+
+    for (size_t UUID: UUIDs) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUID)) {
+            DOCTEST_CHECK(vertex.z < 0.f);
+        }
+    }
+
+    const float z_outline = visualizer.getGeometryVertices(UUIDs.at(0)).front().z;
+    const float z_chip = visualizer.getGeometryVertices(UUIDs.at(4)).front().z;
+    const float z_text = visualizer.getGeometryVertices(UUIDs.at(5)).front().z;
+
+    DOCTEST_CHECK(z_chip < z_outline);
+    DOCTEST_CHECK(z_text < z_chip);
+}
+
+TEST_CASE("Visualizer::addBoundingBoxOverlay does not warn for boxes at the image edge") {
+    // Boxes flush with the image border are ordinary, so they must not produce "outside of drawable
+    // area" warnings. Messages are deliberately left enabled: the warnings are gated on message_flag,
+    // so disabling them would make this pass no matter how badly the clamping were broken.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.enableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    std::vector<Visualizer::BoundingBox> boxes;
+
+    Visualizer::BoundingBox full_image_box;
+    full_image_box.class_ID = 0;
+    full_image_box.center = make_vec2(0.5f, 0.5f);
+    full_image_box.size = make_vec2(1.f, 1.f);
+    boxes.push_back(full_image_box);
+
+    // A box clipped by the top-left corner of the image. Its center and half-size recombine to edges
+    // at -0.05, i.e. genuinely outside the image, which is what the clamping exists for. Its label
+    // chip is also wider than the box, so the chip must be shifted to stay inside as well.
+    Visualizer::BoundingBox corner_box;
+    corner_box.class_ID = 1;
+    corner_box.center = make_vec2(0.05f, 0.05f);
+    corner_box.size = make_vec2(0.2f, 0.2f);
+    boxes.push_back(corner_box);
+
+    // The same, clipped by the bottom-right corner: edges at 1.05.
+    Visualizer::BoundingBox far_corner_box;
+    far_corner_box.class_ID = 2;
+    far_corner_box.center = make_vec2(0.95f, 0.95f);
+    far_corner_box.size = make_vec2(0.2f, 0.2f);
+    boxes.push_back(far_corner_box);
+
+    std::string captured_output;
+    {
+        capture_cerr capture;
+        VisualizerTestHelper::addBoundingBoxOverlay(visualizer, boxes, {}, extent, 2.f, 12);
+        captured_output = capture.get_captured_output();
+    } // capture destroyed here, before the assertion, so doctest failure output prints
+
+    DOCTEST_CHECK_MESSAGE(captured_output.empty(), "addBoundingBoxOverlay warned for a box flush with the image border: " << captured_output);
+}
+
+TEST_CASE("Visualizer::addBoundingBoxOverlay labels boxes by class name or class ID") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    Visualizer::BoundingBox box;
+    box.class_ID = 5;
+    box.center = make_vec2(0.5f, 0.5f);
+    box.size = make_vec2(0.4f, 0.4f);
+
+    DOCTEST_SUBCASE("an empty class map labels the box with its numeric class ID") {
+        // No class name file was available. Four outline lines, the chip, and one glyph for "5".
+        std::vector<size_t> UUIDs;
+        DOCTEST_CHECK_NOTHROW(UUIDs = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {box}, {}, extent, 2.f, 12));
+        DOCTEST_CHECK(UUIDs.size() == 6);
+    }
+    DOCTEST_SUBCASE("a class ID missing from a non-empty class map is an error") {
+        // The annotations and the class names do not correspond, which is a real inconsistency rather
+        // than a missing file, so it must not be papered over with the numeric ID.
+        const std::map<uint, std::string> class_names{{0, "bunny"}, {1, "dragon"}};
+        DOCTEST_CHECK_THROWS_AS(std::ignore = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {box}, class_names, extent, 2.f, 12), std::runtime_error);
+    }
+    DOCTEST_SUBCASE("a named class is labeled with its name") {
+        const std::map<uint, std::string> class_names{{5, "bunny"}};
+        std::vector<size_t> UUIDs;
+        DOCTEST_CHECK_NOTHROW(UUIDs = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {box}, class_names, extent, 2.f, 12));
+        DOCTEST_CHECK(UUIDs.size() == 4 + 1 + std::strlen("bunny"));
+    }
+}
+
+TEST_CASE("Visualizer::addBoundingBoxOverlay with no boxes adds no geometry") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    const size_t geometry_count_before = VisualizerTestHelper::getLiveGeometryCount(visualizer);
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addBoundingBoxOverlay(visualizer, {}, {}, extent, 2.f, 12);
+
+    DOCTEST_CHECK(UUIDs.empty());
+    DOCTEST_CHECK(VisualizerTestHelper::getLiveGeometryCount(visualizer) == geometry_count_before);
+}
+
+// ---- Segmentation mask overlay ----------------------------------------------------------------
+//
+// As with the bounding box tests above, displayImageWithSegmentationMasks() itself is unreachable
+// because it ends in plotInteractive(); the reader is static and the overlay is reached through
+// VisualizerTestHelper.
+
+//! Directory for the COCO JSON fixtures used by the segmentation mask tests
+static std::filesystem::path makeSegmentationMaskFixtureDirectory(const std::string &name) {
+    std::filesystem::path directory = std::filesystem::temp_directory_path() / ("helios_visualizer_segmask_" + name);
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    return directory;
+}
+
+//! A COCO file with one square mask, matching the shape RadiationModel::writeImageSegmentationMasks() writes
+static std::string singleMaskCOCOJson() {
+    return R"({
+  "categories": [{"id": 0, "name": "bunny", "supercategory": "none"}],
+  "images": [{"id": 0, "file_name": "bunnycam_RGB.jpeg", "height": 100, "width": 100}],
+  "annotations": [{"id": 0, "image_id": 0, "category_id": 0, "bbox": [0, 0, 50, 50], "area": 2500, "iscrowd": 0,
+                   "segmentation": [[0, 0, 50, 0, 50, 50, 0, 50]]}]
+})";
+}
+
+TEST_CASE("Visualizer::readSegmentationMaskFile parses COCO polygon annotations") {
+    const std::filesystem::path directory = makeSegmentationMaskFixtureDirectory("read");
+    const std::filesystem::path mask_file = directory / "masks.json";
+    writeBoundingBoxFixture(mask_file, singleMaskCOCOJson());
+
+    std::vector<Visualizer::SegmentationMask> masks;
+    DOCTEST_CHECK_NOTHROW(masks = Visualizer::readSegmentationMaskFile(mask_file.string()));
+
+    DOCTEST_REQUIRE(masks.size() == 1);
+    DOCTEST_CHECK(masks.at(0).class_ID == 0);
+    DOCTEST_CHECK(masks.at(0).class_name == "bunny");
+    DOCTEST_CHECK(masks.at(0).image_size.x == doctest::Approx(100.f));
+    DOCTEST_CHECK(masks.at(0).image_size.y == doctest::Approx(100.f));
+
+    DOCTEST_REQUIRE(masks.at(0).polygons.size() == 1);
+    DOCTEST_REQUIRE(masks.at(0).polygons.at(0).size() == 4);
+
+    // Coordinates are absolute pixels, not normalized -- the property that distinguishes this format from the YOLO one.
+    DOCTEST_CHECK(masks.at(0).polygons.at(0).at(0).x == doctest::Approx(0.f));
+    DOCTEST_CHECK(masks.at(0).polygons.at(0).at(1).x == doctest::Approx(50.f));
+    DOCTEST_CHECK(masks.at(0).polygons.at(0).at(2).y == doctest::Approx(50.f));
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Visualizer::readSegmentationMaskFile selects annotations by image") {
+    // The writer appends, so one file can describe several images. Each image must yield only its own masks.
+    const std::filesystem::path directory = makeSegmentationMaskFixtureDirectory("multi_image");
+    const std::filesystem::path mask_file = directory / "masks.json";
+    writeBoundingBoxFixture(mask_file, R"({
+  "categories": [{"id": 0, "name": "bunny"}, {"id": 1, "name": "dragon"}],
+  "images": [{"id": 0, "file_name": "first.jpeg", "height": 100, "width": 100},
+             {"id": 1, "file_name": "second.jpeg", "height": 100, "width": 100}],
+  "annotations": [{"id": 0, "image_id": 0, "category_id": 0, "segmentation": [[0, 0, 10, 0, 10, 10]]},
+                  {"id": 1, "image_id": 1, "category_id": 1, "segmentation": [[0, 0, 20, 0, 20, 20]]},
+                  {"id": 2, "image_id": 1, "category_id": 1, "segmentation": [[30, 30, 40, 30, 40, 40]]}]
+})");
+
+    std::vector<Visualizer::SegmentationMask> masks;
+    DOCTEST_CHECK_NOTHROW(masks = Visualizer::readSegmentationMaskFile(mask_file.string(), "second.jpeg"));
+    DOCTEST_REQUIRE(masks.size() == 2);
+    DOCTEST_CHECK(masks.at(0).class_name == "dragon");
+
+    // A path from another directory still matches, because only the file name is compared.
+    DOCTEST_CHECK_NOTHROW(masks = Visualizer::readSegmentationMaskFile(mask_file.string(), "/somewhere/else/first.jpeg"));
+    DOCTEST_CHECK(masks.size() == 1);
+
+    // Naming no image is ambiguous when the file describes more than one.
+    DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+
+    // An image the file does not describe is an error rather than an empty result.
+    DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string(), "absent.jpeg"), std::runtime_error);
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Visualizer::readSegmentationMaskFile rejects malformed mask files") {
+    const std::filesystem::path directory = makeSegmentationMaskFixtureDirectory("malformed");
+    const std::filesystem::path mask_file = directory / "masks.json";
+
+    SUBCASE("not JSON at all") {
+        writeBoundingBoxFixture(mask_file, "this is not json");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+    }
+    SUBCASE("missing the annotations array") {
+        writeBoundingBoxFixture(mask_file, R"({"images": [{"id": 0, "file_name": "a.jpeg", "width": 10, "height": 10}], "categories": []})");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+    }
+    SUBCASE("odd number of coordinates") {
+        writeBoundingBoxFixture(mask_file, R"({"categories": [{"id": 0, "name": "a"}],
+          "images": [{"id": 0, "file_name": "a.jpeg", "width": 10, "height": 10}],
+          "annotations": [{"id": 0, "image_id": 0, "category_id": 0, "segmentation": [[0, 0, 5, 0, 5]]}]})");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+    }
+    SUBCASE("fewer than three vertices") {
+        writeBoundingBoxFixture(mask_file, R"({"categories": [{"id": 0, "name": "a"}],
+          "images": [{"id": 0, "file_name": "a.jpeg", "width": 10, "height": 10}],
+          "annotations": [{"id": 0, "image_id": 0, "category_id": 0, "segmentation": [[0, 0, 5, 5]]}]})");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+    }
+    SUBCASE("class ID absent from the categories array") {
+        writeBoundingBoxFixture(mask_file, R"({"categories": [{"id": 0, "name": "a"}],
+          "images": [{"id": 0, "file_name": "a.jpeg", "width": 10, "height": 10}],
+          "annotations": [{"id": 0, "image_id": 0, "category_id": 7, "segmentation": [[0, 0, 5, 0, 5, 5]]}]})");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+    }
+    SUBCASE("run-length encoded segmentation") {
+        // The RLE form is valid COCO but is never written by Helios, so it must be reported rather than silently skipped.
+        writeBoundingBoxFixture(mask_file, R"({"categories": [{"id": 0, "name": "a"}],
+          "images": [{"id": 0, "file_name": "a.jpeg", "width": 10, "height": 10}],
+          "annotations": [{"id": 0, "image_id": 0, "category_id": 0, "segmentation": {"counts": [1, 2, 3], "size": [10, 10]}}]})");
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile(mask_file.string()), std::runtime_error);
+    }
+    SUBCASE("missing file") {
+        DOCTEST_CHECK_THROWS_AS(std::ignore = Visualizer::readSegmentationMaskFile((directory / "absent.json").string()), std::runtime_error);
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
+//! One square mask covering the top-left quadrant of a 100x100 image
+static Visualizer::SegmentationMask makeQuadrantMask() {
+    Visualizer::SegmentationMask mask;
+    mask.class_ID = 0;
+    mask.class_name = "bunny";
+    mask.image_size = make_vec2(100.f, 100.f);
+    mask.polygons.push_back({make_vec2(0.f, 0.f), make_vec2(50.f, 0.f), make_vec2(50.f, 50.f), make_vec2(0.f, 50.f)});
+    return mask;
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay maps polygons into image coordinates with y flipped") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.4f, 2.f, 12);
+    DOCTEST_REQUIRE(!UUIDs.empty());
+
+    float x_min = 1.f, x_max = 0.f, y_min = 1.f, y_max = 0.f;
+    for (const size_t UUID: UUIDs) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUID)) {
+            x_min = std::min(x_min, vertex.x);
+            x_max = std::max(x_max, vertex.x);
+            y_min = std::min(y_min, vertex.y);
+            y_max = std::max(y_max, vertex.y);
+        }
+    }
+
+    DOCTEST_CHECK(x_min == doctest::Approx(0.f));
+
+    // The mask occupies the TOP-left quadrant in image coordinates, so it must land in the UPPER half
+    // of the window. Without the flip it would sit against y = 0 instead.
+    DOCTEST_CHECK(y_max == doctest::Approx(1.f));
+    DOCTEST_CHECK(y_min > 0.4f);
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay maps polygons onto a letterboxed image") {
+    // A 200x100 image in an 800x800 window is letterboxed, so a mask covering the whole image must
+    // trace the image extent and not the window.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 200 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 200, 100);
+
+    Visualizer::SegmentationMask mask;
+    mask.class_ID = 0;
+    mask.image_size = make_vec2(200.f, 100.f);
+    mask.polygons.push_back({make_vec2(0.f, 0.f), make_vec2(200.f, 0.f), make_vec2(200.f, 100.f), make_vec2(0.f, 100.f)});
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {mask}, extent, 0.4f, 2.f, 12);
+    DOCTEST_REQUIRE(!UUIDs.empty());
+
+    float y_min = 1.f, y_max = 0.f;
+    for (const size_t UUID: UUIDs) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUID)) {
+            y_min = std::min(y_min, vertex.y);
+            y_max = std::max(y_max, vertex.y);
+        }
+    }
+
+    DOCTEST_CHECK(y_min == doctest::Approx(extent.y));
+    DOCTEST_CHECK(y_max == doctest::Approx(extent.w));
+    DOCTEST_CHECK(extent.y > 0.f); // the image really is letterboxed
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay layers the overlay in front of the image") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.4f, 2.f, 12);
+    DOCTEST_REQUIRE(UUIDs.size() > 6);
+
+    // Every element sits in front of the image quad at z = 0, and smaller z is nearer the viewer.
+    for (const size_t UUID: UUIDs) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUID)) {
+            DOCTEST_CHECK(vertex.z < 0.f);
+        }
+    }
+
+    // Geometry is emitted per mask as fill runs, then one outline line per vertex, then the chip, then
+    // one glyph per label character. The fill run count depends on the mask height, so the boundaries
+    // are derived from the end rather than assumed.
+    const size_t glyph_count = std::strlen("bunny");
+    const size_t chip_index = UUIDs.size() - glyph_count - 1;
+    const size_t outline_index = chip_index - 4;
+
+    const float z_fill = visualizer.getGeometryVertices(UUIDs.at(0)).front().z;
+    const float z_outline = visualizer.getGeometryVertices(UUIDs.at(outline_index)).front().z;
+    const float z_chip = visualizer.getGeometryVertices(UUIDs.at(chip_index)).front().z;
+    const float z_text = visualizer.getGeometryVertices(UUIDs.at(chip_index + 1)).front().z;
+
+    // The fill must sit BEHIND the outline so the outline is not dimmed by the translucent fill over it.
+    DOCTEST_CHECK(z_fill > z_outline);
+    DOCTEST_CHECK(z_outline > z_chip);
+    DOCTEST_CHECK(z_chip > z_text);
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay fills a self-intersecting contour") {
+    // The scanline fill exists so that this case works. RadiationModel::generateAnnotationsFromMasks()
+    // falls back to traceBoundarySimple() whenever the Moore trace yields fewer than 10 points, and
+    // that fallback emits boundary pixels in breadth-first order rather than in order around the
+    // contour, producing a badly self-intersecting loop. A triangulating fill fails outright on such
+    // a polygon; the even-odd rule handles it natively.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    // The boundary pixels of a ring, in the breadth-first order traceBoundarySimple() emits them:
+    // the walk alternates between opposite edges of the ring instead of going around it.
+    Visualizer::SegmentationMask self_intersecting;
+    self_intersecting.class_ID = 0;
+    self_intersecting.image_size = make_vec2(100.f, 100.f);
+    self_intersecting.polygons.push_back({make_vec2(0.f, 0.f), make_vec2(0.f, 6.f), make_vec2(6.f, 0.f), make_vec2(0.f, 12.f), make_vec2(12.f, 0.f), make_vec2(0.f, 18.f), make_vec2(18.f, 0.f),
+                                          make_vec2(0.f, 24.f), make_vec2(24.f, 0.f), make_vec2(0.f, 30.f), make_vec2(30.f, 0.f), make_vec2(0.f, 36.f), make_vec2(36.f, 0.f), make_vec2(0.f, 42.f),
+                                          make_vec2(42.f, 0.f), make_vec2(0.f, 48.f), make_vec2(6.f, 48.f), make_vec2(48.f, 0.f), make_vec2(48.f, 6.f), make_vec2(12.f, 48.f), make_vec2(48.f, 12.f),
+                                          make_vec2(18.f, 48.f), make_vec2(48.f, 18.f), make_vec2(24.f, 48.f), make_vec2(48.f, 24.f), make_vec2(30.f, 48.f), make_vec2(48.f, 30.f), make_vec2(36.f, 48.f),
+                                          make_vec2(48.f, 36.f), make_vec2(42.f, 48.f), make_vec2(48.f, 42.f), make_vec2(48.f, 48.f)});
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {self_intersecting}, extent, 0.4f, 2.f, 12);
+
+    // Beyond one outline line per vertex, the chip and one glyph, there must be fill geometry.
+    const size_t non_fill = self_intersecting.polygons.at(0).size() + 1 + std::strlen("0");
+    DOCTEST_CHECK(UUIDs.size() > non_fill);
+
+    // Every fill run must lie within the contour's own bounds, which span image x,y in [0,48] and so
+    // window x in [0,0.48] and y in [0.52,1].
+    for (size_t i = 0; i < UUIDs.size() - non_fill; i++) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUIDs.at(i))) {
+            DOCTEST_CHECK(vertex.x <= 0.48f + 1e-4f);
+            DOCTEST_CHECK(vertex.y >= 0.52f - 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay fills a contour that pinches to a point") {
+    // The failure mode seen on real writeImageSegmentationMasks() output, and the reason a
+    // triangulating fill was not good enough. A boundary traced around a mask that narrows to a
+    // one-pixel neck passes through the neck twice, from opposite sides, so the loop crosses itself
+    // there even though every vertex is distinct and consecutive vertices are adjacent pixels. Ear
+    // clipping rejected the dragon of the tutorial 12 output for exactly this reason.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    // Two blobs joined at (30,30), which the contour visits from both sides.
+    Visualizer::SegmentationMask pinched;
+    pinched.class_ID = 0;
+    pinched.image_size = make_vec2(100.f, 100.f);
+    pinched.polygons.push_back({make_vec2(0.f, 0.f), make_vec2(24.f, 0.f), make_vec2(30.f, 30.f), make_vec2(60.f, 0.f), make_vec2(84.f, 0.f), make_vec2(84.f, 60.f), make_vec2(60.f, 60.f),
+                                make_vec2(30.f, 30.f), make_vec2(24.f, 60.f), make_vec2(0.f, 60.f)});
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {pinched}, extent, 0.4f, 2.f, 12);
+
+    const size_t non_fill = pinched.polygons.at(0).size() + 1 + std::strlen("0");
+    DOCTEST_CHECK(UUIDs.size() > non_fill);
+
+    // The two lobes meet at a point, so the row through that point must be covered by two separate
+    // runs with a gap between them rather than by one run spanning the whole shape. Getting this
+    // wrong is exactly what filling across a self-intersection looks like.
+    // Image row 30 covers window y from 0.69 to 0.70, so its runs are the ones straddling 0.695.
+    constexpr float neck_row_center_y = 0.695f;
+
+    size_t runs_on_neck_row = 0;
+    float gap_left = 0.f, gap_right = 1.f;
+    for (size_t i = 0; i < UUIDs.size() - non_fill; i++) {
+        float x_lo = 1.f, x_hi = 0.f, y_lo = 1.f, y_hi = 0.f;
+        for (const vec3 &v: visualizer.getGeometryVertices(UUIDs.at(i))) {
+            x_lo = std::min(x_lo, v.x);
+            x_hi = std::max(x_hi, v.x);
+            y_lo = std::min(y_lo, v.y);
+            y_hi = std::max(y_hi, v.y);
+        }
+        if (y_lo < neck_row_center_y && y_hi > neck_row_center_y) {
+            runs_on_neck_row++;
+            if (x_hi <= 0.30f) {
+                gap_left = std::max(gap_left, x_hi); // run belonging to the left lobe
+            } else {
+                gap_right = std::min(gap_right, x_lo); // run belonging to the right lobe
+            }
+        }
+    }
+
+    DOCTEST_CHECK(runs_on_neck_row == 2);
+    DOCTEST_CHECK(gap_right > gap_left); // the lobes are not bridged across the meeting point
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay fills concave polygons within their own bounds") {
+    // The scanline fill must respect concavity: each row is covered only between its own crossings,
+    // so the notch of an L is left empty rather than being bridged.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    // An L-shape occupying the left column and bottom row of the top-left quadrant.
+    Visualizer::SegmentationMask concave;
+    concave.class_ID = 0;
+    concave.image_size = make_vec2(100.f, 100.f);
+    concave.polygons.push_back({make_vec2(0.f, 0.f), make_vec2(20.f, 0.f), make_vec2(20.f, 40.f), make_vec2(60.f, 40.f), make_vec2(60.f, 60.f), make_vec2(0.f, 60.f)});
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {concave}, extent, 0.4f, 2.f, 12);
+
+    // One outline line per vertex, the chip and one glyph; everything before those is fill.
+    const size_t non_fill = concave.polygons.at(0).size() + 1 + std::strlen("0");
+    DOCTEST_REQUIRE(UUIDs.size() > non_fill);
+    const size_t fill_count = UUIDs.size() - non_fill;
+
+    // The notch at image pixels (40, 20) is outside the L, so no fill vertex may reach into it. In
+    // window coordinates that is x > 0.2 and y > 0.6.
+    for (size_t i = 0; i < fill_count; i++) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUIDs.at(i))) {
+            const bool inside_notch = (vertex.x > 0.2f + 1e-4f) && (vertex.y > 0.6f + 1e-4f);
+            DOCTEST_CHECK_FALSE(inside_notch);
+        }
+    }
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay colors masks per annotation rather than per class") {
+    // Instance segmentation: two touching objects of the SAME class must be told apart, so the color
+    // follows the annotation's position in the file and not its class ID.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    Visualizer::SegmentationMask first = makeQuadrantMask();
+    Visualizer::SegmentationMask second = makeQuadrantMask(); // same class_ID
+    second.polygons.at(0) = {make_vec2(50.f, 50.f), make_vec2(90.f, 50.f), make_vec2(90.f, 90.f), make_vec2(50.f, 90.f)};
+
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {first, second}, extent, 0.4f, 2.f, 12);
+    DOCTEST_REQUIRE(UUIDs.size() > 2);
+
+    // Index 0 is the first triangle of mask one; the same offset into mask two's geometry follows it.
+    const size_t per_mask = UUIDs.size() / 2;
+    const RGBAcolor first_color = VisualizerTestHelper::getGeometryColor(visualizer, UUIDs.at(0));
+    const RGBAcolor second_color = VisualizerTestHelper::getGeometryColor(visualizer, UUIDs.at(per_mask));
+
+    const bool colors_differ = (first_color.r != second_color.r) || (first_color.g != second_color.g) || (first_color.b != second_color.b);
+    DOCTEST_CHECK(colors_differ);
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay respects the fill opacity") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    const std::vector<size_t> filled = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.4f, 2.f, 12);
+    DOCTEST_CHECK(VisualizerTestHelper::getGeometryColor(visualizer, filled.at(0)).a == doctest::Approx(0.4f));
+
+    // Zero opacity draws the outline and label only, leaving one line per vertex, the chip and the glyphs.
+    const std::vector<size_t> unfilled = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.f, 2.f, 12);
+    DOCTEST_CHECK(unfilled.size() == 4 + 1 + std::strlen("bunny"));
+    DOCTEST_CHECK(unfilled.size() < filled.size());
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay labels masks by class name or class ID") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    // The label contributes one glyph per character, on top of the fill, four outline lines and the chip.
+    const std::vector<size_t> named = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.f, 2.f, 12);
+    DOCTEST_CHECK(named.size() == 4 + 1 + std::strlen("bunny"));
+
+    // With no name in the file, the numeric class ID is all there is to show.
+    Visualizer::SegmentationMask unnamed = makeQuadrantMask();
+    unnamed.class_name = "";
+    unnamed.class_ID = 12;
+    const std::vector<size_t> numeric = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {unnamed}, extent, 0.f, 2.f, 12);
+    DOCTEST_CHECK(numeric.size() == 4 + 1 + std::strlen("12"));
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay can suppress the class labels") {
+    // Overlapping masks in a busy scene stack their chips over the image, so the labels can be turned
+    // off to inspect the mask shapes alone. Only the chip and its glyphs go; fill and outline stay.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    const std::vector<size_t> labeled = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.4f, 2.f, 12, true);
+    const std::vector<size_t> unlabeled = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.4f, 2.f, 12, false);
+
+    // Exactly the chip and one glyph per character of "bunny" disappear.
+    DOCTEST_CHECK(unlabeled.size() == labeled.size() - 1 - std::strlen("bunny"));
+
+    // The fill and outline are untouched, so the geometry that remains still spans the mask.
+    float x_min = 1.f, x_max = 0.f, y_min = 1.f, y_max = 0.f;
+    for (const size_t UUID: unlabeled) {
+        for (const vec3 &vertex: visualizer.getGeometryVertices(UUID)) {
+            x_min = std::min(x_min, vertex.x);
+            x_max = std::max(x_max, vertex.x);
+            y_min = std::min(y_min, vertex.y);
+            y_max = std::max(y_max, vertex.y);
+        }
+    }
+    DOCTEST_CHECK(x_min == doctest::Approx(0.f));
+    DOCTEST_CHECK(x_max == doctest::Approx(0.5f));
+    DOCTEST_CHECK(y_max == doctest::Approx(1.f));
+
+    // Suppressing the labels must not suppress the fill: zero opacity and no labels leaves the outline.
+    const std::vector<size_t> outline_only = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {makeQuadrantMask()}, extent, 0.f, 2.f, 12, false);
+    DOCTEST_CHECK(outline_only.size() == 4); // one line per vertex of the square, nothing else
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay does not warn for polygons at the image edge") {
+    // Messages are deliberately left ENABLED here: a polygon flush with the image border must not
+    // trip the "outside of drawable area" warning, which is what the clamping exists to prevent.
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    Visualizer::SegmentationMask edge_mask;
+    edge_mask.class_ID = 0;
+    edge_mask.class_name = "edge";
+    edge_mask.image_size = make_vec2(100.f, 100.f);
+    edge_mask.polygons.push_back({make_vec2(0.f, 0.f), make_vec2(100.f, 0.f), make_vec2(100.f, 100.f), make_vec2(0.f, 100.f)});
+
+    std::string captured;
+    {
+        capture_cerr capture;
+        std::ignore = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {edge_mask}, extent, 0.4f, 2.f, 12);
+        captured = capture.get_captured_output();
+    } // capture destroyed before the assertion, so a doctest failure message prints normally
+
+    DOCTEST_CHECK(captured.empty());
+}
+
+TEST_CASE("Visualizer::addSegmentationMaskOverlay with no masks adds no geometry") {
+    Visualizer visualizer(800, 800, 16, true, true); // headless
+    visualizer.disableMessages();
+
+    const std::vector<unsigned char> pixel_data(4 * 100 * 100, 255);
+    const vec4 extent = VisualizerTestHelper::buildImageDisplayGeometry(visualizer, pixel_data, 100, 100);
+
+    const size_t geometry_count_before = VisualizerTestHelper::getLiveGeometryCount(visualizer);
+    const std::vector<size_t> UUIDs = VisualizerTestHelper::addSegmentationMaskOverlay(visualizer, {}, extent, 0.4f, 2.f, 12);
+
+    DOCTEST_CHECK(UUIDs.empty());
+    DOCTEST_CHECK(VisualizerTestHelper::getLiveGeometryCount(visualizer) == geometry_count_before);
 }

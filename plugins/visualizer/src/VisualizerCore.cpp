@@ -25,6 +25,8 @@ extern "C" {
 
 #include "Visualizer.h"
 
+#include "json.hpp"
+
 using namespace helios;
 
 // Reference counter for GLFW initialization
@@ -265,6 +267,270 @@ Visualizer::Visualizer(uint Wdisplay) : colormap_current(), colormap_hot(), colo
 
 Visualizer::Visualizer(uint Wdisplay, uint Hdisplay) : colormap_current(), colormap_hot(), colormap_cool(), colormap_lava(), colormap_rainbow(), colormap_parula(), colormap_gray(), colormap_lines() {
     initialize(Wdisplay, Hdisplay, 16, true, false);
+}
+
+//! Whether a token is safe to pass to helios::parse_int as a class ID
+/**
+ * helios::parse_int() catches std::invalid_argument but not std::out_of_range, so a token of many digits escapes it as a bare std::out_of_range rather than a Helios error. Nine digits cannot overflow an
+ * int, so rejecting anything longer keeps the out-of-range case out of parse_int() entirely.
+ */
+static bool isPlausibleClassIDToken(const std::string &token) {
+    if (token.empty() || token.length() > 9) {
+        return false;
+    }
+    return std::all_of(token.begin(), token.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+std::vector<Visualizer::BoundingBox> Visualizer::readBoundingBoxFile(const std::string &bbox_file) {
+
+    std::ifstream file(bbox_file);
+    if (!file.is_open()) {
+        helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Could not open bounding box annotation file '" + bbox_file + "'. Check that the file exists and that you have permission to read it.");
+    }
+
+    std::vector<BoundingBox> bounding_boxes;
+    std::string line;
+    uint line_number = 0;
+
+    while (std::getline(file, line)) {
+        line_number++;
+
+        // Every line written by RadiationModel::writeImageBoundingBoxes() is terminated with a newline, so a well-formed file always ends in a blank line.
+        if (helios::trim_whitespace(line).empty()) {
+            continue;
+        }
+
+        std::vector<std::string> fields;
+        std::istringstream line_stream(line);
+        std::string field;
+        while (line_stream >> field) {
+            fields.push_back(field);
+        }
+
+        const std::string location = "line " + std::to_string(line_number) + " of '" + bbox_file + "'";
+
+        if (fields.size() != 5) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Expected 5 whitespace-separated fields on " + location + " but found " + std::to_string(fields.size()) +
+                                 ". Each line must be of the form 'class_ID x_center y_center width height'. The line was: '" + line + "'.");
+        }
+
+        BoundingBox box;
+
+        int class_ID;
+        if (!isPlausibleClassIDToken(fields.at(0)) || !helios::parse_int(fields.at(0), class_ID)) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Could not read '" + fields.at(0) + "' on " + location + " as a class ID. The class ID must be a non-negative integer.");
+        }
+        box.class_ID = static_cast<uint>(class_ID);
+
+        // Geometry fields are read in the order they are written: center first, then size.
+        const std::vector<std::string> field_names{"x_center", "y_center", "width", "height"};
+        float values[4];
+        for (int i = 0; i < 4; i++) {
+            if (!helios::parse_float(fields.at(i + 1), values[i])) {
+                helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Could not read '" + fields.at(i + 1) + "' on " + location + " as the " + field_names.at(i) + " of the box.");
+            }
+            if (values[i] < 0.f || values[i] > 1.f) {
+                helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): The " + field_names.at(i) + " on " + location + " was " + std::to_string(values[i]) +
+                                     ", which is outside the range [0,1]. Bounding box fields are normalized by the image dimensions.");
+            }
+        }
+
+        if (values[2] <= 0.f || values[3] <= 0.f) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): The box on " + location + " has a width of " + std::to_string(values[2]) + " and a height of " + std::to_string(values[3]) +
+                                 ". Both must be greater than zero.");
+        }
+
+        box.center = helios::make_vec2(values[0], values[1]);
+        box.size = helios::make_vec2(values[2], values[3]);
+
+        bounding_boxes.push_back(box);
+    }
+
+    return bounding_boxes;
+}
+
+std::map<uint, std::string> Visualizer::readBoundingBoxClassNames(const std::string &classes_file) {
+
+    std::ifstream file(classes_file);
+    if (!file.is_open()) {
+        helios_runtime_error("ERROR (Visualizer::readBoundingBoxClassNames): Could not open class name file '" + classes_file + "'. Check that the file exists and that you have permission to read it.");
+    }
+
+    std::map<uint, std::string> class_names;
+    std::string line;
+    uint line_number = 0;
+    uint implicit_class_ID = 0;
+
+    while (std::getline(file, line)) {
+        line_number++;
+
+        const std::string trimmed_line = helios::trim_whitespace(line);
+        if (trimmed_line.empty()) {
+            continue;
+        }
+
+        // Detect the format line by line. A leading non-negative integer followed by at least one more token is the 'class_ID class_name' form written by RadiationModel::writeImageBoundingBoxes();
+        // anything else is the Ultralytics form, in which the whole line is the name and the class ID is the position of the line in the file.
+        const size_t first_token_end = trimmed_line.find_first_of(" \t");
+        const std::string first_token = trimmed_line.substr(0, first_token_end);
+
+        uint class_ID;
+        std::string class_name;
+
+        int parsed_class_ID;
+        if (first_token_end != std::string::npos && isPlausibleClassIDToken(first_token) && helios::parse_int(first_token, parsed_class_ID)) {
+            class_ID = static_cast<uint>(parsed_class_ID);
+            // The name is the remainder of the line rather than the second token, so that names may contain spaces.
+            class_name = helios::trim_whitespace(trimmed_line.substr(first_token_end));
+        } else {
+            class_ID = implicit_class_ID;
+            class_name = trimmed_line;
+        }
+        implicit_class_ID++;
+
+        if (class_names.find(class_ID) != class_names.end() && class_names.at(class_ID) != class_name) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxClassNames): Class ID " + std::to_string(class_ID) + " is given two different names in '" + classes_file + "': '" + class_names.at(class_ID) +
+                                 "' and '" + class_name + "' on line " + std::to_string(line_number) + ".");
+        }
+
+        class_names[class_ID] = class_name;
+    }
+
+    if (class_names.empty()) {
+        helios_runtime_error("ERROR (Visualizer::readBoundingBoxClassNames): The class name file '" + classes_file + "' contains no class names.");
+    }
+
+    return class_names;
+}
+
+std::vector<Visualizer::SegmentationMask> Visualizer::readSegmentationMaskFile(const std::string &mask_file, const std::string &image_file) {
+
+    std::ifstream file(mask_file);
+    if (!file.is_open()) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): Could not open segmentation mask file '" + mask_file + "'. Check that the file exists and that you have permission to read it.");
+    }
+
+    nlohmann::json coco_json;
+    try {
+        file >> coco_json;
+    } catch (const nlohmann::json::parse_error &e) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): Could not parse '" + mask_file + "' as JSON: " + e.what());
+    }
+
+    for (const char *field: {"images", "annotations", "categories"}) {
+        if (!coco_json.contains(field) || !coco_json[field].is_array()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The file '" + mask_file + "' does not contain a '" + field +
+                                 "' array, so it is not a COCO segmentation file. This file should be one written by RadiationModel::writeImageSegmentationMasks().");
+        }
+    }
+
+    // Select the image whose annotations are wanted. Only the file name is compared, because the path recorded in the file is relative to wherever the writer ran, which is generally not where we are now.
+    const nlohmann::json *selected_image = nullptr;
+    if (image_file.empty()) {
+        if (coco_json["images"].size() != 1) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The file '" + mask_file + "' describes " + std::to_string(coco_json["images"].size()) +
+                                 " images, so the image whose masks should be read is ambiguous. Pass the image file explicitly.");
+        }
+        selected_image = &coco_json["images"].front();
+    } else {
+        const std::string image_filename = std::filesystem::path(image_file).filename().string();
+        for (const auto &image: coco_json["images"]) {
+            if (image.contains("file_name") && image["file_name"].is_string() && std::filesystem::path(image["file_name"].get<std::string>()).filename().string() == image_filename) {
+                selected_image = &image;
+                break;
+            }
+        }
+        if (selected_image == nullptr) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): No image named '" + image_filename + "' appears in the segmentation mask file '" + mask_file +
+                                 "'. The mask file and the image do not correspond to each other.");
+        }
+    }
+
+    if (!selected_image->contains("id") || !selected_image->contains("width") || !selected_image->contains("height")) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The selected 'images' entry of '" + mask_file + "' is missing one of the required 'id', 'width' or 'height' fields.");
+    }
+    const int selected_image_id = (*selected_image)["id"].get<int>();
+    const vec2 image_size = make_vec2((*selected_image)["width"].get<float>(), (*selected_image)["height"].get<float>());
+    if (image_size.x <= 0 || image_size.y <= 0) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The selected 'images' entry of '" + mask_file + "' has a width of " + std::to_string(image_size.x) + " and a height of " +
+                             std::to_string(image_size.y) + ". Both must be positive.");
+    }
+
+    std::map<uint, std::string> category_names;
+    for (const auto &category: coco_json["categories"]) {
+        if (category.contains("id") && category.contains("name") && category["name"].is_string()) {
+            category_names[category["id"].get<uint>()] = category["name"].get<std::string>();
+        }
+    }
+
+    std::vector<SegmentationMask> masks;
+
+    for (const auto &annotation: coco_json["annotations"]) {
+
+        if (!annotation.contains("image_id") || annotation["image_id"].get<int>() != selected_image_id) {
+            continue;
+        }
+
+        const std::string location = "annotation " + (annotation.contains("id") ? std::to_string(annotation["id"].get<int>()) : std::string("(no id)")) + " of '" + mask_file + "'";
+
+        if (!annotation.contains("category_id")) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): " + location + " has no 'category_id' field.");
+        }
+
+        SegmentationMask mask;
+        mask.class_ID = annotation["category_id"].get<uint>();
+        mask.image_size = image_size;
+        if (category_names.find(mask.class_ID) != category_names.end()) {
+            mask.class_name = category_names.at(mask.class_ID);
+        } else if (!category_names.empty()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): " + location + " has class ID " + std::to_string(mask.class_ID) +
+                                 ", which is not defined in the 'categories' array of the same file. The annotations and the categories do not correspond to each other.");
+        }
+
+        if (!annotation.contains("segmentation")) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): " + location + " has no 'segmentation' field.");
+        }
+        const auto &segmentation = annotation["segmentation"];
+
+        // The run-length encoded form of a COCO segmentation is an object holding "counts", rather than an array of polygons.
+        if (segmentation.is_object()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The 'segmentation' field of " + location +
+                                 " is run-length encoded, which is not supported. Only polygon segmentations are supported, which is what RadiationModel::writeImageSegmentationMasks() writes.");
+        }
+        if (!segmentation.is_array()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The 'segmentation' field of " + location + " is not an array of polygons.");
+        }
+
+        for (const auto &polygon: segmentation) {
+            if (!polygon.is_array()) {
+                helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The 'segmentation' field of " + location +
+                                     " is a flat list of coordinates rather than a list of polygons. Each polygon must be given as its own array.");
+            }
+            if (polygon.size() % 2 != 0) {
+                helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): A polygon of " + location + " has " + std::to_string(polygon.size()) +
+                                     " coordinates, which is an odd number. Coordinates must come in x,y pairs.");
+            }
+            if (polygon.size() < 6) {
+                helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): A polygon of " + location + " has " + std::to_string(polygon.size() / 2) + " vertices. A polygon must have at least 3.");
+            }
+
+            std::vector<vec2> vertices;
+            vertices.reserve(polygon.size() / 2);
+            for (size_t i = 0; i < polygon.size(); i += 2) {
+                if (!polygon.at(i).is_number() || !polygon.at(i + 1).is_number()) {
+                    helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): A polygon of " + location + " contains a coordinate that is not a number.");
+                }
+                vertices.push_back(make_vec2(polygon.at(i).get<float>(), polygon.at(i + 1).get<float>()));
+            }
+            mask.polygons.push_back(std::move(vertices));
+        }
+
+        if (!mask.polygons.empty()) {
+            masks.push_back(std::move(mask));
+        }
+    }
+
+    return masks;
 }
 
 Visualizer::Visualizer(uint Wdisplay, uint Hdisplay, int aliasing_samples) : colormap_current(), colormap_hot(), colormap_cool(), colormap_lava(), colormap_rainbow(), colormap_parula(), colormap_gray(), colormap_lines() {
@@ -994,6 +1260,16 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
     // GLFW should be initialized once and kept alive to avoid macOS-specific issues
     // with rapid init/terminate cycles (pixel format caching, autorelease pool issues)
     if (glfw_reference_count == 0) {
+#ifdef __APPLE__
+        // GLFW's Cocoa backend changes the process working directory to the host bundle's
+        // Contents/Resources during glfwInit() when this hint is left at its default of GLFW_TRUE.
+        // It only does so when the host process has an application bundle, so a bare Helios binary
+        // is unaffected, but anything .app-packaged -- notably a macOS framework-build Python
+        // interpreter, whose real executable lives inside Python.app -- would have the working
+        // directory moved out from under it. Helios resolves assets relative to the working
+        // directory, so it must be left exactly as the caller set it.
+        glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
+#endif
         if (!glfwInit()) {
             helios_runtime_error("ERROR (Visualizer::initialize): Failed to initialize GLFW");
         }
@@ -1569,6 +1845,14 @@ void Visualizer::setLightIntensityFactor(float lightintensityfactor) {
     lightintensity = lightintensityfactor;
 }
 
+void Visualizer::enableExactColorMode() {
+    colorboost = 1.f;
+}
+
+void Visualizer::disableExactColorMode() {
+    colorboost = 1.5f;
+}
+
 void Visualizer::removeBackgroundRectangle() {
     // Remove background rectangle if it exists
     if (background_rectangle_ID != 0) {
@@ -1621,7 +1905,8 @@ void Visualizer::setBackgroundGradient() {
     };
 
     // Add the textured rectangle as background
-    background_rectangle_ID = addRectangleByVertices(vertices, "plugins/visualizer/textures/gradient_background.jpg", uvs, COORDINATES_WINDOW_NORMALIZED);
+    std::string texture_path = resolvePluginAsset("visualizer", "textures/gradient_background.jpg").string();
+    background_rectangle_ID = addRectangleByVertices(vertices, texture_path.c_str(), uvs, COORDINATES_WINDOW_NORMALIZED);
 }
 
 void Visualizer::setBackgroundTransparent() {
@@ -1655,7 +1940,8 @@ void Visualizer::setBackgroundTransparent() {
     }
 
     // Add the textured rectangle as background
-    background_rectangle_ID = addRectangleByVertices(vertices, "plugins/visualizer/textures/transparent.jpg", uvs, COORDINATES_WINDOW_NORMALIZED);
+    std::string texture_path = resolvePluginAsset("visualizer", "textures/transparent.jpg").string();
+    background_rectangle_ID = addRectangleByVertices(vertices, texture_path.c_str(), uvs, COORDINATES_WINDOW_NORMALIZED);
 }
 
 void Visualizer::setBackgroundImage(const char *texture_file) {

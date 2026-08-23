@@ -1,5 +1,6 @@
 #include "CameraCalibration.h"
 #include "RadiationModel.h"
+#include "annotation_io.h"
 #include "BufferIndexing.h"
 #include "FluspectB.h"
 #include "test_helpers.h"
@@ -75,8 +76,184 @@ namespace helios {
             return RadiationModel(context); // Unreachable, silence compiler warning
 #endif
         }
+
+        //! Forwarders to the private color-correction matrix I/O helpers
+        /**
+         * These are implementation details of autoCalibrateCameraImage() with no user-facing
+         * meaning, so they are private; the tests exercise them directly through this friend.
+         */
+        static void exportColorCorrectionMatrixXML(RadiationModel &model, const std::string &file_path, const std::string &camera_label, const std::vector<std::vector<float>> &matrix, const std::string &source_image_path,
+                                                   const std::string &colorboard_type, float average_delta_e) {
+            model.exportColorCorrectionMatrixXML(file_path, camera_label, matrix, source_image_path, colorboard_type, average_delta_e);
+        }
+
+        static std::vector<std::vector<float>> loadColorCorrectionMatrixXML(RadiationModel &model, const std::string &file_path, std::string &camera_label_out) {
+            return model.loadColorCorrectionMatrixXML(file_path, camera_label_out);
+        }
+
+        //! Forwarder to the shared segmentation-mask annotation builder
+        /**
+         * Takes the label masks directly, so the connected-component and boundary-tracing logic can
+         * be exercised on hand-built masks without rendering a scene. The implementation now lives
+         * in the core annotation utilities, shared with the synthetic annotation plug-in, but the
+         * forwarder is kept so that the existing tests continue to exercise it through this path.
+         */
+        static std::vector<std::map<std::string, std::vector<float>>> generateAnnotationsFromMasks(RadiationModel &model, const std::map<int, std::vector<std::vector<bool>>> &label_masks, uint object_class_ID, const helios::int2 &camera_resolution,
+                                                                                                   int image_id) {
+            return helios::annotation::maskToAnnotations(label_masks, object_class_ID, camera_resolution, image_id);
+        }
     };
 } // namespace helios
+
+GPU_TEST_CASE("RadiationModel::writeImageBoundingBoxes classes file argument is not taken as the output path") {
+    // Regression test for an overload-resolution trap. The current API is
+    //     writeImageBoundingBoxes(camera, label, class_ID, image_file, classes_txt_file, image_path)
+    // but a deprecated overload
+    //     writeImageBoundingBoxes(camera, label, class_ID, imagefile_base, image_path, append, frame)
+    // also matches a six-argument call whose trailing arguments are all strings. The deprecated one
+    // was selected, so the classes file name was bound to its image_path parameter and the call
+    // failed with "Expected a directory path but got a file path for argument 'image_path'" -- for
+    // a call that is correct against the documented signature. [[deprecated]] produced no warning,
+    // because the declaration itself is well-formed.
+
+    Context context;
+    SphericalCoord rotation = make_SphericalCoord(M_PI / 2, 0);
+    uint patch = context.addPatch(make_vec3(0, 0, 0), make_vec2(0.8, 1.5), rotation);
+    context.setPrimitiveData(patch, "patch_id", uint(10));
+
+    RadiationModel radiationmodel = RadiationModelTestHelper::createWithSharedDevice(&context);
+    radiationmodel.disableMessages();
+
+    CameraProperties cam_props;
+    cam_props.camera_resolution = make_int2(64, 64);
+    cam_props.HFOV = 70;
+    cam_props.focal_plane_distance = 10;
+    cam_props.lens_diameter = 0.f;
+    radiationmodel.addRadiationCamera("bbox_cam", {"SW"}, make_vec3(0, -10, 0), make_vec3(0, 0, 0), cam_props, 1);
+
+    radiationmodel.addRadiationBand("SW");
+    radiationmodel.setScatteringDepth("SW", 1);
+    uint source = radiationmodel.addCollimatedRadiationSource(make_vec3(0, 1, 0));
+    radiationmodel.setSourceFlux(source, "SW", 1000.f);
+    radiationmodel.updateGeometry();
+    radiationmodel.runBand("SW");
+
+    const std::string outdir = "./bbox_overload_test/";
+    std::filesystem::remove_all(outdir);
+    std::filesystem::create_directories(outdir);
+
+    const std::string image_file = radiationmodel.writeCameraImage("bbox_cam", {"SW"}, "overload", outdir);
+
+    // A call written against the current six-argument signature must reach that overload. The
+    // trailing arguments are string literals, which is how a user naturally writes the call and is
+    // exactly the form that selected the deprecated overload: its by-value uint parameter is a
+    // better match for the literal 1u than the current overload's const uint&, so it won the
+    // resolution whenever the string arguments needed a const char* to std::string conversion.
+    DOCTEST_CHECK_NOTHROW(radiationmodel.writeImageBoundingBoxes("bbox_cam", "patch_id", 1u, image_file, "classes.txt", "./bbox_overload_test/"));
+
+    // The classes file must be written under the output directory, named as asked. If the
+    // deprecated overload had been selected, the name would have been treated as a directory and
+    // no such file would exist.
+    const bool classes_written = std::filesystem::exists(outdir + "classes.txt");
+
+    // The annotation file is named after the image.
+    const std::string expected_labels = outdir + std::filesystem::path(image_file).stem().string() + ".txt";
+    const bool labels_written = std::filesystem::exists(expected_labels);
+
+    std::filesystem::remove_all(outdir);
+
+    DOCTEST_CHECK(classes_written);
+    DOCTEST_CHECK(labels_written);
+}
+
+GPU_TEST_CASE("RadiationModel segmentation mask attributes correspond to their own annotation") {
+    // Regression test for a connectivity mismatch between the two passes that build a segmentation
+    // mask annotation. The annotations come from an 8-connected component search, but the optional
+    // per-annotation attribute averaging ran its own 4-connected search over the same masks, and
+    // the two result lists were then paired by index. A region whose pixels touch only diagonally
+    // is one component to the first search and many to the second, so the lists fall out of step
+    // and an annotation receives the mean values belonging to a different object.
+    //
+    // Two thin patches are rotated off-axis so that each rasterizes to a diagonal staircase, which
+    // is the shape the two searches disagree about. They are given clearly different attribute
+    // values, so a mispaired annotation is unambiguous: before the fix both annotations reported
+    // the first patch's value.
+
+    Context context;
+
+    const float left_temperature = 300.f;
+    const float right_temperature = 400.f;
+
+    uint left_sliver = context.addPatch(make_vec3(-0.9, 0, 0), make_vec2(1.6, 0.10), make_SphericalCoord(0.5 * M_PI, 0.f));
+    context.rotatePrimitive(left_sliver, 0.7f, "y");
+    context.setPrimitiveData(left_sliver, "patch_id", uint(1));
+    context.setPrimitiveData(left_sliver, "patch_temp", left_temperature);
+
+    uint right_sliver = context.addPatch(make_vec3(0.9, 0, 0), make_vec2(1.6, 0.10), make_SphericalCoord(0.5 * M_PI, 0.f));
+    context.rotatePrimitive(right_sliver, 0.7f, "y");
+    context.setPrimitiveData(right_sliver, "patch_id", uint(2));
+    context.setPrimitiveData(right_sliver, "patch_temp", right_temperature);
+
+    RadiationModel radiationmodel = RadiationModelTestHelper::createWithSharedDevice(&context);
+    radiationmodel.disableMessages();
+
+    CameraProperties cam_props;
+    cam_props.camera_resolution = make_int2(128, 128);
+    cam_props.HFOV = 70;
+    cam_props.focal_plane_distance = 10;
+    cam_props.lens_diameter = 0.f;
+    radiationmodel.addRadiationCamera("attr_cam", {"SW"}, make_vec3(0, -10, 0), make_vec3(0, 0, 0), cam_props, 1);
+
+    radiationmodel.addRadiationBand("SW");
+    radiationmodel.setScatteringDepth("SW", 1);
+    uint source = radiationmodel.addCollimatedRadiationSource(make_vec3(0, 1, 0));
+    radiationmodel.setSourceFlux(source, "SW", 1000.f);
+    radiationmodel.updateGeometry();
+    radiationmodel.runBand("SW");
+
+    const std::string outdir = "./attr_conn_test/";
+    std::filesystem::remove_all(outdir);
+    std::filesystem::create_directories(outdir);
+
+    const std::string image_file = radiationmodel.writeCameraImage("attr_cam", {"SW"}, "attr", outdir);
+    radiationmodel.writeImageSegmentationMasks("attr_cam", "patch_id", 1u, outdir + "attr_masks.json", image_file, {"patch_temp"}, false);
+
+    nlohmann::json coco;
+    const std::string json_file = outdir + "attr_masks.json";
+    const bool json_exists = std::filesystem::exists(json_file);
+    if (json_exists) {
+        std::ifstream file(json_file);
+        file >> coco;
+    }
+
+    std::filesystem::remove_all(outdir);
+
+    DOCTEST_REQUIRE(json_exists);
+    DOCTEST_REQUIRE(coco.contains("annotations"));
+
+    std::vector<double> reported_temperatures;
+    for (const auto &ann: coco["annotations"]) {
+        if (ann.contains("attributes") && ann["attributes"].contains("patch_temp")) {
+            reported_temperatures.push_back(ann["attributes"]["patch_temp"]);
+        }
+    }
+
+    // Both patches are visible and each carries an attribute.
+    DOCTEST_REQUIRE(coco["annotations"].size() == 2);
+    DOCTEST_CHECK(reported_temperatures.size() == 2);
+
+    // The two annotations describe different objects, so they must report different values. Before
+    // the fix both reported the left patch's temperature.
+    if (reported_temperatures.size() == 2) {
+        DOCTEST_CHECK(std::abs(reported_temperatures.at(0) - reported_temperatures.at(1)) > 1.0);
+
+        // And each reported value must be one the scene actually contains.
+        for (double temperature: reported_temperatures) {
+            const bool recognized = std::abs(temperature - double(left_temperature)) < 1.0 || std::abs(temperature - double(right_temperature)) < 1.0;
+            DOCTEST_CHECK(recognized);
+        }
+    }
+}
 
 int RadiationModel::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);
@@ -95,7 +272,8 @@ DOCTEST_TEST_CASE("Backend Identification") {
 #ifdef HELIOS_HAVE_VULKAN
     compiled_backends += "Vulkan ";
 #endif
-    if (compiled_backends.empty()) compiled_backends = "(none)";
+    if (compiled_backends.empty())
+        compiled_backends = "(none)";
     DOCTEST_MESSAGE("Compiled backends: " << compiled_backends);
 
     bool gpu_available = RadiationModelTestHelper::isGPUAvailable();
@@ -3703,7 +3881,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::string ccm_file_path = "test_ccm_3x3.xml";
 
         // Test the exportColorCorrectionMatrixXML function directly
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix, "/path/to/test_image.jpg", "DGK", 15.5f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix, "/path/to/test_image.jpg", "DGK", 15.5f);
 
         // Verify file was created
         std::ifstream test_file(ccm_file_path);
@@ -3712,7 +3890,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
 
         // Test the loadColorCorrectionMatrixXML function
         std::string loaded_camera_label;
-        std::vector<std::vector<float>> loaded_matrix = radiationmodel.loadColorCorrectionMatrixXML(ccm_file_path, loaded_camera_label);
+        std::vector<std::vector<float>> loaded_matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, ccm_file_path, loaded_camera_label);
 
         // Verify loaded data matches exported data
         DOCTEST_CHECK(loaded_camera_label == camera_label);
@@ -3738,11 +3916,11 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::string ccm_file_path = "test_ccm_4x3.xml";
 
         // Export 4x3 matrix
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix_4x3, "/path/to/test_image.jpg", "Calibrite", 12.3f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix_4x3, "/path/to/test_image.jpg", "Calibrite", 12.3f);
 
         // Load and verify
         std::string loaded_camera_label;
-        std::vector<std::vector<float>> loaded_matrix = radiationmodel.loadColorCorrectionMatrixXML(ccm_file_path, loaded_camera_label);
+        std::vector<std::vector<float>> loaded_matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, ccm_file_path, loaded_camera_label);
 
         DOCTEST_CHECK(loaded_camera_label == camera_label);
         DOCTEST_CHECK(loaded_matrix.size() == 3);
@@ -3765,7 +3943,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::vector<std::vector<float>> test_matrix = {{1.1f, -0.05f, 0.02f}, {-0.03f, 1.08f, 0.01f}, {0.01f, -0.04f, 1.12f}};
 
         std::string ccm_file_path = "test_apply_ccm_3x3.xml";
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "DGK", 10.0f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "DGK", 10.0f);
 
         // Get initial pixel values
         std::vector<float> initial_red = radiationmodel.getCameraPixelData(camera_label, "red");
@@ -3800,7 +3978,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::vector<std::vector<float>> test_matrix = {{1.05f, -0.02f, 0.01f, 0.005f}, {-0.01f, 1.03f, 0.005f, -0.002f}, {0.005f, -0.015f, 1.08f, 0.003f}};
 
         std::string ccm_file_path = "test_apply_ccm_4x3.xml";
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "SpyderCHECKR", 8.5f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "SpyderCHECKR", 8.5f);
 
         // Reset camera data to known values
         std::fill(red_data.begin(), red_data.end(), 0.7f);
@@ -3842,7 +4020,7 @@ GPU_TEST_CASE("RadiationModel CCM Error Handling") {
         std::string camera_label;
         bool exception_thrown = false;
         try {
-            std::vector<std::vector<float>> matrix = radiationmodel.loadColorCorrectionMatrixXML("/nonexistent/path.xml", camera_label);
+            std::vector<std::vector<float>> matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, "/nonexistent/path.xml", camera_label);
         } catch (const std::runtime_error &e) {
             exception_thrown = true;
             std::string error_msg(e.what());
@@ -3866,7 +4044,7 @@ GPU_TEST_CASE("RadiationModel CCM Error Handling") {
         std::string camera_label;
         bool exception_thrown = false;
         try {
-            std::vector<std::vector<float>> matrix = radiationmodel.loadColorCorrectionMatrixXML(malformed_ccm_path, camera_label);
+            std::vector<std::vector<float>> matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, malformed_ccm_path, camera_label);
         } catch (const std::runtime_error &e) {
             exception_thrown = true;
             std::string error_msg(e.what());
@@ -3882,7 +4060,7 @@ GPU_TEST_CASE("RadiationModel CCM Error Handling") {
         std::string ccm_file_path = "test_error_ccm.xml";
         std::vector<std::vector<float>> identity_matrix = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
 
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, "test_camera", identity_matrix, "/test.jpg", "DGK", 5.0f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, "test_camera", identity_matrix, "/test.jpg", "DGK", 5.0f);
 
         bool exception_thrown = false;
         try {
@@ -5046,16 +5224,14 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         camera_props.HFOV = 35.0f;
         camera_props.sensor_width_mm = 36.0f;
 
-        radiationmodel.addRadiationCamera("exif_camera", {"RGB_R", "RGB_G", "RGB_B"},
-                                          make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
+        radiationmodel.addRadiationCamera("exif_camera", {"RGB_R", "RGB_G", "RGB_B"}, make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
 
         radiationmodel.updateGeometry();
         radiationmodel.runBand("RGB_R");
         radiationmodel.runBand("RGB_G");
         radiationmodel.runBand("RGB_B");
 
-        const std::string image_path = radiationmodel.writeCameraImage(
-                "exif_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_exif");
+        const std::string image_path = radiationmodel.writeCameraImage("exif_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_exif");
         DOCTEST_REQUIRE(!image_path.empty());
 
         // Read the JPEG bytes and hand-parse its segment markers.
@@ -5076,53 +5252,53 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
 
         size_t i = 2;
         while (i + 4 < bytes.size()) {
-            if (bytes[i] != 0xFF) break;
+            if (bytes[i] != 0xFF)
+                break;
             const unsigned char marker = bytes[i + 1];
-            if (marker == 0xD9 || marker == 0xDA) break;
+            if (marker == 0xD9 || marker == 0xDA)
+                break;
             const size_t seg_len = (static_cast<size_t>(bytes[i + 2]) << 8) | static_cast<size_t>(bytes[i + 3]);
-            if (seg_len < 2 || i + 2 + seg_len > bytes.size()) break;
+            if (seg_len < 2 || i + 2 + seg_len > bytes.size())
+                break;
             if (marker == 0xE1) {
                 const size_t payload_off = i + 4;
                 const size_t payload_len = seg_len - 2;
-                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' &&
-                    bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
+                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' && bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
                     found_exif = true;
                     // Search for "Helios" string in EXIF payload (Make and Software tags).
                     const std::string exif_str(bytes.begin() + payload_off, bytes.begin() + payload_off + payload_len);
-                    if (exif_str.find("Helios") != std::string::npos) found_helios = true;
+                    if (exif_str.find("Helios") != std::string::npos)
+                        found_helios = true;
 
                     // Walk IFD0 -> find GPS pointer (0x8825) -> walk GPS IFD for tag 0x0001/0x0003 refs.
                     const size_t tiff_base = payload_off + 6; // skip "Exif\0\0"
                     const size_t ifd0_off = tiff_base + 8;
                     if (ifd0_off + 2 <= bytes.size()) {
-                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) |
-                                            (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
+                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) | (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
                         uint32_t gps_off = 0;
                         for (uint16_t k = 0; k < n0; ++k) {
                             const size_t e = ifd0_off + 2 + static_cast<size_t>(k) * 12;
-                            if (e + 12 > bytes.size()) break;
-                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                 (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                            if (e + 12 > bytes.size())
+                                break;
+                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
                             if (tag == 0x8825) {
-                                gps_off = static_cast<uint32_t>(bytes[e + 8]) |
-                                          (static_cast<uint32_t>(bytes[e + 9]) << 8) |
-                                          (static_cast<uint32_t>(bytes[e + 10]) << 16) |
-                                          (static_cast<uint32_t>(bytes[e + 11]) << 24);
+                                gps_off = static_cast<uint32_t>(bytes[e + 8]) | (static_cast<uint32_t>(bytes[e + 9]) << 8) | (static_cast<uint32_t>(bytes[e + 10]) << 16) | (static_cast<uint32_t>(bytes[e + 11]) << 24);
                                 break;
                             }
                         }
                         if (gps_off > 0) {
                             const size_t gps_abs = tiff_base + gps_off;
                             if (gps_abs + 2 <= bytes.size()) {
-                                const uint16_t ng = static_cast<uint16_t>(bytes[gps_abs]) |
-                                                    (static_cast<uint16_t>(bytes[gps_abs + 1]) << 8);
+                                const uint16_t ng = static_cast<uint16_t>(bytes[gps_abs]) | (static_cast<uint16_t>(bytes[gps_abs + 1]) << 8);
                                 for (uint16_t k = 0; k < ng; ++k) {
                                     const size_t e = gps_abs + 2 + static_cast<size_t>(k) * 12;
-                                    if (e + 12 > bytes.size()) break;
-                                    const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                         (static_cast<uint16_t>(bytes[e + 1]) << 8);
-                                    if (tag == 0x0001) gps_lat_ref = static_cast<char>(bytes[e + 8]);
-                                    else if (tag == 0x0003) gps_lon_ref = static_cast<char>(bytes[e + 8]);
+                                    if (e + 12 > bytes.size())
+                                        break;
+                                    const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                                    if (tag == 0x0001)
+                                        gps_lat_ref = static_cast<char>(bytes[e + 8]);
+                                    else if (tag == 0x0003)
+                                        gps_lon_ref = static_cast<char>(bytes[e + 8]);
                                 }
                             }
                         }
@@ -5138,8 +5314,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
                     }
                     if (match) {
                         found_xmp = true;
-                        const std::string xmp_str(bytes.begin() + payload_off,
-                                                   bytes.begin() + payload_off + payload_len);
+                        const std::string xmp_str(bytes.begin() + payload_off, bytes.begin() + payload_off + payload_len);
                         DOCTEST_CHECK(xmp_str.find("Camera:Yaw") != std::string::npos);
                     }
                 }
@@ -5164,8 +5339,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         // that library cameras don't get a hardcoded "Helios" Make tag.
         {
             capture_cout silence_band_warnings;
-            radiationmodel.addRadiationCameraFromLibrary("canon_lib_cam", "Canon_20D",
-                                                        make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), 1);
+            radiationmodel.addRadiationCameraFromLibrary("canon_lib_cam", "Canon_20D", make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), 1);
         }
 
         radiationmodel.updateGeometry();
@@ -5173,8 +5347,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         radiationmodel.runBand("green");
         radiationmodel.runBand("blue");
 
-        const std::string image_path = radiationmodel.writeCameraImage(
-                "canon_lib_cam", {"red", "green", "blue"}, "test_library_exif");
+        const std::string image_path = radiationmodel.writeCameraImage("canon_lib_cam", {"red", "green", "blue"}, "test_library_exif");
         DOCTEST_REQUIRE(!image_path.empty());
 
         std::ifstream jpeg_in(image_path, std::ios::binary);
@@ -5187,50 +5360,48 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         std::string make_value, model_value, lens_make_value, lens_model_value;
         size_t i = 2;
         while (i + 4 < bytes.size()) {
-            if (bytes[i] != 0xFF) break;
+            if (bytes[i] != 0xFF)
+                break;
             const unsigned char marker = bytes[i + 1];
-            if (marker == 0xD9 || marker == 0xDA) break;
+            if (marker == 0xD9 || marker == 0xDA)
+                break;
             const size_t seg_len = (static_cast<size_t>(bytes[i + 2]) << 8) | static_cast<size_t>(bytes[i + 3]);
-            if (seg_len < 2 || i + 2 + seg_len > bytes.size()) break;
+            if (seg_len < 2 || i + 2 + seg_len > bytes.size())
+                break;
             if (marker == 0xE1) {
                 const size_t payload_off = i + 4;
                 const size_t payload_len = seg_len - 2;
-                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' &&
-                    bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
+                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' && bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
                     const size_t tiff_base = payload_off + 6;
                     const size_t ifd0_off = tiff_base + 8;
 
                     // Helper: read an ASCII tag from the IFD at the given absolute offset.
                     auto readAsciiAt = [&](size_t ifd_off, uint16_t target_tag) -> std::string {
-                        if (ifd_off + 2 > bytes.size()) return std::string();
-                        const uint16_t n = static_cast<uint16_t>(bytes[ifd_off]) |
-                                           (static_cast<uint16_t>(bytes[ifd_off + 1]) << 8);
+                        if (ifd_off + 2 > bytes.size())
+                            return std::string();
+                        const uint16_t n = static_cast<uint16_t>(bytes[ifd_off]) | (static_cast<uint16_t>(bytes[ifd_off + 1]) << 8);
                         for (uint16_t k = 0; k < n; ++k) {
                             const size_t e = ifd_off + 2 + static_cast<size_t>(k) * 12;
-                            if (e + 12 > bytes.size()) break;
-                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                 (static_cast<uint16_t>(bytes[e + 1]) << 8);
-                            if (tag != target_tag) continue;
-                            const uint16_t type = static_cast<uint16_t>(bytes[e + 2]) |
-                                                  (static_cast<uint16_t>(bytes[e + 3]) << 8);
-                            if (type != 2 /*ASCII*/) return std::string();
-                            const uint32_t count = static_cast<uint32_t>(bytes[e + 4]) |
-                                                   (static_cast<uint32_t>(bytes[e + 5]) << 8) |
-                                                   (static_cast<uint32_t>(bytes[e + 6]) << 16) |
-                                                   (static_cast<uint32_t>(bytes[e + 7]) << 24);
+                            if (e + 12 > bytes.size())
+                                break;
+                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                            if (tag != target_tag)
+                                continue;
+                            const uint16_t type = static_cast<uint16_t>(bytes[e + 2]) | (static_cast<uint16_t>(bytes[e + 3]) << 8);
+                            if (type != 2 /*ASCII*/)
+                                return std::string();
+                            const uint32_t count = static_cast<uint32_t>(bytes[e + 4]) | (static_cast<uint32_t>(bytes[e + 5]) << 8) | (static_cast<uint32_t>(bytes[e + 6]) << 16) | (static_cast<uint32_t>(bytes[e + 7]) << 24);
                             size_t value_off;
                             if (count <= 4) {
                                 value_off = e + 8;
                             } else {
-                                const uint32_t off_in_tiff = static_cast<uint32_t>(bytes[e + 8]) |
-                                                             (static_cast<uint32_t>(bytes[e + 9]) << 8) |
-                                                             (static_cast<uint32_t>(bytes[e + 10]) << 16) |
-                                                             (static_cast<uint32_t>(bytes[e + 11]) << 24);
+                                const uint32_t off_in_tiff = static_cast<uint32_t>(bytes[e + 8]) | (static_cast<uint32_t>(bytes[e + 9]) << 8) | (static_cast<uint32_t>(bytes[e + 10]) << 16) | (static_cast<uint32_t>(bytes[e + 11]) << 24);
                                 value_off = tiff_base + off_in_tiff;
                             }
                             // count includes the trailing NUL.
                             const size_t str_len = (count > 0) ? (count - 1) : 0;
-                            if (value_off + str_len > bytes.size()) return std::string();
+                            if (value_off + str_len > bytes.size())
+                                return std::string();
                             return std::string(bytes.begin() + value_off, bytes.begin() + value_off + str_len);
                         }
                         return std::string();
@@ -5241,19 +5412,15 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
 
                     // Walk into the ExifSubIFD for LensMake / LensModel (0xA433 / 0xA434).
                     if (ifd0_off + 2 <= bytes.size()) {
-                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) |
-                                            (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
+                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) | (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
                         uint32_t exif_sub_off = 0;
                         for (uint16_t k = 0; k < n0; ++k) {
                             const size_t e = ifd0_off + 2 + static_cast<size_t>(k) * 12;
-                            if (e + 12 > bytes.size()) break;
-                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                 (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                            if (e + 12 > bytes.size())
+                                break;
+                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
                             if (tag == 0x8769) {
-                                exif_sub_off = static_cast<uint32_t>(bytes[e + 8]) |
-                                               (static_cast<uint32_t>(bytes[e + 9]) << 8) |
-                                               (static_cast<uint32_t>(bytes[e + 10]) << 16) |
-                                               (static_cast<uint32_t>(bytes[e + 11]) << 24);
+                                exif_sub_off = static_cast<uint32_t>(bytes[e + 8]) | (static_cast<uint32_t>(bytes[e + 9]) << 8) | (static_cast<uint32_t>(bytes[e + 10]) << 16) | (static_cast<uint32_t>(bytes[e + 11]) << 24);
                                 break;
                             }
                         }
@@ -5287,8 +5454,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         camera_props.HFOV = 35.0f;
         camera_props.sensor_width_mm = 36.0f;
 
-        radiationmodel.addRadiationCamera("offset_camera", {"RGB_R", "RGB_G", "RGB_B"},
-                                          make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
+        radiationmodel.addRadiationCamera("offset_camera", {"RGB_R", "RGB_G", "RGB_B"}, make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
         radiationmodel.updateGeometry();
         radiationmodel.runBand("RGB_R");
         radiationmodel.runBand("RGB_G");
@@ -5298,8 +5464,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         // fractional-hour path: Helios -5.75 becomes the standard EXIF OffsetTime "+05:45".
         context.setLocation(make_Location(27.7f, -85.3f, -5.75f, 1400.f));
 
-        const std::string image_path = radiationmodel.writeCameraImage(
-                "offset_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_offset");
+        const std::string image_path = radiationmodel.writeCameraImage("offset_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_offset");
         DOCTEST_REQUIRE(!image_path.empty());
 
         std::ifstream jpeg_in(image_path, std::ios::binary);
@@ -8152,17 +8317,22 @@ GPU_TEST_CASE("RadiationModel - Pixel Label UUID Mapping With Non-Sequential Obj
     for (int j = 0; j < 64; j++) {
         for (int i = 0; i < 64; i++) {
             float label = labels[j * 64 + i];
-            if (std::isnan(label)) continue;
+            if (std::isnan(label))
+                continue;
 
             uint label_uint = static_cast<uint>(label);
             bool is_left = (i < 32);
 
             if (is_left) {
-                if (label_uint == 1u) left_polymesh++;
-                else if (label_uint == 2u) left_orphan++;
+                if (label_uint == 1u)
+                    left_polymesh++;
+                else if (label_uint == 2u)
+                    left_orphan++;
             } else {
-                if (label_uint == 1u) right_polymesh++;
-                else if (label_uint == 2u) right_orphan++;
+                if (label_uint == 1u)
+                    right_polymesh++;
+                else if (label_uint == 2u)
+                    right_orphan++;
             }
         }
     }
@@ -8171,10 +8341,8 @@ GPU_TEST_CASE("RadiationModel - Pixel Label UUID Mapping With Non-Sequential Obj
     // If the UUID mapping is broken, the values will be swapped.
     DOCTEST_CHECK_MESSAGE(left_polymesh > 0, "Polymesh patches (element_type=1) should appear on the left side of the image");
     DOCTEST_CHECK_MESSAGE(right_orphan > 0, "Orphan patch (element_type=2) should appear on the right side of the image");
-    DOCTEST_CHECK_MESSAGE(left_orphan == 0,
-        "No orphan labels should appear on the left side (got " << left_orphan << " — indicates UUID mapping error)");
-    DOCTEST_CHECK_MESSAGE(right_polymesh == 0,
-        "No polymesh labels should appear on the right side (got " << right_polymesh << " — indicates UUID mapping error)");
+    DOCTEST_CHECK_MESSAGE(left_orphan == 0, "No orphan labels should appear on the left side (got " << left_orphan << " — indicates UUID mapping error)");
+    DOCTEST_CHECK_MESSAGE(right_polymesh == 0, "No polymesh labels should appear on the right side (got " << right_polymesh << " — indicates UUID mapping error)");
 
     std::remove("test_cam_uuid_mapping_test_00000.txt");
 }
@@ -8343,7 +8511,7 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Camera Rendering") {
     for (float p: pixels_no_specular) {
         sum_no_specular += p;
     }
-    float avg_no_specular = sum_no_specular / (float)pixels_no_specular.size();
+    float avg_no_specular = sum_no_specular / (float) pixels_no_specular.size();
 
     // TEST 2: specular_exponent = 50 (strong specular highlight)
     {
@@ -8360,7 +8528,7 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Camera Rendering") {
     for (float p: pixels_with_specular) {
         sum_with_specular += p;
     }
-    float avg_with_specular = sum_with_specular / (float)pixels_with_specular.size();
+    float avg_with_specular = sum_with_specular / (float) pixels_with_specular.size();
 
     float difference = avg_with_specular - avg_no_specular;
 
@@ -8368,8 +8536,8 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Camera Rendering") {
 
     // Specular should add a visible highlight when sun, camera, and normal are aligned
     DOCTEST_CHECK_MESSAGE(difference > 5.0f, "Specular exponent should increase camera intensity. "
-                                                       "No specular: "
-                                                               << avg_no_specular << ", With specular: " << avg_with_specular << ", Difference: " << difference);
+                                             "No specular: "
+                                                     << avg_no_specular << ", With specular: " << avg_with_specular << ", Difference: " << difference);
 }
 
 GPU_TEST_CASE("RadiationModel - Specular Reflection Multiple Cameras") {
@@ -8434,10 +8602,12 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Multiple Cameras") {
     context.getGlobalData("camera_cam_B_SUN", pixels_B);
 
     float sum_A = 0.0f, sum_B = 0.0f;
-    for (float p : pixels_A) sum_A += p;
-    for (float p : pixels_B) sum_B += p;
-    float avg_A = sum_A / (float)pixels_A.size();
-    float avg_B = sum_B / (float)pixels_B.size();
+    for (float p: pixels_A)
+        sum_A += p;
+    for (float p: pixels_B)
+        sum_B += p;
+    float avg_A = sum_A / (float) pixels_A.size();
+    float avg_B = sum_B / (float) pixels_B.size();
 
     // Pure diffuse baseline: reflectivity(0.05) * flux(1000) / pi ≈ 15.9
     float diffuse_baseline = 15.0f;
@@ -8451,7 +8621,8 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Multiple Cameras") {
     // Both cameras are in the same position, so their values should be similar
     float ratio = (avg_A > avg_B) ? avg_B / avg_A : avg_A / avg_B;
     DOCTEST_CHECK_MESSAGE(ratio > 0.8f, "Both cameras should see similar specular intensity. "
-                                        "avg_A: " << avg_A << ", avg_B: " << avg_B << ", ratio: " << ratio);
+                                        "avg_A: "
+                                                << avg_A << ", avg_B: " << avg_B << ", ratio: " << ratio);
 }
 
 GPU_TEST_CASE("RadiationModel More Than 4 Simultaneous Radiation Bands") {
@@ -8523,9 +8694,7 @@ GPU_TEST_CASE("RadiationModel - Camera triangle vs patch rendering parity") {
     context.setPrimitiveData(patch_id, "twosided_flag", uint(0));
 
     // Triangle covering roughly the same area as the patch, on the right side
-    uint tri_id = context.addTriangle(make_vec3(0.05f, -0.2f, 0),
-                                      make_vec3(0.45f, -0.2f, 0),
-                                      make_vec3(0.25f, 0.2f, 0));
+    uint tri_id = context.addTriangle(make_vec3(0.05f, -0.2f, 0), make_vec3(0.45f, -0.2f, 0), make_vec3(0.25f, 0.2f, 0));
     context.setPrimitiveData(tri_id, "reflectivity_SW", reflectivity);
 
     // Single radiation band with scattering
@@ -8544,9 +8713,8 @@ GPU_TEST_CASE("RadiationModel - Camera triangle vs patch rendering parity") {
     cam_props.camera_resolution = make_int2(64, 64);
     cam_props.HFOV = 60.0f;
     cam_props.lens_diameter = 0.0f;
-    radiation.addRadiationCamera("test_cam", {"SW"},
-                                 make_vec3(0, 0, 1.5f),   // above scene
-                                 make_vec3(0, 0, 0),       // look at center
+    radiation.addRadiationCamera("test_cam", {"SW"}, make_vec3(0, 0, 1.5f), // above scene
+                                 make_vec3(0, 0, 0), // look at center
                                  cam_props, 50);
 
     radiation.updateGeometry();
@@ -8586,21 +8754,15 @@ GPU_TEST_CASE("RadiationModel - Camera triangle vs patch rendering parity") {
     float tri_avg = tri_sum / float(tri_count);
 
     // Both regions must have non-zero average radiance (lit surfaces)
-    DOCTEST_CHECK_MESSAGE(patch_avg > 0.0f,
-                          "Patch region average radiance should be > 0, got " << patch_avg);
-    DOCTEST_CHECK_MESSAGE(tri_avg > 0.0f,
-                          "Triangle region average radiance should be > 0, got " << tri_avg);
+    DOCTEST_CHECK_MESSAGE(patch_avg > 0.0f, "Patch region average radiance should be > 0, got " << patch_avg);
+    DOCTEST_CHECK_MESSAGE(tri_avg > 0.0f, "Triangle region average radiance should be > 0, got " << tri_avg);
 
     // Triangle and patch averages should be within the same order of magnitude
     // (both have the same reflectivity and similar illumination geometry)
     if (patch_avg > 0.0f && tri_avg > 0.0f) {
         float ratio = tri_avg / patch_avg;
-        DOCTEST_CHECK_MESSAGE(ratio > 0.1f,
-                              "Triangle/patch radiance ratio too low: " << ratio
-                              << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
-        DOCTEST_CHECK_MESSAGE(ratio < 10.0f,
-                              "Triangle/patch radiance ratio too high: " << ratio
-                              << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio > 0.1f, "Triangle/patch radiance ratio too low: " << ratio << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio < 10.0f, "Triangle/patch radiance ratio too high: " << ratio << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
     }
 }
 
@@ -8619,8 +8781,7 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
     radiation.disableMessages();
 
     // Minimal scene: single ground patch filling the camera view
-    std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(10.0f, 10.0f),
-                                               make_SphericalCoord(0, 0), make_int2(1, 1));
+    std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(10.0f, 10.0f), make_SphericalCoord(0, 0), make_int2(1, 1));
     context.setPrimitiveData(ground, "reflectivity_red", 0.3f);
     context.setPrimitiveData(ground, "reflectivity_green", 0.3f);
     context.setPrimitiveData(ground, "reflectivity_blue", 0.3f);
@@ -8648,8 +8809,7 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
 
     {
         capture_cout capture;
-        radiation.addRadiationCameraFromLibrary("iphone_cam", "iPhone12ProMAX",
-                                                cam_pos, cam_lookat, 100);
+        radiation.addRadiationCameraFromLibrary("iphone_cam", "iPhone12ProMAX", cam_pos, cam_lookat, 100);
     }
 
     radiation.updateGeometry();
@@ -8667,7 +8827,7 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
     DOCTEST_REQUIRE(H == 4032);
 
     auto pixel_red = radiation.getCameraPixelData("iphone_cam", "red");
-    DOCTEST_REQUIRE(pixel_red.size() == (size_t)W * H);
+    DOCTEST_REQUIRE(pixel_red.size() == (size_t) W * H);
 
     // With maxRays = 1B and 100 AA at 3024×4032:
     //   rays_per_row = 100 × 3024 = 302,400
@@ -8700,20 +8860,14 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
     float tile2_avg = tile2_sum / float(tile2_count);
 
     // Both tile regions should have non-zero radiance (looking at a lit ground patch)
-    DOCTEST_CHECK_MESSAGE(tile1_avg > 0.0f,
-                          "Tile 1 (rows 500-600) average radiance should be > 0, got " << tile1_avg);
-    DOCTEST_CHECK_MESSAGE(tile2_avg > 0.0f,
-                          "Tile 2 (rows 3600-3700) average radiance should be > 0, got " << tile2_avg);
+    DOCTEST_CHECK_MESSAGE(tile1_avg > 0.0f, "Tile 1 (rows 500-600) average radiance should be > 0, got " << tile1_avg);
+    DOCTEST_CHECK_MESSAGE(tile2_avg > 0.0f, "Tile 2 (rows 3600-3700) average radiance should be > 0, got " << tile2_avg);
 
     // The two regions should have similar radiance (same ground patch, similar viewing angle)
     if (tile1_avg > 0.0f && tile2_avg > 0.0f) {
         float ratio = tile2_avg / tile1_avg;
-        DOCTEST_CHECK_MESSAGE(ratio > 0.1f,
-                              "Tile 2/tile 1 radiance ratio too low: " << ratio
-                              << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
-        DOCTEST_CHECK_MESSAGE(ratio < 10.0f,
-                              "Tile 2/tile 1 radiance ratio too high: " << ratio
-                              << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio > 0.1f, "Tile 2/tile 1 radiance ratio too low: " << ratio << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio < 10.0f, "Tile 2/tile 1 radiance ratio too high: " << ratio << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
     }
 }
 
@@ -8742,24 +8896,39 @@ namespace {
         DOCTEST_REQUIRE_MESSAGE(f.good(), "Failed to open " << p.string());
         std::string line;
         while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#' || line.substr(0, 3) == "key") continue;
+            if (line.empty() || line[0] == '#' || line.substr(0, 3) == "key")
+                continue;
             const auto comma = line.find(',');
-            if (comma == std::string::npos) continue;
+            if (comma == std::string::npos)
+                continue;
             const std::string key = line.substr(0, comma);
             const float val = std::stof(line.substr(comma + 1));
-            if      (key == "Cab")      c.Cab = val;
-            else if (key == "Cca")      c.Cca = val;
-            else if (key == "Cw")       c.Cw = val;
-            else if (key == "Cdm")      c.Cdm = val;
-            else if (key == "Cs")       c.Cs = val;
-            else if (key == "Cant")     c.Cant = val;
-            else if (key == "Cp")       c.Cp = val;
-            else if (key == "Cbc")      c.Cbc = val;
-            else if (key == "N")        c.N = val;
-            else if (key == "fqe")      c.fqe = val;
-            else if (key == "V2Z")      c.V2Z = val;
-            else if (key == "wle_step") c.wle_step = val;
-            else if (key == "wlf_step") c.wlf_step = val;
+            if (key == "Cab")
+                c.Cab = val;
+            else if (key == "Cca")
+                c.Cca = val;
+            else if (key == "Cw")
+                c.Cw = val;
+            else if (key == "Cdm")
+                c.Cdm = val;
+            else if (key == "Cs")
+                c.Cs = val;
+            else if (key == "Cant")
+                c.Cant = val;
+            else if (key == "Cp")
+                c.Cp = val;
+            else if (key == "Cbc")
+                c.Cbc = val;
+            else if (key == "N")
+                c.N = val;
+            else if (key == "fqe")
+                c.fqe = val;
+            else if (key == "V2Z")
+                c.V2Z = val;
+            else if (key == "wle_step")
+                c.wle_step = val;
+            else if (key == "wlf_step")
+                c.wlf_step = val;
         }
         return c;
     }
@@ -8770,9 +8939,7 @@ namespace {
     //   <wlf_0>,<m_00>,<m_01>,...
     //   <wlf_1>,<m_10>,<m_11>,...
     // Returns the matrix as matrix[i_wlf][j_wle] and fills out the wle/wlf grids.
-    std::vector<std::vector<double>> load_matrix_csv(const std::filesystem::path &p,
-                                                     std::vector<float> &wle_out,
-                                                     std::vector<float> &wlf_out) {
+    std::vector<std::vector<double>> load_matrix_csv(const std::filesystem::path &p, std::vector<float> &wle_out, std::vector<float> &wlf_out) {
         std::ifstream f(p);
         DOCTEST_REQUIRE_MESSAGE(f.good(), "Failed to open " << p.string());
         std::string line;
@@ -8782,20 +8949,25 @@ namespace {
 
         // Skip comment lines
         while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            break;  // this line is the header (wle grid)
+            if (line.empty() || line[0] == '#')
+                continue;
+            break; // this line is the header (wle grid)
         }
         // Parse header: ",400,405,..."
         std::stringstream hs(line);
         std::string cell;
         bool first = true;
         while (std::getline(hs, cell, ',')) {
-            if (first) { first = false; continue; }  // skip the blank first cell
+            if (first) {
+                first = false;
+                continue;
+            } // skip the blank first cell
             wle_out.push_back(std::stof(cell));
         }
         // Parse data rows
         while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#') continue;
+            if (line.empty() || line[0] == '#')
+                continue;
             std::stringstream ds(line);
             std::vector<double> row;
             bool is_first = true;
@@ -8807,7 +8979,8 @@ namespace {
                 }
                 row.push_back(std::stod(cell));
             }
-            if (!row.empty()) M.push_back(std::move(row));
+            if (!row.empty())
+                M.push_back(std::move(row));
         }
         return M;
     }
@@ -8819,7 +8992,7 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
     FluspectOptipar optipar;
     const std::filesystem::path optipar_xml = helios::resolveFilePath("plugins/radiation/spectral_data/fluspect_B_optipar.xml");
     loadFluspectOptipar(optipar_xml.string(), optipar);
-    DOCTEST_CHECK(optipar.wavelengths_nm.size() > 1000);  // sanity
+    DOCTEST_CHECK(optipar.wavelengths_nm.size() > 1000); // sanity
 
     // 2. Load reference Mf/Mb and biochemistry/grid metadata.
     const FluspectReferenceConfig cfg = load_fluspect_reference_config();
@@ -8833,17 +9006,17 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
 
     // 3. Run the C++ port with identical inputs.
     FluspectBiochemistry biochem;
-    biochem.Cab  = cfg.Cab;
-    biochem.Cca  = cfg.Cca;
-    biochem.Cw   = cfg.Cw;
-    biochem.Cdm  = cfg.Cdm;
-    biochem.Cs   = cfg.Cs;
+    biochem.Cab = cfg.Cab;
+    biochem.Cca = cfg.Cca;
+    biochem.Cw = cfg.Cw;
+    biochem.Cdm = cfg.Cdm;
+    biochem.Cs = cfg.Cs;
     biochem.Cant = cfg.Cant;
-    biochem.Cp   = cfg.Cp;
-    biochem.Cbc  = cfg.Cbc;
-    biochem.N    = cfg.N;
-    biochem.fqe  = cfg.fqe;
-    biochem.V2Z  = cfg.V2Z;
+    biochem.Cp = cfg.Cp;
+    biochem.Cbc = cfg.Cbc;
+    biochem.N = cfg.N;
+    biochem.fqe = cfg.fqe;
+    biochem.V2Z = cfg.V2Z;
     const FluspectKernel out = computeFluspectKernel(biochem, optipar, cfg.wle_step);
 
     // 4. Grid agreement.
@@ -8882,9 +9055,7 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
     }
     DOCTEST_MESSAGE("Fluspect Mf max relative error: " << max_rel_err_Mf);
     DOCTEST_MESSAGE("Fluspect Mb max relative error: " << max_rel_err_Mb);
-    DOCTEST_MESSAGE("Elements compared: Mf=" << n_checked_Mf << "/" << n_total
-                     << " Mb=" << n_checked_Mb << "/" << n_total
-                     << " (rest below 1e-10 magnitude floor — anti-Stokes wavelengths)");
+    DOCTEST_MESSAGE("Elements compared: Mf=" << n_checked_Mf << "/" << n_total << " Mb=" << n_checked_Mb << "/" << n_total << " (rest below 1e-10 magnitude floor — anti-Stokes wavelengths)");
     // Sanity: at least 90% of kernel elements should be above the floor for this
     // biochemistry (otherwise the kernel is degenerate or the test data wrong).
     DOCTEST_CHECK(n_checked_Mf > 0.9 * n_total);
@@ -8906,9 +9077,7 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
 namespace {
     // Write a fluspect_biochem_<label> vector<float> to global data and stamp
     // "fluspect_spectrum" = label on each UUID. 11-field order matches LeafOptics::run().
-    void sif_stamp_biochem(Context &ctx, const std::vector<uint> &UUIDs, const std::string &label,
-                           float Cab = 40.f, float Cca = 10.f, float Cw = 0.009f, float Cdm = 0.012f,
-                           float Cs = 0.f, float Cant = 1.f, float Cp = 0.f, float Cbc = 0.f,
+    void sif_stamp_biochem(Context &ctx, const std::vector<uint> &UUIDs, const std::string &label, float Cab = 40.f, float Cca = 10.f, float Cw = 0.009f, float Cdm = 0.012f, float Cs = 0.f, float Cant = 1.f, float Cp = 0.f, float Cbc = 0.f,
                            float N = 1.5f, float V2Z = 0.f, float fqe = 1.f) {
         const std::string full_label = "fluspect_biochem_" + label;
         std::vector<float> biochem = {Cab, Cca, Cw, Cdm, Cs, Cant, Cp, Cbc, N, V2Z, fqe};
@@ -8948,8 +9117,7 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     // nearly all upward hemisphere emission from the small leaf below without
     // significantly shadowing the oblique solar source.
     const float sensor_side = 1.f;
-    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side),
-                                make_SphericalCoord(M_PI, 0));
+    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side), make_SphericalCoord(M_PI, 0));
     ctx.setPrimitiveData(sensor, "twosided_flag", uint(0));
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&ctx);
@@ -8962,7 +9130,7 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     radiation.setDirectRayCount("SIF_farred", 500);
     radiation.setDiffuseRayCount("SIF_red", 500);
     radiation.setDiffuseRayCount("SIF_farred", 500);
-    radiation.setScatteringDepth("SIF_red", 1);     // at least one bounce so camera rays pick up emission
+    radiation.setScatteringDepth("SIF_red", 1); // at least one bounce so camera rays pick up emission
     radiation.setScatteringDepth("SIF_farred", 1);
 
     // Oblique collimated solar source (45 deg from vertical) with ASTM G173
@@ -8977,9 +9145,8 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     SIFCameraProperties cam_props;
     cam_props.camera_resolution = make_int2(16, 16);
     cam_props.HFOV = 30.f;
-    cam_props.excitation_bin_width_nm = 50.f;   // 7 bins; coarse for test speed
-    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"},
-                            make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
+    cam_props.excitation_bin_width_nm = 50.f; // 7 bins; coarse for test speed
+    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"}, make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
 
     DOCTEST_CHECK(radiation.isSIFCamera("sif_cam"));
     DOCTEST_CHECK(!radiation.isSIFCamera("nonexistent"));
@@ -9002,8 +9169,7 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     float flux_red = 0.f, flux_farred = 0.f;
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_red", flux_red);
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_farred", flux_farred);
-    DOCTEST_MESSAGE("Sensor F_red=" << flux_red << " F_farred=" << flux_farred
-                     << " ratio=" << (flux_red / std::max(flux_farred, 1e-12f)));
+    DOCTEST_MESSAGE("Sensor F_red=" << flux_red << " F_farred=" << flux_farred << " ratio=" << (flux_red / std::max(flux_farred, 1e-12f)));
     DOCTEST_CHECK(std::isfinite(flux_red));
     DOCTEST_CHECK(std::isfinite(flux_farred));
     DOCTEST_CHECK(flux_red > 0.f);
@@ -9016,15 +9182,17 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     DOCTEST_CHECK(pixels_red.size() == 16 * 16);
     DOCTEST_CHECK(pixels_farred.size() == 16 * 16);
     float max_pixel_red = 0.f, max_pixel_farred = 0.f;
-    for (float v : pixels_red) {
+    for (float v: pixels_red) {
         DOCTEST_CHECK(std::isfinite(v));
         DOCTEST_CHECK(v >= 0.f);
-        if (v > max_pixel_red) max_pixel_red = v;
+        if (v > max_pixel_red)
+            max_pixel_red = v;
     }
-    for (float v : pixels_farred) {
+    for (float v: pixels_farred) {
         DOCTEST_CHECK(std::isfinite(v));
         DOCTEST_CHECK(v >= 0.f);
-        if (v > max_pixel_farred) max_pixel_farred = v;
+        if (v > max_pixel_farred)
+            max_pixel_farred = v;
     }
     DOCTEST_CHECK(max_pixel_red > 0.f);
     DOCTEST_CHECK(max_pixel_farred > 0.f);
@@ -9078,7 +9246,7 @@ GPU_TEST_CASE("SIF regression: piggybacked excitation bands receive direct sourc
     // SIF emission bands (image channels).
     radiation.addRadiationBand("SIF_red", 680.f, 700.f);
     radiation.addRadiationBand("SIF_farred", 730.f, 760.f);
-    for (const auto &b : {"SIF_red", "SIF_farred"}) {
+    for (const auto &b: {"SIF_red", "SIF_farred"}) {
         radiation.setDirectRayCount(b, 500);
         radiation.setDiffuseRayCount(b, 500);
         radiation.setScatteringDepth(b, 1);
@@ -9091,8 +9259,7 @@ GPU_TEST_CASE("SIF regression: piggybacked excitation bands receive direct sourc
     cam_props.camera_resolution = make_int2(8, 8);
     cam_props.HFOV = 30.f;
     cam_props.excitation_bin_width_nm = 50.f; // coarse for test speed
-    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"},
-                            make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
+    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"}, make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
 
     radiation.updateGeometry();
 
@@ -9146,18 +9313,17 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
 
     // Small absorbing sensor directly above the leaf for upward-flux capture.
     const float sensor_side = 1.f;
-    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side),
-                                make_SphericalCoord(M_PI, 0));
+    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side), make_SphericalCoord(M_PI, 0));
     ctx.setPrimitiveData(sensor, "twosided_flag", uint(0));
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&ctx);
     radiation.disableMessages();
 
     // Two disjoint SIF emission bands — one for each camera's resolution.
-    radiation.addRadiationBand("SIF_red_fine", 680.f, 700.f);   // 10 nm bin width camera
+    radiation.addRadiationBand("SIF_red_fine", 680.f, 700.f); // 10 nm bin width camera
     radiation.addRadiationBand("SIF_red_coarse", 680.f, 700.f); // 25 nm bin width camera
     radiation.addRadiationBand("SIF_farred_fine", 730.f, 760.f);
-    for (const auto &b : {"SIF_red_fine", "SIF_red_coarse", "SIF_farred_fine"}) {
+    for (const auto &b: {"SIF_red_fine", "SIF_red_coarse", "SIF_farred_fine"}) {
         radiation.setDirectRayCount(b, 500);
         radiation.setDiffuseRayCount(b, 500);
         radiation.setScatteringDepth(b, 0);
@@ -9172,7 +9338,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     cam10.HFOV = 20.f;
     cam10.excitation_bin_width_nm = 10.f;
 
-    SIFCameraProperties cam10_second = cam10;  // same bin width → dedup path
+    SIFCameraProperties cam10_second = cam10; // same bin width → dedup path
 
     SIFCameraProperties cam25;
     cam25.camera_resolution = make_int2(8, 8);
@@ -9180,15 +9346,12 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     cam25.excitation_bin_width_nm = 25.f;
 
     // cam_a: 10 nm bin width, flags SIF_red_fine + SIF_farred_fine
-    radiation.addSIFCamera("cam_a", {"SIF_red_fine", "SIF_farred_fine"},
-                            make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam10, 1);
+    radiation.addSIFCamera("cam_a", {"SIF_red_fine", "SIF_farred_fine"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam10, 1);
     // cam_b: also 10 nm → reuses the same excitation set; flags nothing new.
     // Use an already-flagged band (dedup of sif_emission_bands is inherent since it's a set).
-    radiation.addSIFCamera("cam_b", {"SIF_farred_fine"},
-                            make_vec3(0, 0.5f, 1), make_vec3(0, 0, 0), cam10_second, 1);
+    radiation.addSIFCamera("cam_b", {"SIF_farred_fine"}, make_vec3(0, 0.5f, 1), make_vec3(0, 0, 0), cam10_second, 1);
     // cam_c: 25 nm bin width → gets its own excitation set; uses a disjoint emission band.
-    radiation.addSIFCamera("cam_c", {"SIF_red_coarse"},
-                            make_vec3(0.5f, 0, 1), make_vec3(0, 0, 0), cam25, 1);
+    radiation.addSIFCamera("cam_c", {"SIF_red_coarse"}, make_vec3(0.5f, 0, 1), make_vec3(0, 0, 0), cam25, 1);
 
     // (a) + (e): isSIFCamera introspection.
     DOCTEST_CHECK(radiation.isSIFCamera("cam_a"));
@@ -9200,8 +9363,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     CameraProperties regular_props;
     regular_props.camera_resolution = make_int2(8, 8);
     regular_props.HFOV = 20.f;
-    radiation.addRadiationCamera("regular_cam", {"SIF_red_fine"},
-                                  make_vec3(1, 1, 1), make_vec3(0, 0, 0), regular_props, 1);
+    radiation.addRadiationCamera("regular_cam", {"SIF_red_fine"}, make_vec3(1, 1, 1), make_vec3(0, 0, 0), regular_props, 1);
     DOCTEST_CHECK(!radiation.isSIFCamera("regular_cam"));
 
     // (b): Both the 10 nm and 25 nm internal band sets exist. If dedup failed, duplicate
@@ -9216,10 +9378,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     // (c): binding the same emission band to different bin widths must error.
     {
         capture_cerr cap;
-        DOCTEST_CHECK_THROWS_AS(
-            radiation.addSIFCamera("cam_conflict", {"SIF_red_fine"},
-                                    make_vec3(2, 0, 1), make_vec3(0, 0, 0), cam25, 1),
-            std::runtime_error);
+        DOCTEST_CHECK_THROWS_AS(radiation.addSIFCamera("cam_conflict", {"SIF_red_fine"}, make_vec3(2, 0, 1), make_vec3(0, 0, 0), cam25, 1), std::runtime_error);
     }
 
     // (d): full pipeline with two distinct excitation sets. Both emission bands should
@@ -9233,9 +9392,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_red_fine", flux_red_fine);
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_red_coarse", flux_red_coarse);
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_farred_fine", flux_farred_fine);
-    DOCTEST_MESSAGE("Sensor F_red_fine=" << flux_red_fine
-                     << " F_red_coarse=" << flux_red_coarse
-                     << " F_farred_fine=" << flux_farred_fine);
+    DOCTEST_MESSAGE("Sensor F_red_fine=" << flux_red_fine << " F_red_coarse=" << flux_red_coarse << " F_farred_fine=" << flux_farred_fine);
     DOCTEST_CHECK(flux_red_fine > 0.f);
     DOCTEST_CHECK(flux_red_coarse > 0.f);
     DOCTEST_CHECK(flux_farred_fine > 0.f);
@@ -9279,8 +9436,7 @@ GPU_TEST_CASE("SIF warnings: no source spectrum set") {
     std::string captured;
     {
         capture_cerr cap;
-        radiation.addSIFCamera("warn_cam_no_spectrum", {"SIF_red"},
-                                make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addSIFCamera("warn_cam_no_spectrum", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(captured.find("no radiation source has a spectrum set") != std::string::npos);
@@ -9305,8 +9461,7 @@ GPU_TEST_CASE("SIF warnings: no fluspect_spectrum on any primitive") {
     std::string captured;
     {
         capture_cerr cap;
-        radiation.addSIFCamera("warn_no_biochem", {"SIF_red"},
-                                make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addSIFCamera("warn_no_biochem", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(captured.find("fluspect_spectrum") != std::string::npos);
@@ -9338,8 +9493,7 @@ GPU_TEST_CASE("SIF warnings: leaves have biochemistry but lack electron_transpor
     std::string setup_captured;
     {
         capture_cerr cap;
-        radiation.addSIFCamera("warn_no_etr", {"SIF_red"},
-                                make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addSIFCamera("warn_no_etr", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         setup_captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(setup_captured.find("electron_transport_ratio") == std::string::npos);
@@ -9372,8 +9526,7 @@ GPU_TEST_CASE("SIF warnings: camera bound to band with scattering depth 0") {
     std::string captured;
     {
         capture_cerr cap;
-        radiation.addRadiationCamera("warn_scatter0", {"PAR"},
-                                      make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addRadiationCamera("warn_scatter0", {"PAR"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(captured.find("scatteringDepth == 0") != std::string::npos);
@@ -9396,7 +9549,7 @@ GPU_TEST_CASE("SIF: non-blackbody leaf optics (rho+tau<1) should not trip ε+ρ+
     // Leaf optics that violate Stefan-Boltzmann ε+ρ+τ=1 with ε=1 (the default):
     // rho=0.4, tau=0.43 (typical PROSPECT values at 740 nm). Pre-fix, these would
     // crash in validateAndCorrectMaterialProperties with the "sum to 1" error.
-    ctx.setPrimitiveData(leaf, "reflectivity_SIF_farred",   0.4f);
+    ctx.setPrimitiveData(leaf, "reflectivity_SIF_farred", 0.4f);
     ctx.setPrimitiveData(leaf, "transmissivity_SIF_farred", 0.43f);
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&ctx);
@@ -9483,7 +9636,7 @@ GPU_TEST_CASE("SIF: excitation_scattering_depth propagates to excitation bands a
     cam_a.camera_resolution = make_int2(4, 4);
     cam_a.HFOV = 20.f;
     cam_a.excitation_bin_width_nm = 50.f;
-    cam_a.excitation_scattering_depth = 0;  // default, explicit for clarity
+    cam_a.excitation_scattering_depth = 0; // default, explicit for clarity
     radiation_a.addSIFCamera("cam_scat0", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_a, 1);
 
     // Also give the auto-generated excitation bands non-default rho/tau on the leaf.
@@ -9508,8 +9661,7 @@ GPU_TEST_CASE("SIF: excitation_scattering_depth propagates to excitation bands a
     }
     // No per-band "scattering iterations are disabled" warnings should appear for
     // any "_SIF_exc_*" bands.
-    const bool exc_warning_absent = (captured.find("_SIF_exc_") == std::string::npos) ||
-                                     (captured.find("scattering iterations are disabled") == std::string::npos);
+    const bool exc_warning_absent = (captured.find("_SIF_exc_") == std::string::npos) || (captured.find("scattering iterations are disabled") == std::string::npos);
     DOCTEST_CHECK(exc_warning_absent);
 
     // --- Second scene: camera with excitation_scattering_depth = 2 ---
@@ -9609,8 +9761,8 @@ DOCTEST_TEST_CASE("Glass cover Fresnel+Bouguer reference math") {
 
     // Absorption: KL=0.05 at normal incidence multiplies transmittance by tau_a = exp(-0.05) = 0.9512.
     helios::vec3 tA = glass_tau_rho_alpha_ref(1.0f, 1.5f, 0.05f);
-    DOCTEST_CHECK(tA.x < t0.x);                 // absorbing sheet transmits less
-    DOCTEST_CHECK(tA.z > 0.01f);                // nonzero absorption
+    DOCTEST_CHECK(tA.x < t0.x); // absorbing sheet transmits less
+    DOCTEST_CHECK(tA.z > 0.01f); // nonzero absorption
     DOCTEST_CHECK((tA.x + tA.y + tA.z) == doctest::Approx(1.0f).epsilon(1e-4));
 }
 
@@ -9624,9 +9776,9 @@ GPU_TEST_CASE("RadiationModel Glass Cover Normal-Incidence Transmittance") {
     // Cover at z=1, receiver at z=0, both horizontal 2x2 (large enough to fully shadow the receiver).
     uint cover = context.addPatch(make_vec3(0, 0, 1), make_vec2(4, 4));
     uint receiver = context.addPatch(make_vec3(0, 0, 0), make_vec2(2, 2));
-    context.setPrimitiveData(receiver, "twosided_flag", uint(0));    // one-sided, top only
-    context.setPrimitiveData(receiver, "reflectivity_SW", 0.0f);     // fully absorbing
-    context.setPrimitiveData(cover, "glass_n_SW", 1.5f);             // activate glass model, lossless
+    context.setPrimitiveData(receiver, "twosided_flag", uint(0)); // one-sided, top only
+    context.setPrimitiveData(receiver, "reflectivity_SW", 0.0f); // fully absorbing
+    context.setPrimitiveData(cover, "glass_n_SW", 1.5f); // activate glass model, lossless
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&context);
     radiation.disableMessages();
@@ -9736,14 +9888,14 @@ GPU_TEST_CASE("RadiationModel Glass Cover Preserves Beam Direction") {
     Context context;
     // Opaque ceiling spanning x in roughly [-1, +4], with a glass window gap around x=0.
     // Build it from two opaque panels plus a small glass window patch covering the gap.
-    uint ceil_left = context.addPatch(make_vec3(-3.0f, 0, dz), make_vec2(4.0f, 6.0f));   // covers x in [-5,-1]
-    uint ceil_right = context.addPatch(make_vec3(3.0f, 0, dz), make_vec2(4.0f, 6.0f));   // covers x in [1,5]
-    uint window = context.addPatch(make_vec3(0, 0, dz), make_vec2(2.0f, 6.0f));          // glass, x in [-1,1]
+    uint ceil_left = context.addPatch(make_vec3(-3.0f, 0, dz), make_vec2(4.0f, 6.0f)); // covers x in [-5,-1]
+    uint ceil_right = context.addPatch(make_vec3(3.0f, 0, dz), make_vec2(4.0f, 6.0f)); // covers x in [1,5]
+    uint window = context.addPatch(make_vec3(0, 0, dz), make_vec2(2.0f, 6.0f)); // glass, x in [-1,1]
     context.setPrimitiveData(ceil_left, "twosided_flag", uint(1));
     context.setPrimitiveData(ceil_right, "twosided_flag", uint(1));
-    context.setPrimitiveData(ceil_left, "reflectivity_SW", 0.0f);  // opaque absorber
+    context.setPrimitiveData(ceil_left, "reflectivity_SW", 0.0f); // opaque absorber
     context.setPrimitiveData(ceil_right, "reflectivity_SW", 0.0f);
-    context.setPrimitiveData(window, "glass_n_SW", 1.5f);          // glass window
+    context.setPrimitiveData(window, "glass_n_SW", 1.5f); // glass window
 
     // In-path receiver under the displaced beam exit; control receiver directly under the window.
     uint receiver_inpath = context.addPatch(make_vec3(-shift, 0, 0), make_vec2(1.0f, 1.0f));
@@ -9924,3 +10076,183 @@ GPU_TEST_CASE("Launch batching covers every primitive") {
     DOCTEST_CHECK(max_flux == doctest::Approx(1000.0f).epsilon(0.02));
 }
 
+// ---- Segmentation mask connected components ----------------------------------------------------
+//
+// generateAnnotationsFromMasks() is private and needs no rendered scene, so these build label masks
+// by hand and reach it through RadiationModelTestHelper. GPU_TEST_CASE is still required: the
+// RadiationModel constructor calls RayTracingBackend::create("auto"), which throws with no backend.
+
+//! Build an empty label mask of the given resolution
+static std::vector<std::vector<bool>> makeEmptyMask(const helios::int2 &resolution) {
+    return std::vector<std::vector<bool>>(resolution.y, std::vector<bool>(resolution.x, false));
+}
+
+//! Set every pixel of an axis-aligned rectangle in a mask
+static void fillMaskRectangle(std::vector<std::vector<bool>> &mask, int x_min, int y_min, int x_max, int y_max) {
+    for (int j = y_min; j <= y_max; j++) {
+        for (int i = x_min; i <= x_max; i++) {
+            mask.at(j).at(i) = true;
+        }
+    }
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks annotate every connected component") {
+    // Two objects sharing one label value must produce two annotations. Before this was fixed the
+    // writer emitted only the component containing the topmost-leftmost boundary pixel of the whole
+    // mask, and dropped every other one silently: no warning, no error, just a COCO file missing
+    // objects that were plainly visible in the image.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(40, 40);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 2, 2, 10, 10); // component A
+    fillMaskRectangle(mask, 20, 20, 30, 30); // component B
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[7] = mask; // both regions carry the same label value
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_REQUIRE(annotations.size() == 2);
+
+    // Areas are the two rectangles, in whichever order the components were found.
+    std::vector<float> areas{annotations.at(0).at("area").at(0), annotations.at(1).at("area").at(0)};
+    std::sort(areas.begin(), areas.end());
+    DOCTEST_CHECK(areas.at(0) == doctest::Approx(81.f)); // 9x9
+    DOCTEST_CHECK(areas.at(1) == doctest::Approx(121.f)); // 11x11
+
+    // Annotation IDs must stay distinct, since they key the annotation in the COCO file.
+    DOCTEST_CHECK(annotations.at(0).at("id").at(0) != annotations.at(1).at("id").at(0));
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks annotate both halves of an occluded object") {
+    // The case that needs no user error at all. One object with one ID, split into two visible
+    // regions by something in front of it -- a leaf behind a stem, a fruit behind a branch. Half the
+    // object used to vanish from the dataset.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(30, 20);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 2, 5, 27, 14);
+    for (int j = 0; j < resolution.y; j++) { // an occluder splits it down the middle
+        for (int i = 14; i <= 16; i++) {
+            mask.at(j).at(i) = false;
+        }
+    }
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[1] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_REQUIRE(annotations.size() == 2);
+
+    // The two visible pieces together must account for every lit pixel, so nothing is lost.
+    const float total_area = annotations.at(0).at("area").at(0) + annotations.at(1).at("area").at(0);
+    DOCTEST_CHECK(total_area == doctest::Approx(10.f * (12.f + 11.f))); // rows 5..14, columns 2..13 and 17..27
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks treat a diagonal chain as one component") {
+    // The component flood fill was 4-connected while the boundary tracer is 8-connected, so a
+    // diagonally-connected object was one region to the tracer but many single-pixel regions to the
+    // flood fill. Left unfixed alongside the start-pixel fix, this would turn a diagonal streak into
+    // a shower of one-pixel annotations.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(30, 30);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    for (int t = 0; t < 12; t++) { // a purely diagonal chain of pixels
+        mask.at(5 + t).at(5 + t) = true;
+    }
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[3] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_CHECK(annotations.size() == 1);
+    if (annotations.size() == 1) {
+        DOCTEST_CHECK(annotations.at(0).at("area").at(0) == doctest::Approx(12.f));
+    }
+}
+
+GPU_TEST_CASE("RadiationModel segmentation mask polygons lie within their own bounding box") {
+    // The dropped-component bug was masked by a guard that rejected any component not containing the
+    // whole mask's start pixel. Removing that guard must not let a component be described by another
+    // component's outline, so every polygon point is checked against the bbox reported beside it.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(60, 60);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 3, 3, 12, 12);
+    fillMaskRectangle(mask, 40, 5, 52, 20);
+    fillMaskRectangle(mask, 25, 35, 45, 50);
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[2] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_REQUIRE(annotations.size() == 3);
+
+    for (const auto &annotation: annotations) {
+        const std::vector<float> &bbox = annotation.at("bbox");
+        const std::vector<float> &segmentation = annotation.at("segmentation");
+        DOCTEST_REQUIRE(bbox.size() == 4);
+        DOCTEST_REQUIRE(segmentation.size() % 2 == 0);
+
+        size_t points_outside_bbox = 0;
+        for (size_t i = 0; i < segmentation.size(); i += 2) {
+            const float x = segmentation.at(i);
+            const float y = segmentation.at(i + 1);
+            if (x < bbox.at(0) || x > bbox.at(0) + bbox.at(2) || y < bbox.at(1) || y > bbox.at(1) + bbox.at(3)) {
+                points_outside_bbox++;
+            }
+        }
+        DOCTEST_CHECK(points_outside_bbox == 0);
+    }
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks leave a single component unchanged") {
+    // The fix must be purely additive for scenes that already worked, which is every scene whose
+    // objects are each one unoccluded region. A lone square must still yield exactly one annotation
+    // whose bbox and area describe it exactly.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(40, 40);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 10, 12, 25, 30);
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[5] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 4u, resolution, 9);
+
+    DOCTEST_REQUIRE(annotations.size() == 1);
+
+    const std::vector<float> &bbox = annotations.at(0).at("bbox");
+    DOCTEST_CHECK(bbox.at(0) == doctest::Approx(10.f));
+    DOCTEST_CHECK(bbox.at(1) == doctest::Approx(12.f));
+    DOCTEST_CHECK(bbox.at(2) == doctest::Approx(15.f)); // COCO width is max-min, as this writer defines it
+    DOCTEST_CHECK(bbox.at(3) == doctest::Approx(18.f));
+    DOCTEST_CHECK(annotations.at(0).at("area").at(0) == doctest::Approx(16.f * 19.f));
+
+    // The class ID and image ID passed in must be carried through onto the annotation.
+    DOCTEST_CHECK(annotations.at(0).at("category_id").at(0) == doctest::Approx(4.f));
+    DOCTEST_CHECK(annotations.at(0).at("image_id").at(0) == doctest::Approx(9.f));
+}

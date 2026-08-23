@@ -246,6 +246,45 @@ TEST_CASE("Context XML I/O Functions") {
         std::remove(test_file);
     }
 
+    SUBCASE("writeXML and loadXML round-trip voxels") {
+        // Regression: the voxel branch of loadXML constructed the voxel with a size of
+        // make_vec3(0,0,0), which addVoxel() rejects with "Voxel has size of zero". Any file
+        // containing a <voxel> element therefore threw on load, so a scene containing a voxel
+        // could be written by writeXML() but never read back.
+        Context ctx;
+
+        vec3 voxel_center = make_vec3(1.f, 2.f, 3.f);
+        vec3 voxel_size = make_vec3(0.5f, 1.5f, 2.5f);
+        uint voxel = ctx.addVoxel(voxel_center, voxel_size);
+        ctx.setPrimitiveData(voxel, "voxel_label", 7);
+
+        const char *test_file = "helios_test_voxel_roundtrip.xml";
+        DOCTEST_CHECK_NOTHROW(ctx.writeXML(test_file, true));
+
+        Context ctx2;
+        DOCTEST_CHECK_NOTHROW(ctx2.loadXML(test_file, true));
+
+        std::vector<uint> loaded = ctx2.getAllUUIDs();
+        DOCTEST_REQUIRE(loaded.size() == 1);
+        DOCTEST_CHECK(ctx2.getPrimitiveType(loaded.front()) == PRIMITIVE_TYPE_VOXEL);
+
+        // Geometry must survive the round-trip, not merely load without throwing.
+        vec3 loaded_center = ctx2.getVoxelCenter(loaded.front());
+        vec3 loaded_size = ctx2.getVoxelSize(loaded.front());
+        DOCTEST_CHECK(loaded_center.x == doctest::Approx(voxel_center.x));
+        DOCTEST_CHECK(loaded_center.y == doctest::Approx(voxel_center.y));
+        DOCTEST_CHECK(loaded_center.z == doctest::Approx(voxel_center.z));
+        DOCTEST_CHECK(loaded_size.x == doctest::Approx(voxel_size.x));
+        DOCTEST_CHECK(loaded_size.y == doctest::Approx(voxel_size.y));
+        DOCTEST_CHECK(loaded_size.z == doctest::Approx(voxel_size.z));
+
+        int label = 0;
+        DOCTEST_CHECK_NOTHROW(ctx2.getPrimitiveData(loaded.front(), "voxel_label", label));
+        DOCTEST_CHECK(label == 7);
+
+        std::remove(test_file);
+    }
+
     SUBCASE("loadXML polymesh reload") {
         // Regression: loading a file containing a polymesh object into a Context where that object ID was
         // already in use remapped the ID before the primitive-map lookup and crashed with std::out_of_range.

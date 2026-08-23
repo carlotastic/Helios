@@ -1125,14 +1125,6 @@ namespace helios {
      */
     [[nodiscard]] float interp1(const std::vector<helios::vec2> &points, float x);
 
-    //! Function to calculate the distance between two points
-    /**
-     * \param[in] p1 first point (vec3)
-     * \param[in] p2 second point (vec3)
-     * \return distance between p1 and p2 in three dimensions
-     */
-    [[nodiscard]] float point_distance(const helios::vec3 &p1, const helios::vec3 &p2);
-
     //! Generate linearly spaced values between two endpoints
     /**
      * \param[in] start Starting value

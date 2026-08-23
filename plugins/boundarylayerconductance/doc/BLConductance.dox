@@ -38,9 +38,9 @@
  <tr><th>Primitive Data <th>Units <th>Data Type <th>Description <th>Available Plug-ins <th>Default Value
   <tr><td>wind\_speed <td>m/s <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly <td>Air wind speed just outside of primitive boundary-layer. <td>N/A <td>1 m/s
   <tr><td>object\_length <td>m <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly <td>Characteristic dimension of object formed by primitive. <td>N/A <td>Square root of primitive surface area
-  <tr><td>air\_temperature <td>Kelvin <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly <td>Ambient air temperature outside of surface boundary layer. <td>N/A <td>290 K
- <tr><td>surface\_temperature <td>Kelvin <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly <td>Object surface temperature. <td>\ref EnergyBalanceModel <td>300 K
- <tr><td>twosided\_flag <td>N/A <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">uint</span>\endhtmlonly <td>Number of primitive faces with energy transfer (must be 1 or 2). <td>N/A <td>2  </table>
+  <tr><td>air\_temperature <td>Kelvin <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly <td>Ambient air temperature outside of surface boundary layer. <td>N/A <td>293 K
+ <tr><td>temperature <td>Kelvin <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly <td>Object surface temperature. <td>\ref EnergyBalanceModel <td>303 K
+ <tr><td>twosided\_flag <td>N/A <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">uint</span>\endhtmlonly <td>Flag indicating the number of primitive faces with energy transfer (twosided\_flag = 0 for one-sided; twosided\_flag = 1 for two-sided). <td>N/A <td>1  </table>
 
  \subsection BLOutputData Default Output Primitive Data
  

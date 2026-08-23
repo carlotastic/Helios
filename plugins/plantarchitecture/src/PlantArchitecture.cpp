@@ -336,6 +336,20 @@ void ShootParameters::defineChildShootTypes(const std::vector<std::string> &a_ch
     this->child_shoot_type_probabilities = a_child_shoot_type_probabilities;
 }
 
+void ShootParameters::inheritCustomFunctionsFrom(const ShootParameters &source) {
+    if (this == &source) {
+        return;
+    }
+
+    // A null pointer is a valid value here -- some shoot types deliberately have no creation
+    // function -- so these are unconditional assignments rather than a merge that skips nulls.
+    this->phytomer_parameters.phytomer_creation_function = source.phytomer_parameters.phytomer_creation_function;
+    this->phytomer_parameters.phytomer_callback_function = source.phytomer_parameters.phytomer_callback_function;
+    this->phytomer_parameters.leaf.prototype.prototype_function = source.phytomer_parameters.leaf.prototype.prototype_function;
+    this->phytomer_parameters.inflorescence.flower_prototype_function = source.phytomer_parameters.inflorescence.flower_prototype_function;
+    this->phytomer_parameters.inflorescence.fruit_prototype_function = source.phytomer_parameters.inflorescence.fruit_prototype_function;
+}
+
 std::vector<uint> PlantArchitecture::buildPlantCanopyFromLibrary(const helios::vec3 &canopy_center_position, const helios::vec2 &plant_spacing_xy, const helios::int2 &plant_count_xy, const float age, const float germination_rate,
                                                                  const std::map<std::string, float> &build_parameters) {
     if (plant_count_xy.x <= 0 || plant_count_xy.y <= 0) {
@@ -1446,6 +1460,11 @@ void Shoot::propagateDownstreamLeafArea(const Shoot *shoot, uint node_index, flo
 
 
 float Shoot::sumShootLeafArea(uint start_node_index) const {
+    // A pruned shoot has no phytomers and so no leaf area. Without this the range check below
+    // rejects start_node_index 0 (0 >= 0) and reports it as a caller error.
+    if (isPruned()) {
+        return 0.f;
+    }
     if (start_node_index >= phytomers.size()) {
         helios_runtime_error("ERROR (Shoot::sumShootLeafArea): Start node index out of range.");
     }
@@ -1476,6 +1495,10 @@ float Shoot::sumShootLeafArea(uint start_node_index) const {
 
 
 float Shoot::sumChildVolume(uint start_node_index) const {
+    // A pruned shoot has no phytomers and so no child shoots. See the note in sumShootLeafArea().
+    if (isPruned()) {
+        return 0.f;
+    }
     if (start_node_index >= phytomers.size()) {
         helios_runtime_error("ERROR (Shoot::sumChildVolume): Start node index out of range.");
     }
@@ -3146,24 +3169,31 @@ void Phytomer::removeLeaf() {
 }
 
 void Phytomer::deletePhytomer() {
+    // Everything needed after the resize below has to be read out of *this* first: resizing
+    // parent_shoot_ptr->phytomers destroys the shared_ptr that owns this Phytomer, so from that
+    // point on *this* is a dangling pointer and any member read through it is a use-after-free.
+    Shoot *shoot = parent_shoot_ptr;
+    const int first_deleted_node = this->shoot_index.x;
+    const int node_count = this->shoot_index.y;
+
     // prune the internode tube in the Context
-    if (context_ptr->doesObjectExist(parent_shoot_ptr->internode_tube_objID)) {
-        uint tube_nodes = context_ptr->getTubeObjectNodeCount(parent_shoot_ptr->internode_tube_objID);
-        uint tube_segments = this->parent_shoot_ptr->shoot_parameters.phytomer_parameters.internode.length_segments;
+    if (context_ptr->doesObjectExist(shoot->internode_tube_objID)) {
+        uint tube_nodes = context_ptr->getTubeObjectNodeCount(shoot->internode_tube_objID);
+        uint tube_segments = shoot->shoot_parameters.phytomer_parameters.internode.length_segments;
         uint tube_prune_index;
-        if (this->shoot_index.x == 0) {
+        if (first_deleted_node == 0) {
             tube_prune_index = 0;
         } else {
-            tube_prune_index = this->shoot_index.x * tube_segments + 1; // note that first segment has an extra vertex
+            tube_prune_index = first_deleted_node * tube_segments + 1; // note that first segment has an extra vertex
         }
         if (tube_prune_index < tube_nodes) {
-            context_ptr->pruneTubeNodes(parent_shoot_ptr->internode_tube_objID, tube_prune_index);
+            context_ptr->pruneTubeNodes(shoot->internode_tube_objID, tube_prune_index);
         }
-        parent_shoot_ptr->terminateApicalBud();
+        shoot->terminateApicalBud();
     }
 
-    for (uint node = this->shoot_index.x; node < shoot_index.y; node++) {
-        auto &phytomer = parent_shoot_ptr->phytomers.at(node);
+    for (int node = first_deleted_node; node < node_count; node++) {
+        auto &phytomer = shoot->phytomers.at(node);
 
         // leaves
         phytomer->removeLeaf();
@@ -3189,10 +3219,10 @@ void Phytomer::deletePhytomer() {
         }
 
         // delete any child shoots
-        if (parent_shoot_ptr->childIDs.find(node) != parent_shoot_ptr->childIDs.end()) {
-            for (auto childID: parent_shoot_ptr->childIDs.at(node)) {
+        if (shoot->childIDs.find(node) != shoot->childIDs.end()) {
+            for (auto childID: shoot->childIDs.at(node)) {
                 auto child_shoot = plantarchitecture_ptr->plant_instances.at(plantID).shoot_tree.at(childID);
-                if (!child_shoot->phytomers.empty()) {
+                if (!child_shoot->isPruned()) {
                     child_shoot->phytomers.front()->deletePhytomer();
                 }
             }
@@ -3200,15 +3230,43 @@ void Phytomer::deletePhytomer() {
     }
 
     // delete shoot arrays
-    parent_shoot_ptr->shoot_internode_radii.resize(this->shoot_index.x);
-    parent_shoot_ptr->shoot_internode_vertices.resize(this->shoot_index.x);
-    parent_shoot_ptr->phytomers.resize(this->shoot_index.x);
+    shoot->shoot_internode_radii.resize(first_deleted_node);
+    shoot->shoot_internode_vertices.resize(first_deleted_node);
+    shoot->phytomers.resize(first_deleted_node); // *this* is destroyed here; use 'shoot' from now on
+
+    // The child shoots attached at the deleted nodes were just emptied by the loop above, so drop
+    // them from this shoot's child list. Without this, every recursive traversal over childIDs
+    // (leaf area, child volume, node updates, XML output, carbohydrate transfer) still descends
+    // into shoots that have no phytomers left. The erase happens after the loop rather than inside
+    // it so the map is not mutated while it is being iterated.
+    for (auto it = shoot->childIDs.begin(); it != shoot->childIDs.end();) {
+        if (it->first >= first_deleted_node) {
+            it = shoot->childIDs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Pruning at node 0 deletes the internode tube object outright (Tube::pruneTubeNodes() deletes
+    // the object when fewer than two nodes remain). Reset the field to the sentinel rather than
+    // leaving a freed object ID behind, matching pruneGroundCollisions().
+    if (!shoot->context_ptr->doesObjectExist(shoot->internode_tube_objID)) {
+        shoot->internode_tube_objID = Shoot::no_internode_tube_objID;
+    }
+
+    // A shoot with no phytomers left cannot grow, so its apical meristem must be dead. The
+    // terminateApicalBud() call at the top of this function runs only when the internode tube
+    // object exists, which it never does when internode context geometry is disabled; advanceTime()
+    // would then treat the emptied shoot as growable and dereference phytomers.back() on it.
+    if (shoot->phytomers.empty()) {
+        shoot->terminateApicalBud();
+    }
 
     // set the correct node index for phytomers on this shoot
-    for (const auto &phytomer: parent_shoot_ptr->phytomers) {
-        phytomer->shoot_index.y = scast<int>(parent_shoot_ptr->phytomers.size());
+    for (const auto &phytomer: shoot->phytomers) {
+        phytomer->shoot_index.y = scast<int>(shoot->phytomers.size());
     }
-    parent_shoot_ptr->current_node_number = scast<int>(parent_shoot_ptr->phytomers.size());
+    shoot->current_node_number = scast<int>(shoot->phytomers.size());
 }
 
 bool Phytomer::hasLeaf() const {
@@ -4150,9 +4208,19 @@ void PlantArchitecture::writePlantMeshVertices(uint plantID, const std::string &
     file.close();
 }
 
-void PlantArchitecture::setPlantAge(uint plantID, float a_current_age) {
-    //\todo
-    //    this->current_age = current_age;
+void PlantArchitecture::setPlantMaxAge(uint plantID, float max_age) {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::setPlantMaxAge): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    } else if (max_age < 0) {
+        helios_runtime_error("ERROR (PlantArchitecture::setPlantMaxAge): Maximum age must be greater than or equal to zero.");
+    }
+
+    plant_instances.at(plantID).max_age = max_age;
+
+    // Clear the one-shot mature-geometry latch. It is set when a plant first reaches max_age and is
+    // never otherwise reset, so a plant that already froze under the old cap would skip the geometry
+    // sync on reaching the new one and be left stale in the Context.
+    plant_instances.at(plantID).mature_geometry_synced = false;
 }
 
 std::string PlantArchitecture::getPlantName(uint plantID) const {
@@ -4164,11 +4232,18 @@ std::string PlantArchitecture::getPlantName(uint plantID) const {
 
 float PlantArchitecture::getPlantAge(uint plantID) const {
     if (plant_instances.find(plantID) == plant_instances.end()) {
-        helios_runtime_error("ERROR (PlantArchitecture::setPlantAge): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+        helios_runtime_error("ERROR (PlantArchitecture::getPlantAge): Plant with ID of " + std::to_string(plantID) + " does not exist.");
     } else if (plant_instances.at(plantID).shoot_tree.empty()) {
-        helios_runtime_error("ERROR (PlantArchitecture::setPlantAge): Plant with ID of " + std::to_string(plantID) + " has no shoots, so could not get a base position.");
+        helios_runtime_error("ERROR (PlantArchitecture::getPlantAge): Plant with ID of " + std::to_string(plantID) + " has no shoots.");
     }
     return plant_instances.at(plantID).current_age;
+}
+
+float PlantArchitecture::getPlantMaxAge(uint plantID) const {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::getPlantMaxAge): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    }
+    return plant_instances.at(plantID).max_age;
 }
 
 std::vector<std::string> PlantArchitecture::listShootTypeLabels(uint plantID) const {
@@ -4298,15 +4373,41 @@ void PlantArchitecture::pruneBranch(uint plantID, uint shootID, uint node_index)
         helios_runtime_error("ERROR (PlantArchitecture::pruneBranch): Plant with ID of " + std::to_string(plantID) + " does not exist.");
     } else if (shootID >= plant_instances.at(plantID).shoot_tree.size()) {
         helios_runtime_error("ERROR (PlantArchitecture::pruneBranch): Shoot with ID of " + std::to_string(shootID) + " does not exist on plant " + std::to_string(plantID) + ".");
-    } else if (node_index >= plant_instances.at(plantID).shoot_tree.at(shootID)->current_node_number) {
+    }
+
+    const std::shared_ptr<Shoot> &shoot = plant_instances.at(plantID).shoot_tree.at(shootID);
+
+    // Pruning a shoot that has already been pruned away is a no-op. This is reached routinely when
+    // pruning a whole branch system: removing a shoot also empties all of its descendants, and a
+    // loop over shoot IDs then arrives at those descendants a second time. Rejecting them aborted
+    // the loop partway through and left the plant half-pruned.
+    if (shoot->isPruned()) {
+        return;
+    }
+
+    if (node_index >= shoot->current_node_number) {
         helios_runtime_error("ERROR (PlantArchitecture::pruneBranch): Node index " + std::to_string(node_index) + " is out of range for shoot " + std::to_string(shootID) + ".");
     }
 
-    auto &shoot = plant_instances.at(plantID).shoot_tree.at(shootID);
-
     shoot->phytomers.at(node_index)->deletePhytomer();
 
-    if (plant_instances.at(plantID).shoot_tree.empty()) {
+    // A shoot pruned at its base is gone entirely, so unlink it from its parent's child list. It
+    // keeps its slot in the shoot_tree (and therefore its ID stays a valid index, so IDs held by
+    // the caller do not shift), but nothing must be able to reach it as part of the plant anymore.
+    if (shoot->isPruned() && shoot->parent_shoot_ID >= 0) {
+        std::map<int, std::vector<int>> &parent_childIDs = plant_instances.at(plantID).shoot_tree.at(shoot->parent_shoot_ID)->childIDs;
+        for (auto it = parent_childIDs.begin(); it != parent_childIDs.end();) {
+            std::vector<int> &siblings = it->second;
+            siblings.erase(std::remove(siblings.begin(), siblings.end(), scast<int>(shootID)), siblings.end());
+            if (siblings.empty()) {
+                it = parent_childIDs.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    if (printmessages && shoot->parent_shoot_ID < 0 && shoot->isPruned()) {
         std::cout << "WARNING (PlantArchitecture::pruneBranch): Plant " << plantID << " base shoot was pruned." << std::endl;
     }
 }
@@ -4591,6 +4692,166 @@ std::vector<uint> PlantArchitecture::getAllShootIDs(uint plantID) const {
     return shootIDs;
 }
 
+//! Validates a plant/shoot ID pair for the shoot topology accessors
+/**
+ * \param[in] plantID Plant to validate.
+ * \param[in] shootID Shoot to validate within that plant.
+ * \param[in] function_name Name of the calling function, used in the error message.
+ */
+void PlantArchitecture::validateShootID(uint plantID, uint shootID, const std::string &function_name) const {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::" + function_name + "): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    } else if (plant_instances.at(plantID).shoot_tree.size() <= shootID) {
+        helios_runtime_error("ERROR (PlantArchitecture::" + function_name + "): Shoot with ID of " + std::to_string(shootID) + " does not exist on plant " + std::to_string(plantID) + ".");
+    }
+}
+
+int PlantArchitecture::getParentShootID(uint plantID, uint shootID) const {
+    validateShootID(plantID, shootID, "getParentShootID");
+    return plant_instances.at(plantID).shoot_tree.at(shootID)->parent_shoot_ID;
+}
+
+uint PlantArchitecture::getShootRank(uint plantID, uint shootID) const {
+    validateShootID(plantID, shootID, "getShootRank");
+    return plant_instances.at(plantID).shoot_tree.at(shootID)->rank;
+}
+
+uint PlantArchitecture::getShootDepth(uint plantID, uint shootID) const {
+    validateShootID(plantID, shootID, "getShootDepth");
+
+    const std::vector<std::shared_ptr<Shoot>> &shoot_tree = plant_instances.at(plantID).shoot_tree;
+
+    uint depth = 0;
+    int current_shoot_ID = shoot_tree.at(shootID)->parent_shoot_ID;
+    while (current_shoot_ID >= 0) {
+        depth++;
+        current_shoot_ID = shoot_tree.at(current_shoot_ID)->parent_shoot_ID;
+    }
+    return depth;
+}
+
+std::vector<uint> PlantArchitecture::getPathToRoot(uint plantID, uint shootID) const {
+    validateShootID(plantID, shootID, "getPathToRoot");
+
+    const std::vector<std::shared_ptr<Shoot>> &shoot_tree = plant_instances.at(plantID).shoot_tree;
+
+    std::vector<uint> path;
+    int current_shoot_ID = scast<int>(shootID);
+    while (current_shoot_ID >= 0) {
+        path.push_back(scast<uint>(current_shoot_ID));
+        current_shoot_ID = shoot_tree.at(current_shoot_ID)->parent_shoot_ID;
+    }
+    return path;
+}
+
+std::vector<uint> PlantArchitecture::getChildShootIDs(uint plantID, uint shootID) const {
+    validateShootID(plantID, shootID, "getChildShootIDs");
+
+    const std::vector<std::shared_ptr<Shoot>> &shoot_tree = plant_instances.at(plantID).shoot_tree;
+
+    std::vector<uint> childIDs;
+    // childIDs is keyed by the node the child attaches to, so iterating the map orders the result by
+    // attachment node. pruneBranch() unlinks a pruned shoot from its parent, so pruned shoots are
+    // normally absent already; the check keeps this correct regardless of how the shell arose.
+    for (const auto &[node_index, node_childIDs]: shoot_tree.at(shootID)->childIDs) {
+        for (const int childID: node_childIDs) {
+            if (!shoot_tree.at(childID)->isPruned()) {
+                childIDs.push_back(scast<uint>(childID));
+            }
+        }
+    }
+    return childIDs;
+}
+
+std::vector<uint> PlantArchitecture::getAllDescendantShootIDs(uint plantID, uint shootID) const {
+    validateShootID(plantID, shootID, "getAllDescendantShootIDs");
+
+    std::vector<uint> descendantIDs;
+
+    // Depth-first, so each shoot is listed before its own descendants. The shoot tree is a tree rather
+    // than a general graph, so no visited-set is needed to terminate.
+    std::vector<uint> pending = getChildShootIDs(plantID, shootID);
+    while (!pending.empty()) {
+        const uint current_shoot_ID = pending.back();
+        pending.pop_back();
+        descendantIDs.push_back(current_shoot_ID);
+
+        const std::vector<uint> children = getChildShootIDs(plantID, current_shoot_ID);
+        for (auto child = children.rbegin(); child != children.rend(); ++child) {
+            pending.push_back(*child);
+        }
+    }
+    return descendantIDs;
+}
+
+std::vector<std::vector<uint>> PlantArchitecture::getShootIDsByRank(uint plantID) const {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::getShootIDsByRank): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    }
+
+    std::vector<std::vector<uint>> shootIDs_by_rank;
+
+    for (const std::shared_ptr<Shoot> &shoot: plant_instances.at(plantID).shoot_tree) {
+        if (shoot->isPruned()) {
+            continue;
+        }
+        // A rank with no live shoots is kept as an empty entry so that the index into the outer vector
+        // is always the rank itself.
+        if (shoot->rank >= shootIDs_by_rank.size()) {
+            shootIDs_by_rank.resize(shoot->rank + 1);
+        }
+        shootIDs_by_rank.at(shoot->rank).push_back(scast<uint>(shoot->ID));
+    }
+    return shootIDs_by_rank;
+}
+
+std::map<uint, std::vector<uint>> PlantArchitecture::getShootHierarchyMap(uint plantID) const {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::getShootHierarchyMap): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    }
+
+    std::map<uint, std::vector<uint>> hierarchy;
+
+    for (const std::shared_ptr<Shoot> &shoot: plant_instances.at(plantID).shoot_tree) {
+        if (shoot->isPruned()) {
+            continue;
+        }
+        std::vector<uint> childIDs = getChildShootIDs(plantID, scast<uint>(shoot->ID));
+        if (!childIDs.empty()) {
+            hierarchy[scast<uint>(shoot->ID)] = std::move(childIDs);
+        }
+    }
+    return hierarchy;
+}
+
+std::vector<uint> PlantArchitecture::getTerminalShootIDs(uint plantID) const {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::getTerminalShootIDs): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    }
+
+    std::vector<uint> terminalIDs;
+
+    for (const std::shared_ptr<Shoot> &shoot: plant_instances.at(plantID).shoot_tree) {
+        // A pruned shell has no children but is not a tip of the plant -- it is not part of the plant at all.
+        if (shoot->isPruned()) {
+            continue;
+        }
+        if (getChildShootIDs(plantID, scast<uint>(shoot->ID)).empty()) {
+            terminalIDs.push_back(scast<uint>(shoot->ID));
+        }
+    }
+    return terminalIDs;
+}
+
+bool PlantArchitecture::isShootPruned(uint plantID, uint shootID) const {
+    if (plant_instances.find(plantID) == plant_instances.end()) {
+        helios_runtime_error("ERROR (PlantArchitecture::isShootPruned): Plant with ID of " + std::to_string(plantID) + " does not exist.");
+    } else if (plant_instances.at(plantID).shoot_tree.size() <= shootID) {
+        helios_runtime_error("ERROR (PlantArchitecture::isShootPruned): Shoot ID is out of range.");
+    }
+    return plant_instances.at(plantID).shoot_tree.at(shootID)->isPruned();
+}
+
 const std::shared_ptr<Shoot> &PlantArchitecture::getPlantShoot(uint plantID, uint shootID) const {
     if (plant_instances.find(plantID) == plant_instances.end()) {
         helios_runtime_error("ERROR (PlantArchitecture::getPlantShoot): Plant with ID of " + std::to_string(plantID) + " does not exist.");
@@ -4607,8 +4868,15 @@ float PlantArchitecture::getShootTaper(uint plantID, uint shootID) const {
         helios_runtime_error("ERROR (PlantArchitecture::getShootTaper): Shoot ID is out of range.");
     }
 
-    float r0 = plant_instances.at(plantID).shoot_tree.at(shootID)->shoot_internode_radii.front().front();
-    float r1 = plant_instances.at(plantID).shoot_tree.at(shootID)->shoot_internode_radii.back().back();
+    const std::shared_ptr<Shoot> &shoot = plant_instances.at(plantID).shoot_tree.at(shootID);
+
+    if (shoot->shoot_internode_radii.empty() || shoot->shoot_internode_radii.front().empty()) {
+        helios_runtime_error("ERROR (PlantArchitecture::getShootTaper): Shoot " + std::to_string(shootID) + " of plant " + std::to_string(plantID) +
+                             " has no internodes, so its taper is undefined. This shoot was pruned away - check PlantArchitecture::isShootPruned() before querying shoot geometry.");
+    }
+
+    float r0 = shoot->shoot_internode_radii.front().front();
+    float r1 = shoot->shoot_internode_radii.back().back();
 
     float taper = (r0 - r1) / r0;
     if (taper < 0) {
@@ -5087,8 +5355,55 @@ uint PlantArchitecture::duplicatePlantInstance(uint plantID, const helios::vec3 
 
     uint plantID_new = addPlantInstance(base_position, current_age);
 
-    // Copy the shoot parameters snapshot from the original plant to prevent parameter contamination
-    plant_instances.at(plantID_new).shoot_types_snapshot = plant_instances.at(plantID).shoot_types_snapshot;
+    // Carry over the per-plant configuration that is not recoverable from the shoot structure rebuilt
+    // below. addPlantInstance() gives the copy the PlantInstance defaults, so without this the duplicate
+    // of a library plant silently reverted to a 999-day maximum age, the "no phenology scheduled"
+    // thresholds, a "custom" name, and default carbon/nitrogen parameters -- growing quite differently
+    // from the plant it was copied from. Fields deliberately excluded are handled separately: the base
+    // position and current age are function arguments, the shoot tree is rebuilt below, and the
+    // attraction points need translating rather than copying.
+    {
+        const PlantInstance &source = plant_instances.at(plantID);
+        PlantInstance &copy = plant_instances.at(plantID_new);
+
+        copy.plant_name = source.plant_name;
+        copy.shoot_types_snapshot = source.shoot_types_snapshot;
+        copy.epicormic_shoot_probability_perlength_per_day = source.epicormic_shoot_probability_perlength_per_day;
+
+        // Phenological thresholds.
+        copy.dd_to_dormancy_break = source.dd_to_dormancy_break;
+        copy.dd_to_flower_initiation = source.dd_to_flower_initiation;
+        copy.dd_to_flower_opening = source.dd_to_flower_opening;
+        copy.dd_to_fruit_set = source.dd_to_fruit_set;
+        copy.dd_to_fruit_maturity = source.dd_to_fruit_maturity;
+        copy.dd_to_dormancy = source.dd_to_dormancy;
+        copy.max_leaf_lifespan = source.max_leaf_lifespan;
+        copy.is_evergreen = source.is_evergreen;
+
+        copy.max_age = source.max_age;
+
+        // Carbohydrate and nitrogen model configuration. The pools themselves are state rather than
+        // configuration and are left at their initial values, since the copy starts at current_age.
+        copy.carb_parameters = source.carb_parameters;
+        copy.stem_maintenance_respiration_rate = source.stem_maintenance_respiration_rate;
+        copy.root_maintenance_respiration_rate = source.root_maintenance_respiration_rate;
+        copy.nitrogen_parameters = source.nitrogen_parameters;
+
+        // Attraction points are absolute world coordinates anchored to the plant's base (the library
+        // builders add base_position to each one), so they are translated onto the new base rather than
+        // copied verbatim -- otherwise the duplicate would be steered toward the original's trellis.
+        copy.attraction_points_enabled = source.attraction_points_enabled;
+        copy.attraction_points.clear();
+        copy.attraction_points.reserve(source.attraction_points.size());
+        const vec3 base_position_shift = base_position - source.base_position;
+        for (const vec3 &point: source.attraction_points) {
+            copy.attraction_points.push_back(point + base_position_shift);
+        }
+        copy.attraction_cone_half_angle_rad = source.attraction_cone_half_angle_rad;
+        copy.attraction_cone_height = source.attraction_cone_height;
+        copy.attraction_weight = source.attraction_weight;
+        copy.attraction_obstacle_reduction_factor = source.attraction_obstacle_reduction_factor;
+    }
 
     if (plant_shoot_tree->empty()) {
         // no shoots to add
@@ -5116,7 +5431,12 @@ uint PlantArchitecture::duplicatePlantInstance(uint plantID, const helios::vec3 
                     shootID_new = addBaseStemShoot(plantID_new, 1, original_base_rotation + base_rotation, internode_radius, internode_length_max, internode_scale_factor_fraction, leaf_scale_factor_fraction, 0, shoot->shoot_type_label);
                 } else {
                     // child shoot
-                    uint parent_node = plant_shoot_tree->at(shoot->parent_shoot_ID)->parent_node_index;
+                    // The node at which THIS shoot attaches to its parent -- not the parent's own
+                    // attachment node on the grandparent, which is what this used to read. With the
+                    // latter, every branch on a plant whose shoots leave the trunk at different heights
+                    // was relocated onto a single wrong node, so the copy's architecture did not match
+                    // the original's.
+                    uint parent_node = shoot->parent_node_index;
                     uint parent_petiole_index = 0;
                     for (auto &petiole: phytomer->axillary_vegetative_buds) {
                         shootID_new = addChildShoot(plantID_new, shoot->parent_shoot_ID, parent_node, 1, original_base_rotation, internode_radius, internode_length_max, internode_scale_factor_fraction, leaf_scale_factor_fraction, 0,
@@ -5133,6 +5453,21 @@ uint PlantArchitecture::duplicatePlantInstance(uint plantID, const helios::vec3 
             for (uint petiole_index = 0; petiole_index < phytomer->petiole_objIDs.size(); petiole_index++) {
                 phytomer_new->setLeafScaleFraction(petiole_index, phytomer->current_leaf_scale_factor.at(petiole_index));
             }
+        }
+    }
+
+    // Match the source's dormancy state. Shoot::Shoot() constructs every shoot dormant, so a duplicate of
+    // an actively-growing plant came back dormant and stalled until its dormancy broke, while the plant it
+    // was copied from kept growing. Done after the whole tree is built, since the shoots are created
+    // incrementally above.
+    plant_instances.at(plantID_new).time_since_dormancy = plant_instances.at(plantID).time_since_dormancy;
+    const std::vector<std::shared_ptr<Shoot>> &source_shoot_tree = plant_instances.at(plantID).shoot_tree;
+    std::vector<std::shared_ptr<Shoot>> &new_shoot_tree = plant_instances.at(plantID_new).shoot_tree;
+    for (uint shootID = 0; shootID < new_shoot_tree.size() && shootID < source_shoot_tree.size(); shootID++) {
+        if (!source_shoot_tree.at(shootID)->isdormant && new_shoot_tree.at(shootID)->isdormant) {
+            new_shoot_tree.at(shootID)->breakDormancy();
+        } else if (source_shoot_tree.at(shootID)->isdormant && !new_shoot_tree.at(shootID)->isdormant) {
+            new_shoot_tree.at(shootID)->makeDormant();
         }
     }
 
@@ -5198,7 +5533,10 @@ void PlantArchitecture::disablePlantPhenology(uint plantID) {
     plant_instances.at(plantID).dd_to_flower_initiation = -1;
     plant_instances.at(plantID).dd_to_flower_opening = -1;
     plant_instances.at(plantID).dd_to_fruit_set = -1;
-    plant_instances.at(plantID).dd_to_fruit_maturity = -1;
+    // Not -1, despite the symmetry with the three stages above: dd_to_fruit_maturity is not gated on
+    // ">= 0.f" anywhere, it is only used as a divisor during fruit growth. See the PlantInstance
+    // declaration for the full rationale. 1e6 makes the fruit simply never mature.
+    plant_instances.at(plantID).dd_to_fruit_maturity = 1e6;
     plant_instances.at(plantID).dd_to_dormancy = 1e6;
 }
 
@@ -5541,8 +5879,12 @@ void PlantArchitecture::advanceTime(const std::vector<uint> &plantIDs, float tim
                     // Fruit Growth
                     for (auto &petiole: phytomer->floral_buds) {
                         for (auto &fbud: petiole) {
-                            // If the floral bud it in a 'fruiting' state, the fruit grows with time
-                            if (fbud.state == BUD_FRUITING && fbud.time_counter > 0) {
+                            // If the floral bud it in a 'fruiting' state, the fruit grows with time.
+                            // dd_to_fruit_maturity is a divisor here, so a non-positive value would give an
+                            // infinite or negative scale factor; guard rather than trust the call sites, since
+                            // setPlantPhenologicalThresholds() accepts any value and readPlantStructureXML()
+                            // feeds it whatever the file contains.
+                            if (fbud.state == BUD_FRUITING && fbud.time_counter > 0 && plant_instance.dd_to_fruit_maturity > 0) {
                                 // Save current scale for nitrogen model growth tracking
                                 fbud.previous_fruit_scale_factor = fbud.current_fruit_scale_factor;
                                 float scale = fmin(1, 0.25f + 0.75f * fbud.time_counter / plant_instance.dd_to_fruit_maturity);

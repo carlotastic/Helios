@@ -119,7 +119,8 @@ Now we configure the radiation model with RGB bands and lighting:
     radiation.copyRadiationBand("red", "blue");
 
     std::vector<std::string> bandlabels = {"red", "green", "blue"};
-    radiation.setDiffuseSpectrum( bandlabels, "solar_spectrum_ASTMG173");
+    radiation.setDiffuseSpectrum("solar_spectrum_ASTMG173");
+    radiation.setDiffuseSpectrumIntegral(100.f);
 ~~~~~~
 
 We create three radiation bands (red, green, blue) with identical scattering properties. The sun is positioned at a 45-degree elevation and azimuth angle to provide good lighting of the objects.
@@ -131,27 +132,15 @@ The radiation camera captures our synthetic scene. We configure it with appropri
 ~~~~~~{.cpp}
     std::string cameralabel = "bunnycam";
 
-    // Configure camera parameters
+    // Position camera to capture all objects in the scene
     vec3 camera_position = make_vec3(-0.01, 0.05, 0.6f);
     vec3 camera_lookat = make_vec3(0, 0.05, 0);
-    CameraProperties cameraproperties;
-    cameraproperties.camera_resolution = make_int2(1024, 1024);
-    cameraproperties.focal_plane_distance = 0.5;
-    cameraproperties.lens_diameter = 0.002f;
-    cameraproperties.FOV_aspect_ratio = 1;
-    cameraproperties.HFOV = 50.f;
 
-    // Add the camera to the radiation model
-    radiation.addRadiationCamera(cameralabel, bandlabels, camera_position, camera_lookat, cameraproperties, 100);
-
-    // Set camera spectral response to simulate iPhone camera
-    context.loadXML( "plugins/radiation/spectral_data/camera_spectral_library.xml", true);
-    radiation.setCameraSpectralResponse(cameralabel, "red", "iPhone12ProMAX_red");
-    radiation.setCameraSpectralResponse(cameralabel, "green","iPhone12ProMAX_green");
-    radiation.setCameraSpectralResponse(cameralabel, "blue", "iPhone12ProMAX_blue");
+    // Add the camera to the radiation model with 100 rays per pixel for quality
+    radiation.addRadiationCameraFromLibrary(cameralabel, "iPhone12ProMAX", camera_position, camera_lookat, 100);
 ~~~~~~
 
-The camera is positioned to capture all objects in the scene. We use iPhone spectral response curves to simulate realistic color capture.
+The camera is positioned to capture all objects in the scene. \ref RadiationModel::addRadiationCameraFromLibrary() "addRadiationCameraFromLibrary()" reads the camera's resolution, sensor size, focal length and measured spectral response from the camera library, so the individual camera properties and spectral response calls are not needed.
 
 \section tutorial12_rendering 6. Rendering and Export
 
@@ -163,7 +152,7 @@ Finally, we run the radiation model and export the results:
     radiation.runBand( bandlabels);
 
     // Process the image using standard pipeline
-    radiation.applyImageProcessingPipeline("bunnycam", "red", "green", "blue", 1, 1, 1, 1);
+    radiation.applyCameraImageCorrections(cameralabel, "red", "green", "blue", 1.2, 1, 1);
 
     // Save the rendered RGB image
     std::string image_file = radiation.writeCameraImage( cameralabel, bandlabels, "RGB", "../output/");
@@ -175,6 +164,10 @@ Finally, we run the radiation model and export the results:
     // Initialize visualizer
     Visualizer vis(1000);
     vis.displayImage("../output/bunnycam_RGB.jpeg");
+
+    // Display the same image with the exported bounding boxes overlaid, to check them by eye.
+    // The accompanying classes.txt is found automatically, so the boxes are labeled by name.
+    vis.displayImageWithBoundingBoxes("../output/bunnycam_RGB.jpeg", "../output/bunnycam_RGB.txt");
     
     // Auto-calibrate camera image using colorboard reference values with quality report
     std::string corrected_image = radiation.autoCalibrateCameraImage("bunnycam", "red", "green", "blue", "../output/auto_calibrated_bunnycam.jpeg", true);
@@ -182,9 +175,9 @@ Finally, we run the radiation model and export the results:
 
 \image html bunnycam_RGB.jpeg "Rendered RGB Image of the Scene" width=600
 
-The \ref helios::RadiationModel::writeImageBoundingBoxes() "writeImageBoundingBoxes()" and \ref helios::RadiationModel::writeImageSegmentationMasks() "writeImageSegmentationMasks()" functions export the object detection data in COCO JSON format, which is compatible with popular machine learning frameworks like detectron2, YOLO, and others.
+The \ref RadiationModel::writeImageBoundingBoxes() "writeImageBoundingBoxes()" function exports the object detection data in Ultralytics YOLO format: a text file named after the image, holding one `<class_ID> <x_center> <y_center> <width> <height>` line per box, alongside a `classes.txt` mapping class IDs to names. The \ref RadiationModel::writeImageSegmentationMasks() "writeImageSegmentationMasks()" function exports segmentation masks in COCO JSON format. Both are compatible with popular machine learning frameworks like detectron2, YOLO, and others.
 
-The \ref helios::RadiationModel::autoCalibrateCameraImage() "autoCalibrateCameraImage()" function performs automatic color calibration using the colorboard reference values we added earlier. This step corrects for any color biases in the simulated camera and produces a more color-accurate image. The `true` parameter enables a detailed quality report that shows the calibration accuracy.
+The \ref RadiationModel::autoCalibrateCameraImage() "autoCalibrateCameraImage()" function performs automatic color calibration using the colorboard reference values we added earlier. This step corrects for any color biases in the simulated camera and produces a more color-accurate image. The `true` parameter enables a detailed quality report that shows the calibration accuracy.
 
 \section tutorial12_output 7. Understanding the Output
 
@@ -192,7 +185,7 @@ This tutorial generates several important output files:
 
 - **bunnycam_RGB.jpeg**: The rendered RGB image of the scene
 - **auto_calibrated_bunnycam.jpeg**: Color-calibrated version of the RGB image using colorboard reference values
-- **bunnycam_boundingboxes.json**: COCO-format bounding boxes around detected objects
+- **bunnycam_RGB.txt**: YOLO-format bounding boxes around detected objects
 - **bunnycam_segmentation.json**: COCO-format segmentation masks for each object
 - **classes.txt**: Text file mapping class IDs to class names
 
@@ -201,17 +194,29 @@ The COCO JSON format includes:
 - Category definitions (class names and IDs) 
 - Annotation data (segmentation polygons, bounding boxes, areas, object IDs)
 
-\section tutorial12_visualization 8. Python Visualization
+\section tutorial12_visualization 8. Checking the Annotations
 
-The tutorial includes a Python script (`visualize_segmentation.py`) to visualize the segmentation results:
+The quickest way to check the exported annotations is to display them over the rendered image using the visualizer plug-in, which needs nothing beyond Helios itself:
 
-~~~~~~{.python}
-python3 visualize_segmentation.py --json output/bunnycam_segmentation.json
+~~~~~~{.cpp}
+   Visualizer vis(1000);
+
+   // Bounding boxes. The accompanying classes.txt is found automatically.
+   vis.displayImageWithBoundingBoxes( "../output/bunnycam_RGB.jpeg", "../output/bunnycam_RGB.txt" );
+
+   // Segmentation masks. Class names come from the COCO file itself.
+   vis.displayImageWithSegmentationMasks( "../output/bunnycam_RGB.jpeg", "../output/bunnycam_segmentation.json" );
 ~~~~~~
 
 \image html bunnycam_RGB_labeled.jpeg "RGB image with segmentation masks" width=600
 
-This script displays the original image alongside the same image with segmentation masks and bounding boxes overlayed, making it easy to verify the quality of the synthetic annotations.
+Each mask is drawn as a translucent filled polygon with its class name on a chip, colored per mask so that overlapping objects stay distinct. See \ref DisplaySegmentationMasks "Overlaying segmentation masks" for the full description, including how to change the fill opacity.
+
+The tutorial also includes a Python script (`visualize_segmentation.py`), which shows the original image side by side with the annotated one and requires numpy, matplotlib and PIL:
+
+~~~~~~{.python}
+python3 visualize_segmentation.py --json output/bunnycam_segmentation.json
+~~~~~~
 
 \section tutorial12_applications 9. Applications
 

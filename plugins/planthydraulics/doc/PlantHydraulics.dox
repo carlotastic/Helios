@@ -65,10 +65,10 @@ E_{plant} = \frac{1}{a_{plant}}\sum_{i=1}^n E_i a_i.
 Then, stem and root water potentials,
 \f$\psi_{stem}\f$ and \f$\psi_{root}\f$ (MPa), are solved for given \f$E_{plant}\f$ and soil water potential, \f$\psi_{soil}\f$, using
 \f[
-C(\psi_{root})\frac{d\psi_{root}}{dt} = K_{root}(\psi_{root}-\psi_{soil}) - K_{stem}(\psi_{stem}-\psi_{root})
+C(\psi_{root})\frac{d\psi_{root}}{dt} = K_{root}(\psi_{soil}-\psi_{root}) - K_{stem}(\psi_{root}-\psi_{stem})
 \f]
 \f[
-C(\psi_{stem})\frac{d\psi_{stem}}{dt} = K_{stem}(\psi_{stem}-\psi_{root}) - E_{plant},
+C(\psi_{stem})\frac{d\psi_{stem}}{dt} = K_{stem}(\psi_{root}-\psi_{stem}) - E_{plant},
 \f]
 where \f$C(\psi)\f$ and \f$K(\psi)\f$ are hydraulic capacitance and conductance, respectively, that depend on the
 current water status. When a timespan is specified, a backward Euler scheme is implemented to implicitly solve
@@ -96,15 +96,15 @@ Water potential (\f$\psi\f$, MPa) as function of relative water content (\f$w\f$
 potentials, turgor pressure (\f$p\f$, MPa) and osmotic potential (\f$\pi\f$, MPa),
 
 \f[
-\psi(w)=p(w)+\pi(w) = \pi_o \max\left(0,\frac{w-w_{tlp}}{1-w_{tlp}}\right)^\epsilon
- - \frac{\pi_o}{w},
+\psi(w)=p(w)+\pi(w) = -\pi_o \max\left(0,\frac{w-w_{tlp}}{1-w_{tlp}}\right)^\epsilon
+ + \frac{\pi_o}{w},
 \f]
 
 
 where turgor pressure is parameterized by a saturated turgor pressure equal to saturated osmotic pressure \f$-\pi_o\f$ at \f$w=1\f$,
 the relative water content at the turgor loss point, \f$w_{tlp}\f$ ([Sack et al. 2018](https://doi.org/10.1104/pp.17.01097)), and an empirical compartmental wall elasticity,
 \f$\epsilon\f$. Osmotic potential is given by the saturated osmotic pressure
-divided by relative water content, \f$\frac{-\pi_o}{w}\f$.
+divided by relative water content, \f$\frac{\pi_o}{w}\f$ (\f$\pi_o\f$ is itself negative).
 
 Currently osmotic potential at full turgor is given as a single parameter but it can be estimated or updated by the user using a
 relation parameterized by the moles of osmotica per area, \f$n_o\f$, and the saturated specific water content
@@ -139,7 +139,7 @@ Constants
 | ---------- | --------------------------------------------------------------------------------------------- | ----- | ----- |
 | \f$R\f$        | gas constant                                                                              | J mol\f$^{-1}\f$ K\f$^{-1}\f$ | 8.314 |
 | \f$\mu_w\f$    | molar mass of water                                                                       | g mol\f$^{-1}\f$ | 18.01 |
-| \f$\rho_w\f$   | density of water                                                                          | g m\f$^{-3}\f$ | 10\f$^{-6}\f$ |
+| \f$\rho_w\f$   | density of water                                                                          | g m\f$^{-3}\f$ | 10\f$^{6}\f$ |
 | \f$\Upsilon\f$ | Pa to MPa                                                                                 | MPa Pa\f$^{-1}\f$ | 10\f$^{-6}\f$ |
 
 \image html images/PressureVolumeCurveFits.png

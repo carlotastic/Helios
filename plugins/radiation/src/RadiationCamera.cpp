@@ -15,6 +15,7 @@ Copyright (C) 2016-2025 Brian Bailey
 */
 
 #include "RadiationModel.h"
+#include "annotation_io.h"
 #include "LensFlare.h"
 
 #include <queue>
@@ -44,14 +45,14 @@ void RadiationModel::addRadiationCamera(const std::string &camera_label, const s
     {
         helios::WarningAggregator warnings;
         warnings.setEnabled(message_flag);
-        for (const auto &band : band_label) {
+        for (const auto &band: band_label) {
             auto it = radiation_bands.find(band);
             if (it != radiation_bands.end() && it->second.scatteringDepth == 0) {
-                warnings.addWarning("camera_band_zero_scattering_depth",
-                                    "Camera '" + camera_label + "' is bound to band '" + band +
-                                    "' which has scatteringDepth == 0. Camera pixels for this band will be "
-                                    "zero because camera ray tracing relies on scattered flux. Call "
-                                    "setScatteringDepth(\"" + band + "\", >=1) before runBand().");
+                warnings.addWarning("camera_band_zero_scattering_depth", "Camera '" + camera_label + "' is bound to band '" + band +
+                                                                                 "' which has scatteringDepth == 0. Camera pixels for this band will be "
+                                                                                 "zero because camera ray tracing relies on scattered flux. Call "
+                                                                                 "setScatteringDepth(\"" +
+                                                                                 band + "\", >=1) before runBand().");
             }
         }
         warnings.report(std::cerr);
@@ -586,8 +587,7 @@ std::string RadiationModel::writeCameraImage(const std::string &camera, const st
 
         if (pixel_data_iterator == camera_pixel_data.end() || pixel_data_iterator->second.size() != size_t(camera_resolution.x) * size_t(camera_resolution.y)) {
             std::cout << "ERROR (RadiationModel::writeCameraImage): image data for camera " << camera << ", band " << band
-                      << " has not been created, or is stale because the camera resolution changed since it was last rendered. Call runBand() with band " << band
-                      << " after the camera was added. Skipping image write for this camera." << std::endl;
+                      << " has not been created, or is stale because the camera resolution changed since it was last rendered. Call runBand() with band " << band << " after the camera was added. Skipping image write for this camera." << std::endl;
             return "";
         }
 
@@ -1488,221 +1488,8 @@ void RadiationModel::writeNormDepthImage(const std::string &cameralabel, const s
 }
 
 // DEPRECATED
-void RadiationModel::writeImageBoundingBoxes(const std::string &cameralabel, const std::string &primitive_data_label, uint object_class_ID, const std::string &imagefile_base, const std::string &image_path, bool append_label_file, int frame) {
-
-    if (cameras.find(cameralabel) == cameras.end()) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes): Camera '" + cameralabel + "' does not exist.");
-    }
-
-    // Get image UUID labels
-    std::vector<uint> camera_UUIDs;
-    std::string global_data_label = "camera_" + cameralabel + "_pixel_UUID";
-    if (!context->doesGlobalDataExist(global_data_label.c_str())) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes): Pixel labels for camera '" + cameralabel + "' do not exist. Was the radiation model run to generate labels?");
-    }
-    context->getGlobalData(global_data_label.c_str(), camera_UUIDs);
-    std::vector<uint> pixel_UUIDs = camera_UUIDs;
-    int2 camera_resolution = cameras.at(cameralabel).resolution;
-
-    std::string frame_str;
-    if (frame >= 0) {
-        frame_str = std::to_string(frame);
-    }
-
-    std::string output_path = image_path;
-    if (!image_path.empty() && !validateOutputPath(output_path)) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes): Invalid image output directory '" + image_path + "'. Check that the path exists and that you have write permission.");
-    } else if (!isDirectoryPath(output_path)) {
-        helios_runtime_error("ERROR(RadiationModel::writeImageBoundingBoxes): Expected a directory path but got a file path for argument 'image_path'.");
-    }
-
-    std::ostringstream outfile;
-    outfile << output_path;
-
-    if (frame >= 0) {
-        outfile << cameralabel << "_" << imagefile_base << "_" << std::setw(5) << std::setfill('0') << frame_str << ".txt";
-    } else {
-        outfile << cameralabel << "_" << imagefile_base << ".txt";
-    }
-
-    // Output label image in ".txt" format
-    std::ofstream label_file;
-    if (append_label_file) {
-        label_file.open(outfile.str(), std::ios::out | std::ios::app);
-    } else {
-        label_file.open(outfile.str());
-    }
-
-    if (!label_file.is_open()) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes): Could not open file '" + outfile.str() + "'.");
-    }
-
-    std::map<int, vec4> pdata_bounds;
-
-    for (int j = 0; j < camera_resolution.y; j++) {
-        for (int i = 0; i < camera_resolution.x; i++) {
-            uint UUID = pixel_UUIDs.at(j * camera_resolution.x + i) - 1;
-            if (context->doesPrimitiveExist(UUID) && context->doesPrimitiveDataExist(UUID, primitive_data_label.c_str())) {
-
-                uint labeldata;
-
-                HeliosDataType datatype = context->getPrimitiveDataType(primitive_data_label.c_str());
-                if (datatype == HELIOS_TYPE_UINT) {
-                    uint labeldata_ui;
-                    context->getPrimitiveData(UUID, primitive_data_label.c_str(), labeldata_ui);
-                    labeldata = labeldata_ui;
-                } else if (datatype == HELIOS_TYPE_INT) {
-                    int labeldata_i;
-                    context->getPrimitiveData(UUID, primitive_data_label.c_str(), labeldata_i);
-                    labeldata = (uint) labeldata_i;
-                } else {
-                    continue;
-                }
-
-                if (pdata_bounds.find(labeldata) == pdata_bounds.end()) {
-                    pdata_bounds[labeldata] = make_vec4(1e6, -1, 1e6, -1);
-                }
-
-                if (i < pdata_bounds[labeldata].x) {
-                    pdata_bounds[labeldata].x = i;
-                }
-                if (i > pdata_bounds[labeldata].y) {
-                    pdata_bounds[labeldata].y = i;
-                }
-                if (j < pdata_bounds[labeldata].z) {
-                    pdata_bounds[labeldata].z = j;
-                }
-                if (j > pdata_bounds[labeldata].w) {
-                    pdata_bounds[labeldata].w = j;
-                }
-            }
-        }
-    }
-
-    for (auto box: pdata_bounds) {
-        vec4 bbox = box.second;
-        if (bbox.x == bbox.y || bbox.z == bbox.w) { // filter boxes of zeros size
-            continue;
-        }
-        label_file << object_class_ID << " " << (bbox.x + 0.5 * (bbox.y - bbox.x)) / float(camera_resolution.x) << " " << (bbox.z + 0.5 * (bbox.w - bbox.z)) / float(camera_resolution.y) << " " << std::setprecision(6) << std::fixed
-                   << (bbox.y - bbox.x) / float(camera_resolution.x) << " " << (bbox.w - bbox.z) / float(camera_resolution.y) << std::endl;
-    }
-
-    label_file.close();
-}
 
 // DEPRECATED
-void RadiationModel::writeImageBoundingBoxes_ObjectData(const std::string &cameralabel, const std::string &object_data_label, uint object_class_ID, const std::string &imagefile_base, const std::string &image_path, bool append_label_file, int frame) {
-
-    if (cameras.find(cameralabel) == cameras.end()) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes_ObjectData): Camera '" + cameralabel + "' does not exist.");
-    }
-
-    // Get image UUID labels
-    std::vector<uint> camera_UUIDs;
-    std::string global_data_label = "camera_" + cameralabel + "_pixel_UUID";
-    if (!context->doesGlobalDataExist(global_data_label.c_str())) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes_ObjectData): Pixel labels for camera '" + cameralabel + "' do not exist. Was the radiation model run to generate labels?");
-    }
-    context->getGlobalData(global_data_label.c_str(), camera_UUIDs);
-    std::vector<uint> pixel_UUIDs = camera_UUIDs;
-    int2 camera_resolution = cameras.at(cameralabel).resolution;
-
-    std::string frame_str;
-    if (frame >= 0) {
-        frame_str = std::to_string(frame);
-    }
-
-    std::string output_path = image_path;
-    if (!image_path.empty() && !validateOutputPath(output_path)) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes_ObjectData): Invalid image output directory '" + image_path + "'. Check that the path exists and that you have write permission.");
-    } else if (!isDirectoryPath(output_path)) {
-        helios_runtime_error("ERROR(RadiationModel::writeImageBoundingBoxes_ObjectData): Expected a directory path but got a file path for argument 'image_path'.");
-    }
-
-    std::ostringstream outfile;
-    outfile << output_path;
-
-    if (frame >= 0) {
-        outfile << cameralabel << "_" << imagefile_base << "_" << std::setw(5) << std::setfill('0') << frame_str << ".txt";
-    } else {
-        outfile << cameralabel << "_" << imagefile_base << ".txt";
-    }
-
-    // Output label image in ".txt" format
-    std::ofstream label_file;
-    if (append_label_file) {
-        label_file.open(outfile.str(), std::ios::out | std::ios::app);
-    } else {
-        label_file.open(outfile.str());
-    }
-
-    if (!label_file.is_open()) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes_ObjectData): Could not open file '" + outfile.str() + "'.");
-    }
-
-    std::map<int, vec4> pdata_bounds;
-
-    for (int j = 0; j < camera_resolution.y; j++) {
-        for (int i = 0; i < camera_resolution.x; i++) {
-            uint ii = camera_resolution.x - i - 1;
-            uint UUID = pixel_UUIDs.at(j * camera_resolution.x + ii) - 1;
-
-            if (!context->doesPrimitiveExist(UUID)) {
-                continue;
-            }
-
-            uint objID = context->getPrimitiveParentObjectID(UUID);
-
-            if (!context->doesObjectExist(objID) || !context->doesObjectDataExist(objID, object_data_label.c_str())) {
-                continue;
-            }
-
-            uint labeldata;
-
-            HeliosDataType datatype = context->getObjectDataType(object_data_label.c_str());
-            if (datatype == HELIOS_TYPE_UINT) {
-                uint labeldata_ui;
-                context->getObjectData(objID, object_data_label.c_str(), labeldata_ui);
-                labeldata = labeldata_ui;
-            } else if (datatype == HELIOS_TYPE_INT) {
-                int labeldata_i;
-                context->getObjectData(objID, object_data_label.c_str(), labeldata_i);
-                labeldata = (uint) labeldata_i;
-            } else {
-                continue;
-            }
-
-            if (pdata_bounds.find(labeldata) == pdata_bounds.end()) {
-                pdata_bounds[labeldata] = make_vec4(1e6, -1, 1e6, -1);
-            }
-
-            if (i < pdata_bounds[labeldata].x) {
-                pdata_bounds[labeldata].x = i;
-            }
-            if (i > pdata_bounds[labeldata].y) {
-                pdata_bounds[labeldata].y = i;
-            }
-            if (j < pdata_bounds[labeldata].z) {
-                pdata_bounds[labeldata].z = j;
-            }
-            if (j > pdata_bounds[labeldata].w) {
-                pdata_bounds[labeldata].w = j;
-            }
-        }
-    }
-
-    for (auto box: pdata_bounds) {
-        vec4 bbox = box.second;
-        if (bbox.x == bbox.y || bbox.z == bbox.w) { // filter boxes of zeros size
-            continue;
-        }
-        label_file << object_class_ID << " " << (bbox.x + 0.5 * (bbox.y - bbox.x)) / float(camera_resolution.x) << " " << (bbox.z + 0.5 * (bbox.w - bbox.z)) / float(camera_resolution.y) << " " << std::setprecision(6) << std::fixed
-                   << (bbox.y - bbox.x) / float(camera_resolution.x) << " " << (bbox.w - bbox.z) / float(camera_resolution.y) << std::endl;
-    }
-
-    label_file.close();
-}
 
 void RadiationModel::writeImageBoundingBoxes(const std::string &cameralabel, const std::string &primitive_data_label, const uint &object_class_ID, const std::string &image_file, const std::string &classes_txt_file, const std::string &image_path) {
     writeImageBoundingBoxes(cameralabel, std::vector<std::string>{primitive_data_label}, std::vector<uint>{object_class_ID}, image_file, classes_txt_file, image_path);
@@ -1738,11 +1525,6 @@ void RadiationModel::writeImageBoundingBoxes(const std::string &cameralabel, con
 
     std::string outfile_txt = output_path + std::filesystem::path(image_file).stem().string() + ".txt";
 
-    std::ofstream label_file(outfile_txt);
-
-    if (!label_file.is_open()) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes): Could not open output bounding box file '" + outfile_txt + "'.");
-    }
 
     // Map to store bounding boxes for each data label class combination
     std::map<std::pair<uint, uint>, vec4> pdata_bounds; // (class_id, label_value) -> bbox
@@ -1802,17 +1584,18 @@ void RadiationModel::writeImageBoundingBoxes(const std::string &cameralabel, con
         }
     }
 
+    std::vector<annotation::YOLOBox> yolo_boxes;
+    yolo_boxes.reserve(pdata_bounds.size());
     for (auto box: pdata_bounds) {
-        uint class_id = box.first.first;
         vec4 bbox = box.second;
-        if (bbox.x == bbox.y || bbox.z == bbox.w) { // filter boxes of zero size
-            continue;
-        }
-        label_file << class_id << " " << (bbox.x + 0.5 * (bbox.y - bbox.x)) / float(camera_resolution.x) << " " << (bbox.z + 0.5 * (bbox.w - bbox.z)) / float(camera_resolution.y) << " " << std::setprecision(6) << std::fixed
-                   << (bbox.y - bbox.x) / float(camera_resolution.x) << " " << (bbox.w - bbox.z) / float(camera_resolution.y) << std::endl;
+        annotation::YOLOBox yolo_box;
+        yolo_box.class_ID = box.first.first;
+        yolo_box.center = make_vec2((bbox.x + 0.5f * (bbox.y - bbox.x)) / float(camera_resolution.x), (bbox.z + 0.5f * (bbox.w - bbox.z)) / float(camera_resolution.y));
+        yolo_box.size = make_vec2((bbox.y - bbox.x) / float(camera_resolution.x), (bbox.w - bbox.z) / float(camera_resolution.y));
+        yolo_boxes.push_back(yolo_box);
     }
 
-    label_file.close();
+    annotation::writeYOLOBoxes(yolo_boxes, outfile_txt);
 
     std::ofstream classes_txt_stream(output_path + classes_txt_file);
     if (!classes_txt_stream.is_open()) {
@@ -1859,11 +1642,6 @@ void RadiationModel::writeImageBoundingBoxes_ObjectData(const std::string &camer
 
     std::string outfile_txt = output_path + std::filesystem::path(image_file).stem().string() + ".txt";
 
-    std::ofstream label_file(outfile_txt);
-
-    if (!label_file.is_open()) {
-        helios_runtime_error("ERROR (RadiationModel::writeImageBoundingBoxes_ObjectData): Could not open output bounding box file '" + outfile_txt + "'.");
-    }
 
     // Map to store bounding boxes for each data label class combination
     std::map<std::pair<uint, uint>, vec4> pdata_bounds; // (class_id, label_value) -> bbox
@@ -1932,17 +1710,18 @@ void RadiationModel::writeImageBoundingBoxes_ObjectData(const std::string &camer
         }
     }
 
+    std::vector<annotation::YOLOBox> yolo_boxes;
+    yolo_boxes.reserve(pdata_bounds.size());
     for (auto box: pdata_bounds) {
-        uint class_id = box.first.first;
         vec4 bbox = box.second;
-        if (bbox.x == bbox.y || bbox.z == bbox.w) { // filter boxes of zero size
-            continue;
-        }
-        label_file << class_id << " " << (bbox.x + 0.5 * (bbox.y - bbox.x)) / float(camera_resolution.x) << " " << (bbox.z + 0.5 * (bbox.w - bbox.z)) / float(camera_resolution.y) << " " << std::setprecision(6) << std::fixed
-                   << (bbox.y - bbox.x) / float(camera_resolution.x) << " " << (bbox.w - bbox.z) / float(camera_resolution.y) << std::endl;
+        annotation::YOLOBox yolo_box;
+        yolo_box.class_ID = box.first.first;
+        yolo_box.center = make_vec2((bbox.x + 0.5f * (bbox.y - bbox.x)) / float(camera_resolution.x), (bbox.z + 0.5f * (bbox.w - bbox.z)) / float(camera_resolution.y));
+        yolo_box.size = make_vec2((bbox.y - bbox.x) / float(camera_resolution.x), (bbox.w - bbox.z) / float(camera_resolution.y));
+        yolo_boxes.push_back(yolo_box);
     }
 
-    label_file.close();
+    annotation::writeYOLOBoxes(yolo_boxes, outfile_txt);
 
     std::ofstream classes_txt_stream(output_path + classes_txt_file);
     if (!classes_txt_stream.is_open()) {
@@ -1955,107 +1734,6 @@ void RadiationModel::writeImageBoundingBoxes_ObjectData(const std::string &camer
 }
 
 // Helper function to initialize or load existing COCO JSON structure and get image ID
-std::pair<nlohmann::json, int> RadiationModel::initializeCOCOJsonWithImageId(const std::string &filename, bool append_file, const std::string &cameralabel, const helios::int2 &camera_resolution, const std::string &image_file) {
-    nlohmann::json coco_json;
-    int image_id = 0;
-
-    if (append_file) {
-        std::ifstream existing_file(filename);
-        if (existing_file.is_open()) {
-            try {
-                existing_file >> coco_json;
-            } catch (const std::exception &e) {
-                coco_json.clear();
-            }
-            existing_file.close();
-        }
-    }
-
-    // Initialize JSON structure if empty
-    if (coco_json.empty()) {
-        coco_json["categories"] = nlohmann::json::array();
-        coco_json["images"] = nlohmann::json::array();
-        coco_json["annotations"] = nlohmann::json::array();
-    }
-
-    // Extract just the filename (no path) from the image file
-    std::filesystem::path image_path_obj(image_file);
-    std::string filename_only = image_path_obj.filename().string();
-
-    // Check if this image already exists in the JSON
-    bool image_exists = false;
-    for (const auto &img: coco_json["images"]) {
-        if (img["file_name"] == filename_only) {
-            image_id = img["id"];
-            image_exists = true;
-            break;
-        }
-    }
-
-    // If image doesn't exist, add it with a new unique ID
-    if (!image_exists) {
-        // Find the next available image ID
-        int max_image_id = -1;
-        for (const auto &img: coco_json["images"]) {
-            if (img["id"] > max_image_id) {
-                max_image_id = img["id"];
-            }
-        }
-        image_id = max_image_id + 1;
-
-        // Add the new image entry
-        nlohmann::json image_entry;
-        image_entry["id"] = image_id;
-        image_entry["file_name"] = filename_only;
-        image_entry["height"] = camera_resolution.y;
-        image_entry["width"] = camera_resolution.x;
-        coco_json["images"].push_back(image_entry);
-    }
-
-    return std::make_pair(coco_json, image_id);
-}
-
-// Helper function to initialize or load existing COCO JSON structure (backward compatibility)
-nlohmann::json RadiationModel::initializeCOCOJson(const std::string &filename, bool append_file, const std::string &cameralabel, const helios::int2 &camera_resolution, const std::string &image_file) {
-    return initializeCOCOJsonWithImageId(filename, append_file, cameralabel, camera_resolution, image_file).first;
-}
-
-// Helper function to add category to COCO JSON if it doesn't exist
-void RadiationModel::addCategoryToCOCO(nlohmann::json &coco_json, const std::vector<uint> &object_class_ID, const std::vector<std::string> &category_name) {
-    if (object_class_ID.size() != category_name.size()) {
-        helios_runtime_error("ERROR (RadiationModel::addCategoryToCOCO): The lengths of object_class_ID and category_name vectors must be the same.");
-    }
-
-    for (size_t i = 0; i < object_class_ID.size(); ++i) {
-        bool category_exists = false;
-        for (auto &cat: coco_json["categories"]) {
-            if (cat["id"] == object_class_ID[i]) {
-                category_exists = true;
-                break;
-            }
-        }
-        if (!category_exists) {
-            nlohmann::json category;
-            category["id"] = object_class_ID[i];
-            category["name"] = category_name[i];
-            category["supercategory"] = "none";
-            coco_json["categories"].push_back(category);
-        }
-    }
-}
-
-// Helper function to write COCO JSON with proper formatting
-void RadiationModel::writeCOCOJson(const nlohmann::json &coco_json, const std::string &filename) {
-    std::ofstream json_file(filename);
-    if (!json_file.is_open()) {
-        helios_runtime_error("ERROR (RadiationModel): Could not open file '" + filename + "'.");
-    }
-
-    // Use standard JSON formatting for now (can optimize array formatting later)
-    json_file << coco_json.dump(2) << std::endl;
-    json_file.close();
-}
-
 // Helper function to generate label masks from either primitive or object data
 std::map<int, std::vector<std::vector<bool>>> RadiationModel::generateLabelMasks(const std::string &cameralabel, const std::string &data_label, bool use_object_data) {
     std::vector<uint> camera_UUIDs;
@@ -2127,242 +1805,6 @@ std::map<int, std::vector<std::vector<bool>>> RadiationModel::generateLabelMasks
 }
 
 // Helper function to find starting boundary pixel (topmost-leftmost)
-std::pair<int, int> RadiationModel::findStartingBoundaryPixel(const std::vector<std::vector<bool>> &mask, const helios::int2 &camera_resolution) {
-    for (int j = 0; j < camera_resolution.y; j++) {
-        for (int i = 0; i < camera_resolution.x; i++) {
-            if (mask[j][i]) {
-                // Check if this pixel is on the boundary
-                for (int di = -1; di <= 1; di++) {
-                    for (int dj = -1; dj <= 1; dj++) {
-                        if (di == 0 && dj == 0)
-                            continue;
-                        int ni = i + di;
-                        int nj = j + dj;
-                        if (ni < 0 || ni >= camera_resolution.x || nj < 0 || nj >= camera_resolution.y || !mask[nj][ni]) {
-                            return {i, j}; // Found boundary pixel
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return {-1, -1}; // No boundary found
-}
-
-// Helper function to trace boundary using Moore neighborhood algorithm
-std::vector<std::pair<int, int>> RadiationModel::traceBoundaryMoore(const std::vector<std::vector<bool>> &mask, int start_x, int start_y, const helios::int2 &camera_resolution) {
-    std::vector<std::pair<int, int>> contour;
-
-    // 8-connected neighbors in clockwise order starting from East
-    int dx[] = {1, 1, 0, -1, -1, -1, 0, 1};
-    int dy[] = {0, 1, 1, 1, 0, -1, -1, -1};
-
-    int x = start_x, y = start_y;
-    int dir = 6; // Start looking West (opposite of East)
-
-    do {
-        contour.push_back({x, y});
-
-        // Look for next boundary pixel
-        int start_dir = (dir + 6) % 8; // Start looking 3 positions counter-clockwise from where we came
-        bool found = false;
-
-        for (int i = 0; i < 8; i++) {
-            int check_dir = (start_dir + i) % 8;
-            int nx = x + dx[check_dir];
-            int ny = y + dy[check_dir];
-
-            // Check if this neighbor is inside bounds and inside the mask
-            if (nx >= 0 && nx < camera_resolution.x && ny >= 0 && ny < camera_resolution.y && mask[ny][nx]) {
-                x = nx;
-                y = ny;
-                dir = check_dir;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
-            break; // No next boundary pixel found
-
-    } while (!(x == start_x && y == start_y) && contour.size() < camera_resolution.x * camera_resolution.y);
-
-    return contour;
-}
-
-// Helper function to trace boundary using simple connected components
-std::vector<std::pair<int, int>> RadiationModel::traceBoundarySimple(const std::vector<std::vector<bool>> &mask, int start_x, int start_y, const helios::int2 &camera_resolution) {
-    std::vector<std::pair<int, int>> contour;
-    std::set<std::pair<int, int>> visited_boundary;
-
-    // Use a simple approach: walk along the boundary
-    std::queue<std::pair<int, int>> boundary_queue;
-    boundary_queue.push({start_x, start_y});
-    visited_boundary.insert({start_x, start_y});
-
-    while (!boundary_queue.empty()) {
-        auto [x, y] = boundary_queue.front();
-        boundary_queue.pop();
-        contour.push_back({x, y});
-
-        // 8-connected neighbors
-        for (int di = -1; di <= 1; di++) {
-            for (int dj = -1; dj <= 1; dj++) {
-                if (di == 0 && dj == 0)
-                    continue;
-                int nx = x + di;
-                int ny = y + dj;
-
-                if (nx >= 0 && nx < camera_resolution.x && ny >= 0 && ny < camera_resolution.y && mask[ny][nx] && visited_boundary.find({nx, ny}) == visited_boundary.end()) {
-
-                    // Check if this pixel is on the boundary
-                    bool is_boundary = false;
-                    for (int ddi = -1; ddi <= 1; ddi++) {
-                        for (int ddj = -1; ddj <= 1; ddj++) {
-                            if (ddi == 0 && ddj == 0)
-                                continue;
-                            int nnx = nx + ddi;
-                            int nny = ny + ddj;
-                            if (nnx < 0 || nnx >= camera_resolution.x || nny < 0 || nny >= camera_resolution.y || !mask[nny][nnx]) {
-                                is_boundary = true;
-                                break;
-                            }
-                        }
-                        if (is_boundary)
-                            break;
-                    }
-
-                    if (is_boundary) {
-                        boundary_queue.push({nx, ny});
-                        visited_boundary.insert({nx, ny});
-                    }
-                }
-            }
-        }
-    }
-
-    return contour;
-}
-
-// Helper function to generate annotations from label masks
-std::vector<std::map<std::string, std::vector<float>>> RadiationModel::generateAnnotationsFromMasks(const std::map<int, std::vector<std::vector<bool>>> &label_masks, uint object_class_ID, const helios::int2 &camera_resolution, int image_id) {
-    std::vector<std::map<std::string, std::vector<float>>> annotations;
-    int annotation_id = 0;
-
-    for (const auto &label_pair: label_masks) {
-        int label_value = label_pair.first;
-        const auto &mask = label_pair.second;
-
-        // Create a visited mask for connected components
-        std::vector<std::vector<bool>> visited(camera_resolution.y, std::vector<bool>(camera_resolution.x, false));
-
-        // Find all connected components for this label
-        for (int j = 0; j < camera_resolution.y; j++) {
-            for (int i = 0; i < camera_resolution.x; i++) {
-                if (mask[j][i] && !visited[j][i]) {
-                    // Find boundary pixel for this component
-                    int boundary_i = i, boundary_j = j;
-                    bool is_boundary = false;
-
-                    // Check if this pixel is on the boundary
-                    for (int di = -1; di <= 1; di++) {
-                        for (int dj = -1; dj <= 1; dj++) {
-                            int ni = i + di;
-                            int nj = j + dj;
-                            if (ni < 0 || ni >= camera_resolution.x || nj < 0 || nj >= camera_resolution.y || !mask[nj][ni]) {
-                                is_boundary = true;
-                                boundary_i = i;
-                                boundary_j = j;
-                                break;
-                            }
-                        }
-                        if (is_boundary)
-                            break;
-                    }
-
-                    if (is_boundary) {
-                        // First, mark all pixels in this connected component using flood fill
-                        std::stack<std::pair<int, int>> stack;
-                        std::vector<std::pair<int, int>> component_pixels;
-                        stack.push({i, j});
-                        visited[j][i] = true;
-
-                        int min_x = i, max_x = i, min_y = j, max_y = j;
-                        int area = 0;
-
-                        while (!stack.empty()) {
-                            auto [ci, cj] = stack.top();
-                            stack.pop();
-                            area++;
-                            component_pixels.push_back({ci, cj});
-
-                            min_x = std::min(min_x, ci);
-                            max_x = std::max(max_x, ci);
-                            min_y = std::min(min_y, cj);
-                            max_y = std::max(max_y, cj);
-
-                            // Check 4-connected neighbors
-                            for (int di = -1; di <= 1; di++) {
-                                for (int dj = -1; dj <= 1; dj++) {
-                                    if (abs(di) + abs(dj) != 1)
-                                        continue; // Only 4-connected
-                                    int ni = ci + di;
-                                    int nj = cj + dj;
-                                    if (ni >= 0 && ni < camera_resolution.x && nj >= 0 && nj < camera_resolution.y && mask[nj][ni] && !visited[nj][ni]) {
-                                        stack.push({ni, nj});
-                                        visited[nj][ni] = true;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Now trace the boundary of this component
-                        auto start_pixel = findStartingBoundaryPixel(mask, camera_resolution);
-                        bool is_boundary_start = false;
-
-                        if (start_pixel.first >= min_x && start_pixel.first <= max_x && start_pixel.second >= min_y && start_pixel.second <= max_y) {
-                            is_boundary_start = true;
-                        }
-
-                        if (is_boundary_start) {
-                            // Try Moore neighborhood boundary tracing first
-                            auto contour = traceBoundaryMoore(mask, start_pixel.first, start_pixel.second, camera_resolution);
-
-                            // If Moore tracing didn't work well, fall back to simple boundary collection
-                            if (contour.size() < 10) {
-                                contour = traceBoundarySimple(mask, start_pixel.first, start_pixel.second, camera_resolution);
-                            }
-
-                            if (contour.size() >= 3) {
-                                // Create annotation
-                                std::map<std::string, std::vector<float>> annotation;
-                                annotation["id"] = {(float) annotation_id++};
-                                annotation["image_id"] = {(float) image_id};
-                                annotation["category_id"] = {(float) object_class_ID};
-                                annotation["bbox"] = {(float) min_x, (float) min_y, (float) (max_x - min_x), (float) (max_y - min_y)};
-                                annotation["area"] = {(float) area};
-                                annotation["iscrowd"] = {0.0f};
-
-                                // Convert contour to segmentation format (flatten coordinates)
-                                std::vector<float> segmentation;
-                                for (const auto &point: contour) {
-                                    segmentation.push_back((float) point.first); // x coordinate
-                                    segmentation.push_back((float) point.second); // y coordinate
-                                }
-                                annotation["segmentation"] = segmentation;
-
-                                annotations.push_back(annotation);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return annotations;
-}
-
 void RadiationModel::writeImageSegmentationMasks(const std::string &cameralabel, const std::string &primitive_data_label, const uint &object_class_ID, const std::string &json_filename, const std::string &image_file,
                                                  const std::vector<std::string> &data_attribute_labels, bool append_file) {
     writeImageSegmentationMasks(cameralabel, std::vector<std::string>{primitive_data_label}, std::vector<uint>{object_class_ID}, json_filename, image_file, data_attribute_labels, append_file);
@@ -2411,10 +1853,10 @@ void RadiationModel::writeImageSegmentationMasks(const std::string &cameralabel,
 
     // Write annotations to JSON file
     int2 camera_resolution = cameras.at(cameralabel).resolution;
-    auto coco_json_pair = initializeCOCOJsonWithImageId(outfile, append_file, cameralabel, camera_resolution, image_file);
+    auto coco_json_pair = annotation::initializeCOCOJson(outfile, append_file, camera_resolution, image_file);
     nlohmann::json coco_json = coco_json_pair.first;
     int image_id = coco_json_pair.second;
-    addCategoryToCOCO(coco_json, object_class_ID, primitive_data_label);
+    annotation::addCOCOCategory(coco_json, object_class_ID, primitive_data_label);
 
     // Check which data_attribute_labels exist in primitive or object data
     struct AttributeInfo {
@@ -2460,7 +1902,7 @@ void RadiationModel::writeImageSegmentationMasks(const std::string &cameralabel,
         std::map<int, std::vector<std::vector<bool>>> label_masks = generateLabelMasks(cameralabel, primitive_data_label[i], false);
 
         // Generate annotations from masks using helper function
-        std::vector<std::map<std::string, std::vector<float>>> annotations = generateAnnotationsFromMasks(label_masks, object_class_ID[i], camera_resolution, image_id);
+        std::vector<std::map<std::string, std::vector<float>>> annotations = annotation::maskToAnnotations(label_masks, object_class_ID[i], camera_resolution, image_id);
 
         // Calculate mean attribute values for each mask if requested
         std::vector<std::map<std::string, double>> mean_attribute_values_per_component;
@@ -2484,10 +1926,15 @@ void RadiationModel::writeImageSegmentationMasks(const std::string &cameralabel,
                                 stack.pop();
                                 component_pixels.push_back({ci, cj});
 
-                                // Check 4-connected neighbors
+                                // Check 8-connected neighbors. This must match the connectivity used to build the
+                                // annotations themselves (see annotation::maskToAnnotations), because the attribute
+                                // values computed here are paired with those annotations by index. A 4-connected
+                                // search splits a diagonal chain of pixels into one component per pixel while the
+                                // annotation pass walks the whole chain as one object, so the two lists fall out of
+                                // step and each annotation receives another object's values.
                                 for (int di = -1; di <= 1; di++) {
                                     for (int dj = -1; dj <= 1; dj++) {
-                                        if (abs(di) + abs(dj) != 1)
+                                        if (di == 0 && dj == 0)
                                             continue;
                                         int ni = ci + di;
                                         int nj = cj + dj;
@@ -2623,7 +2070,7 @@ void RadiationModel::writeImageSegmentationMasks(const std::string &cameralabel,
     }
 
     // Write JSON to file
-    writeCOCOJson(coco_json, outfile);
+    annotation::writeCOCOJson(coco_json, outfile);
 }
 
 void RadiationModel::writeImageSegmentationMasks_ObjectData(const std::string &cameralabel, const std::string &object_data_label, const uint &object_class_ID, const std::string &json_filename, const std::string &image_file,
@@ -2674,10 +2121,10 @@ void RadiationModel::writeImageSegmentationMasks_ObjectData(const std::string &c
 
     // Write annotations to JSON file
     int2 camera_resolution = cameras.at(cameralabel).resolution;
-    auto coco_json_pair = initializeCOCOJsonWithImageId(outfile, append_file, cameralabel, camera_resolution, image_file);
+    auto coco_json_pair = annotation::initializeCOCOJson(outfile, append_file, camera_resolution, image_file);
     nlohmann::json coco_json = coco_json_pair.first;
     int image_id = coco_json_pair.second;
-    addCategoryToCOCO(coco_json, object_class_ID, object_data_label);
+    annotation::addCOCOCategory(coco_json, object_class_ID, object_data_label);
 
     // Check which data_attribute_labels exist in primitive or object data
     struct AttributeInfo {
@@ -2783,11 +2230,12 @@ void RadiationModel::writeImageSegmentationMasks_ObjectData(const std::string &c
                                 min_y = std::min(min_y, cj);
                                 max_y = std::max(max_y, cj);
 
-                                // Check 4-connected neighbors
+                                // Check 8-connected neighbors. This must match the connectivity of the boundary tracers below, which are 8-connected: a 4-connected fill would split a diagonal chain of pixels into a
+                                // separate component per pixel, while the tracer would walk the whole chain as one object.
                                 for (int di = -1; di <= 1; di++) {
                                     for (int dj = -1; dj <= 1; dj++) {
-                                        if (abs(di) + abs(dj) != 1)
-                                            continue; // Only 4-connected
+                                        if (di == 0 && dj == 0)
+                                            continue;
                                         int ni = ci + di;
                                         int nj = cj + dj;
                                         if (ni >= 0 && ni < camera_resolution.x && nj >= 0 && nj < camera_resolution.y && mask[nj][ni] && !visited[nj][ni]) {
@@ -2798,21 +2246,19 @@ void RadiationModel::writeImageSegmentationMasks_ObjectData(const std::string &c
                                 }
                             }
 
-                            // Now trace the boundary of this component
-                            auto start_pixel = findStartingBoundaryPixel(mask, camera_resolution);
-                            bool is_boundary_start = false;
+                            // Now trace the boundary of this component. The trace runs over a mask holding only this component, so that its start pixel is guaranteed to belong to it and the walk cannot
+                            // cross into a different component that touches it diagonally. Searching the whole label mask for a start pixel instead would return the same pixel for every component,
+                            // which silently dropped every component but the one containing it.
+                            const std::vector<std::vector<bool>> component_mask = annotation::buildComponentMask(component_pixels, camera_resolution);
+                            auto start_pixel = annotation::findStartingBoundaryPixel(component_mask, camera_resolution);
 
-                            if (start_pixel.first >= min_x && start_pixel.first <= max_x && start_pixel.second >= min_y && start_pixel.second <= max_y) {
-                                is_boundary_start = true;
-                            }
-
-                            if (is_boundary_start) {
+                            if (start_pixel.first >= 0) {
                                 // Try Moore neighborhood boundary tracing first
-                                auto contour = traceBoundaryMoore(mask, start_pixel.first, start_pixel.second, camera_resolution);
+                                auto contour = annotation::traceBoundaryMoore(component_mask, start_pixel.first, start_pixel.second, camera_resolution);
 
                                 // If Moore tracing didn't work well, fall back to simple boundary collection
                                 if (contour.size() < 10) {
-                                    contour = traceBoundarySimple(mask, start_pixel.first, start_pixel.second, camera_resolution);
+                                    contour = annotation::traceBoundarySimple(component_mask, start_pixel.first, start_pixel.second, camera_resolution);
                                 }
 
                                 if (contour.size() >= 3) {
@@ -2931,10 +2377,15 @@ void RadiationModel::writeImageSegmentationMasks_ObjectData(const std::string &c
                                 auto [ci, cj] = stack.top();
                                 stack.pop();
 
-                                // Check 4-connected neighbors
+                                // Check 8-connected neighbors. This must match the connectivity used to build the
+                                // annotations themselves (see annotation::maskToAnnotations), because the attribute
+                                // values computed here are paired with those annotations by index. A 4-connected
+                                // search splits a diagonal chain of pixels into one component per pixel while the
+                                // annotation pass walks the whole chain as one object, so the two lists fall out of
+                                // step and each annotation receives another object's values.
                                 for (int di = -1; di <= 1; di++) {
                                     for (int dj = -1; dj <= 1; dj++) {
-                                        if (abs(di) + abs(dj) != 1)
+                                        if (di == 0 && dj == 0)
                                             continue;
                                         int ni = ci + di;
                                         int nj = cj + dj;
@@ -2953,7 +2404,7 @@ void RadiationModel::writeImageSegmentationMasks_ObjectData(const std::string &c
     }
 
     // Write JSON to file
-    writeCOCOJson(coco_json, outfile);
+    annotation::writeCOCOJson(coco_json, outfile);
 }
 
 void RadiationModel::setPadValue(const std::string &cameralabel, const std::vector<std::string> &bandlabels, const std::vector<float> &padvalues) {
@@ -4616,9 +4067,7 @@ std::string RadiationModel::writeCameraMetadataFile(const std::string &camera_la
     // Always include image_processing section with color_space
     const auto &img_proc = metadata.image_processing;
     j["image_processing"]["exposure_gain"] = format_float(img_proc.exposure_gain, 4);
-    j["image_processing"]["white_balance_factors"] = {format_float(img_proc.white_balance_factors.x, 4),
-                                                      format_float(img_proc.white_balance_factors.y, 4),
-                                                      format_float(img_proc.white_balance_factors.z, 4)};
+    j["image_processing"]["white_balance_factors"] = {format_float(img_proc.white_balance_factors.x, 4), format_float(img_proc.white_balance_factors.y, 4), format_float(img_proc.white_balance_factors.z, 4)};
     j["image_processing"]["saturation_adjustment"] = format_float(img_proc.saturation_adjustment, 2);
     j["image_processing"]["brightness_adjustment"] = format_float(img_proc.brightness_adjustment, 2);
     j["image_processing"]["contrast_adjustment"] = format_float(img_proc.contrast_adjustment, 2);

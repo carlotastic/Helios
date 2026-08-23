@@ -103,6 +103,15 @@ public:
     //! Clear the list of modified primitives
     void clearDirtyUUIDs();
 
+    //! Returns true if the geometry buffers must be re-uploaded to the GPU even though no
+    //! individual primitive is marked dirty
+    /**
+     * Set by \ref clearAllGeometry(), which removes every primitive at once. Removal leaves no
+     * dirty UUIDs behind to signal the change, so without this flag the GPU-side buffers would
+     * retain -- and keep rendering -- the geometry that was just cleared.
+     */
+    [[nodiscard]] bool doesBufferNeedFullUpdate() const;
+
     [[nodiscard]] bool doesGeometryExist(size_t UUID) const;
 
     [[nodiscard]] std::vector<size_t> getAllGeometryIDs() const;
@@ -468,6 +477,9 @@ private:
     std::unordered_map<VisualizerGeometryType, std::vector<float>> size_data;
 
     std::unordered_set<size_t> dirty_UUIDs;
+
+    //! Set when all geometry is cleared at once, which leaves no dirty UUIDs to signal the change
+    bool buffer_needs_full_update = false;
 
     size_t deleted_primitive_count = 0;
 

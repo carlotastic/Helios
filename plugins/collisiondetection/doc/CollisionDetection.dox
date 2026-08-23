@@ -416,7 +416,7 @@ If you are using a PC, it is likely you will need to increase the GPU timeout in
 
  **Issue**: Ray tracing produces no hits when geometry is present
  - **Solution**: Ensure ray directions are normalized and max_distance is positive (or negative for infinite)
- - **Validation**: Check \ref HitResult::hit field and verify ray parameters
+ - **Validation**: Check \ref CollisionDetection::HitResult::hit "HitResult::hit" field and verify ray parameters
 
  \subsection CDPerformanceTips Performance Guidelines
 

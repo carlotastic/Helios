@@ -509,6 +509,11 @@ void PlantArchitecture::writePlantStructureXML(uint plantID, const std::string &
     output_xml << "\t\t<max_leaf_lifespan> " << plant_instances.at(plantID).max_leaf_lifespan << " </max_leaf_lifespan>" << std::endl;
     output_xml << "\t\t<is_evergreen> " << plant_instances.at(plantID).is_evergreen << " </is_evergreen>" << std::endl;
 
+    // Maximum age, beyond which advanceTime() stops growing the plant. Like the thresholds above it is
+    // not derivable from the shoot structure, so without this tag a plant written and read back would
+    // silently revert to the PlantInstance default of 999. Optional on read, so older files still load.
+    output_xml << "\t\t<max_age> " << plant_instances.at(plantID).max_age << " </max_age>" << std::endl;
+
     for (auto &shoot: plant_instances.at(plantID).shoot_tree) {
 
         output_xml << "\t\t<shoot ID=\"" << shoot->ID << "\">" << std::endl;
@@ -989,6 +994,14 @@ std::vector<uint> PlantArchitecture::readPlantStructureXML(const std::string &fi
             }
 
             setPlantPhenologicalThresholds(plantID, dd_to_dormancy_break, dd_to_flower_initiation, dd_to_flower_opening, dd_to_fruit_set, dd_to_fruit_maturity, dd_to_dormancy, max_leaf_lifespan, is_evergreen);
+        }
+
+        // Checked independently of the thresholds above, so that a file carrying only max_age still
+        // restores it. Absent -- as in any file written before the tag existed -- the plant keeps the
+        // PlantInstance default.
+        if (plant.child("max_age")) {
+            node_string = "max_age";
+            setPlantMaxAge(plantID, parse_xml_tag_float(plant.child(node_string.c_str()), node_string, "PlantArchitecture::readPlantStructureXML"));
         }
 
         int current_shoot_ID;

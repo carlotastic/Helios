@@ -32,7 +32,7 @@ For these latter two bands, we will also calculate the fraction of incoming radi
 
 Now that we have the solar position and flux values for each of our radiation bands, we can initialize the RadiationModel class.
 
-We will then create the sun source in our simulation using the solar position value that we determined in the previous step as a pointer in the RadiationModel::addsolar_positionSphereRadiationSource() function. We will also add in the three bands that we previously defined using RadiationModel::addRadiationBand(). For the PAR and NIR bands we will disable emission because terrestrial objects do not emit radiation in these bands. We will set the total flux coming from the sun and from diffuse radiation separately for these bands using RadiationModel::setSourceFlux() and RadiationModel::setDiffuseRadiationFlux(), respectively, and will use RadiationModel::setScatteringDepth() equal to 3 in order to track each ray through reflection and transmission after it has intercepted with 3 surfaces in the context geometry.
+We will then create the sun source in our simulation using the solar position value that we determined in the previous step as a pointer in the RadiationModel::addSunSphereRadiationSource() function. We will also add in the three bands that we previously defined using RadiationModel::addRadiationBand(). For the PAR and NIR bands we will disable emission because terrestrial objects do not emit radiation in these bands. We will set the total flux coming from the sun and from diffuse radiation separately for these bands using RadiationModel::setSourceFlux() and RadiationModel::setDiffuseRadiationFlux(), respectively, and will use RadiationModel::setScatteringDepth() equal to 3 in order to track each ray through reflection and transmission after it has intercepted with 3 surfaces in the context geometry.
 
 Next, we will call RadiationModel::enforcePeriodicBoundary("xy"), which will treat the context geometry as though it repeats infinitely in x and y dimensions (e.g. the canopy geometry that we created will be surrounded on all sides by an identical canopy). We will then set the radiation properties of the primitives in our geometry. We will set the reflectivity and transmissivity radiation in both PAR and NIR bands for leaf UUIDs. Ground UUIDs need only have reflectivity set, as they will not transmit light. We will also set the ground UUIDs "twosided_flag" to 0 because atmospheric radiation will only be intercepted on the top.
 
@@ -73,7 +73,7 @@ Once we have completed our loop, we can divide our overall canopy assimilation r
 
 \section tutorial14_visualization 12. Visualization
 
-We can wrap up by creating an hourly visualization that will show the 3D variation of WUE throughout our canopy using the visualizer plugin. After initializing the plugin, we just need to set the Visualizer::setContextPrimitivesByData() function to the WUE primitive data that we assigned during the previous step.
+We can wrap up by creating an hourly visualization that will show the 3D variation of WUE throughout our canopy using the visualizer plugin. After initializing the plugin, we just need to set the Visualizer::colorContextPrimitivesByData() function to the WUE primitive data that we assigned during the previous step.
 
 \section tutorial14_code Code
 
@@ -233,8 +233,8 @@ The code below gives a full example of the above steps. Note that this code requ
          context.setTime(time);
 
          // this will query these timseries variables based on the date and time set in the Context
-         float air_temperature = context.queryTimeseriesData("air_temperature"); // degrees C
-         float air_humidity = context.queryTimeseriesData("humidity"); // Percent
+         float air_temperature = context.queryTimeseriesData("air_temperature"); // Kelvin
+         float air_humidity = context.queryTimeseriesData("humidity"); // relative humidity, fraction (0-1)
          float wind_speed = context.queryTimeseriesData("wind_speed"); // m/s
 
          // update our primitive data values on each timestep based on timeseries data

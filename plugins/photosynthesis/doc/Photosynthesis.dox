@@ -238,13 +238,13 @@ In the Photosynthesis Plugin, the Arrhenius form will be assumed as it requires 
 | Almond             | 72.6         | 144.2       | 6.4        | 0.2       | 0.094    | 0        | 27.3                 | 315.3            | 478.4                | 64.1                | 314.9           | 508.4               | 37.1               | 311.3          | 477.9              |
 | California Bay     | 97.5         | 193         | 3.3        | 0.1       | 0.037    | 0        | 49.1                 | 308.6            | 505.8                | 34                  | 308.5           | 456.7               | 0.1                | 309.4          | 477.5              |
 | Elderberry         | 37.7         | 149.7       | 7.3        | 1.3       | 0.202    | 0.472    | 66                   | 319.4            | 496                  | 24.5                | 314.8           | 492.9               | 33.6               | 314.5          | 497.5              |
-| Grape              | 74.5         | 180.2       | 7.7        | 1.3       | 0.304    | 0        | 76.1                 | 318.8            | 499.8                | 23                  | 313.8           | 502.3               | 24                 | 314.6          | 496.4              |
+| Grape              | 74.5         | 180.2       | 7.7        | 1.3       | 0.304    | 0.06     | 76.1                 | 318.8            | 499.8                | 23                  | 313.8           | 502.3               | 24                 | 314.6          | 496.4              |
 | Maple              | 96.4         | 168         | 2.7        | 0.1       | 0.077    | 0        | 48.9                 | 307.1            | 505                  | 8.5                 | 304.7           | 476.7               | 32.1               | 308.3          | 471.6              |
 | Olive              | 75.9         | 170.4       | 8.3        | 1.9       | 0.398    | 0        | 55.4                 | 315.2            | 497                  | 32.2                | 312.5           | 493.4               | 37.2               | 311.7          | 498.9              |
 | Pistachio          | 101.8        | 223         | 9.8        | 1.5       | 0.216    | 0.65     | 56.5                 | 316.6            | 483.1                | 27.7                | 314.6           | 458.5               | 39.9               | 315.4          | 494.3              |
 | Toyon              | 52.8         | 142.4       | 6.6        | 0.8       | 0.29     | 0.532    | 42.1                 | 315.1            | 483                  | 9                   | 313             | 486.2               | 14                 | 314.8          | 493.8              |
 | Walnut             | 81.6         | 201.9       | 10.2       | 0.9       | 0.362    | 0        | 85.3                 | 316.5            | 500.6                | 41.4                | 308.6           | 308.2               | 21.9               | 310.4          | 434.9              |
-| Redbud             | 68.5         | 132.4       | 6.6        | 0.8       | 0.41     | 0        | 66.6                 | 315.1            | 496                  | 41.2                | 313.1           | 474                 | 34.3               | 312.8          | 463.2              |
+| Redbud             | 68.5         | 132.4       | 6.6        | 0.8       | 0.41     | 0.04     | 66.6                 | 315.1            | 496                  | 41.2                | 313.1           | 474                 | 34.3               | 312.8          | 463.2              |
 | Apple              | 101.08       | 167.03      | --         | 3.00      | 0.432    | 0        | 65.33                | --               | --                   | 47.62               | --              | --                  | --                 | --             | --                 |
 | Cherry             | 75.65        | 129.06      | --         | 2.12      | 0.404    | 0        | 65.33                | --               | --                   | 48.49               | --              | --                  | --                 | --             | --                 |
 | Pear               | 107.69       | 176.71      | --         | 1.51      | 0.274    | 0        | 65.33                | --               | --                   | 46.04               | --              | --                  | --                 | --             | --                 |
@@ -350,7 +350,7 @@ photo_model.run();
 
    \f$f_L(i) = \dfrac{i}{\theta+i}\f$,
 
-   where \f$\theta\f$ is the light response curvature.
+   where \f$i\f$ is the photosynthetic photon flux density (PPFD, \f$\mu\f$mol/m\f$^2\f$-s) and \f$\theta\f$ is the light response curvature, in the same units. The model reads the absorbed PAR flux from the primitive data "radiation_flux_PAR" in W/m\f$^2\f$ and converts it to PPFD internally (multiplying by 4.57), so \f$\theta\f$ must be specified on a PPFD basis.
 
    \subsection TempResponse Temperature Response
 
@@ -364,7 +364,7 @@ photo_model.run();
 
    The "dark" respiration rate \f$R_d\f$ is assumed to increase exponentially with temperature following the Arrhenius equation (and assumed not to vary with ambient CO<sub>2</sub> concentration).  Thus, the dark respiration rate is calculated simply as
 
-   \f$R_d = R\sqrt{T_s}\mathrm{exp}\left(-E_R/(T_s+273)\right)\f$,
+   \f$R_d = R\sqrt{T_s-273}\,\mathrm{exp}\left(-E_R/T_s\right)\f$,
 
    where \f$R\f$ and \f$E_R\f$ are parameters, and temperature is in Kelvin.
 
@@ -392,7 +392,7 @@ photo_model.run();
 
    <table>
    <tr><th>Variable</th><th>Units</th><th>Description</th></tr>
-   <tr><td>\f$i\f$</td><td>W/m<sup>2</sup></td><td>Photosynthetic radiation energy flux.</td></tr>
+   <tr><td>\f$i\f$</td><td>\f$\mu\f$mol/m<sup>2</sup>-sec</td><td>Photosynthetic photon flux density (PPFD). Note that the model reads the primitive data <code>radiation_flux_PAR</code> in W/m<sup>2</sup> and converts it internally to PPFD by multiplying by 4.57 before it is used in the equations below.</td></tr>
    <tr><td>\f$T_s\f$</td><td>Kelvin</td><td>Surface temperature.</td></tr>
    <tr><td>\f$C_{amb}\f$</td><td>\f$\mu\f$mol CO<sub>2</sub>/mol air</td><td>Ambient CO<sub>2</sub> concentration outside of boundary-layer.</td></tr>
    <tr><td>\f$g_{bl}\f$</td><td>mol air/m<sup>2</sup>-s</td><td>Boundary-layer conductance.</td></tr>
@@ -403,8 +403,8 @@ photo_model.run();
 
    <table>
    <tr><th>Parameter</th><th>Units</th><th>Description</th></tr>
-   <tr><td>\f$A_{sat}\f$</td><td>mol CO<sub>2</sub>/m<sup>2</sup>-sec</td><td>Assimilation rate at saturating irradiance and reference temperature and intercellular CO<sub>2</sub> concentration.</td></tr>
-   <tr><td>\f$\theta\f$</td><td>W/m<sup>2</sup></td><td>Shape parameter for response to light.</td></tr>
+   <tr><td>\f$A_{sat}\f$</td><td>\f$\mu\f$mol CO<sub>2</sub>/m<sup>2</sup>-sec</td><td>Assimilation rate at saturating irradiance and reference temperature and intercellular CO<sub>2</sub> concentration.</td></tr>
+   <tr><td>\f$\theta\f$</td><td>\f$\mu\f$mol/m<sup>2</sup>-sec</td><td>Shape parameter for response to light. Same units as \f$i\f$ (PPFD), since \f$\theta\f$ is added to \f$i\f$ in the light response function.</td></tr>
    <tr><td>\f$T_{min}\f$</td><td>Kelvin</td><td>Minimum temperature at which assimilation occurs.</td></tr>
    <tr><td>\f$T_{opt}\f$</td><td>Kelvin</td><td>Temperature at which maximum assimilation rate occurs.</td></tr>
    <tr><td>\f$q\f$</td><td>unitless</td><td>Temperature response shape function.</td></tr>
@@ -464,7 +464,7 @@ photo_model.run();
 
  \f$\theta J^2 - (I_2 + J_{max})\,J + I_2\,J_{max} = 0,\qquad J = \dfrac{(I_2 + J_{max}) - \sqrt{(I_2 + J_{max})^2 - 4\theta I_2 J_{max}}}{2\theta}\f$
 
- The ATP/electron stoichiometry is \f$z = (3 - f_{cyc}) / (h\,(1 - f_{cyc)})\f$. ATP is partitioned between mesophyll and bundle sheath by \f$x\f$, giving \f$J_m = x J\f$ and \f$J_{bs} = (1-x) J\f$.
+ The ATP/electron stoichiometry is \f$z = \left(H_J(1 - f_{cyc}) + H_{Jcyc}f_{cyc}\right) / \left(h\,(1 - f_{cyc})\right)\f$ (the form \f$z = (3 - f_{cyc})/(h\,(1 - f_{cyc}))\f$ is the \f$H_J=3\f$, \f$H_{Jcyc}=2\f$ special case). ATP is partitioned between mesophyll and bundle sheath by \f$x\f$, giving \f$J_m = x J\f$ and \f$J_{bs} = (1-x) J\f$.
 
  \subsubsection PhotoC4Ac Enzyme-limited rate (quadratic in A; paper Eqs. 20–24 + g_bs terms per reference spreadsheet)
 

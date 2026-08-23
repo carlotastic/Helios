@@ -163,6 +163,7 @@
   - \subpage RadiationDoc "Radiation Model: GPU-accelerated ray-tracing radiation transport model (all platforms via Vulkan; NVIDIA systems via OptiX)"
   - \subpage SolarPositionDoc "Solar Position Model: Model for the position of the sun in the sky, as well as models of solar radiation flux and longwave flux from the sky."
   - \subpage StomatalDoc "Stomatal Conductance Model: Model for the conductance of water vapor through stomatal pores"
+  - \subpage SyntheticAnnotationDoc "Synthetic Annotation: Automatic generation of labeled images for machine learning (object detection, semantic and instance segmentation)."
   - \subpage VisualizerDoc "Visualizer: visualization of model geometry and data"
 
   - \subpage WeberPennDoc "Weber-Penn Tree: Procedural tree architecture generation"
@@ -951,7 +952,7 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
      uint UUID = context.addPatch( center, size, nullrotation, RGB::red );
 
      // Get Patch size
-     vec2 SIZE = getPatchSize( UUID );
+     vec2 SIZE = context.getPatchSize( UUID );
 
   }
  ~~~~~~
@@ -1298,24 +1299,24 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
  <tr><td>Apply scaling factor in x, y, or z</td><td>\ref helios::CompoundObject::scale( const helios::vec3 &scale ) "scale( vec3 scaling_factor )"</td></tr>
  </table>
  
- Some objects have special functions specific to that type of object, which are listed below. In order to access these functions, you need to get a pointer to that type of object using the appropriate get[*]ObjectPointer() function.
- 
+ Some objects have special functions specific to that type of object, which are listed below. These are queried through the Context by passing the object ID (ObjID) to the appropriate accessor; there is no public function that returns a pointer to a specific object type.
+
  <table>
- <tr><th>Object Type</th><th>Pointer Getter Function</th><th>Special Function</th></tr>
- <tr><td>Tile</td><td>\ref helios::Context::getTileObjectPointer() "getTileObjectPointer()"</td><td>
+ <tr><th>Object Type</th><th>Special Functions (called on the Context, passing the object ID)</th></tr>
+ <tr><td>Tile</td><td>
      <ul>
-	<li>\ref helios::Tile::getSize() "getSize()"</li>
-        <li>\ref helios::Tile::getCenter() "getCenter()"</li>
-	<li>\ref helios::Tile::getSubdivisionCount() "getSubdivisionCount()"</li>
-	<li>\ref helios::Tile::getVertices() "getVertices()"</li>
-	<li>\ref helios::Tile::getNormal() "getNormal()"</li>
-	<li>\ref helios::Tile::getTextureUV() "getTextureUV()"</li>
-	<li>\ref helios::Tile::getTextureRepeat() "getTextureRepeat()"</li>
-	<li>\ref helios::Tile::getEffectiveTextureRepeat() "getEffectiveTextureRepeat()"</li>
-	<li>\ref helios::Tile::scale() "scale()"</li>
+	<li>\ref helios::Context::getTileObjectCenter() "getTileObjectCenter()"</li>
+	<li>\ref helios::Context::getTileObjectSize() "getTileObjectSize()"</li>
+	<li>\ref helios::Context::getTileObjectSubdivisionCount() "getTileObjectSubdivisionCount()"</li>
+	<li>\ref helios::Context::getTileObjectVertices() "getTileObjectVertices()"</li>
+	<li>\ref helios::Context::getTileObjectNormal() "getTileObjectNormal()"</li>
+	<li>\ref helios::Context::getTileObjectTextureUV() "getTileObjectTextureUV()"</li>
+	<li>\ref helios::Context::getTileObjectTextureRepeat() "getTileObjectTextureRepeat()"</li>
+	<li>\ref helios::Context::getTileObjectEffectiveTextureRepeat() "getTileObjectEffectiveTextureRepeat()"</li>
+	<li>\ref helios::Context::getTileObjectAreaRatio() "getTileObjectAreaRatio()"</li>
        </ul>
  </td></tr>
- <tr><td>Adaptive Tile</td><td>Queried through the Context using the getAdaptiveTileObject*() functions rather than through an object pointer.</td><td>
+ <tr><td>Adaptive Tile</td><td>
      <ul>
 	<li>\ref helios::Context::getAdaptiveTileObjectSize() "getAdaptiveTileObjectSize()"</li>
 	<li>\ref helios::Context::getAdaptiveTileObjectCenter() "getAdaptiveTileObjectCenter()"</li>
@@ -1326,55 +1327,54 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
 	<li>\ref helios::Context::getAdaptiveTileObjectMaxRefinementLevel() "getAdaptiveTileObjectMaxRefinementLevel()"</li>
 	<li>\ref helios::Context::getAdaptiveTileObjectSubpatchSizeRange() "getAdaptiveTileObjectSubpatchSizeRange()"</li>
 	<li>\ref helios::Context::getAdaptiveTileObjectTextureRepeat() "getAdaptiveTileObjectTextureRepeat()"</li>
-	<li>\ref helios::Context::predictAdaptiveTileObjectSubpatchCount() "predictAdaptiveTileObjectSubpatchCount()"</li>
        </ul>
  </td></tr>
- <tr><td>Sphere</td><td>\ref helios::Context::getSphereObjectPointer() "getSphereObjectPointer()"</td><td>
+ <tr><td>Sphere</td><td>
     <ul>
-	 <li>\ref helios::Sphere::getRadius() "getRadius()"</li>
-	 <li>\ref helios::Sphere::getCenter() "getCenter()"</li>
-	 <li>\ref helios::Sphere::getSubdivisionCount() "getSubdivisionCount()"</li>
-	 <li>\ref helios::Sphere::scale() "scale()"</li>
+	 <li>\ref helios::Context::getSphereObjectCenter() "getSphereObjectCenter()"</li>
+	 <li>\ref helios::Context::getSphereObjectRadius() "getSphereObjectRadius()"</li>
+	 <li>\ref helios::Context::getSphereObjectSubdivisionCount() "getSphereObjectSubdivisionCount()"</li>
+	 <li>\ref helios::Context::getSphereObjectVolume() "getSphereObjectVolume()"</li>
        </ul>
  </td></tr>
- <tr><td>Tube</td><td>\ref helios::Context::getTubeObjectPointer() "getTubeObjectPointer()"</td><td>
+ <tr><td>Tube</td><td>
        <ul>
-	 <li>\ref helios::Tube::getNodes() "getNodes()"</li>
-	 <li>\ref helios::Tube::getNodeRadii() "getNodeRadii()"</li>
-	 <li>\ref helios::Tube::getSubdivisionCount() "getSubdivisionCount()"</li>
-	 <li>\ref helios::Tube::scale() "scale()"</li>
+	 <li>\ref helios::Context::getTubeObjectNodes() "getTubeObjectNodes()"</li>
+	 <li>\ref helios::Context::getTubeObjectNodeRadii() "getTubeObjectNodeRadii()"</li>
+	 <li>\ref helios::Context::getTubeObjectNodeColors() "getTubeObjectNodeColors()"</li>
+	 <li>\ref helios::Context::getTubeObjectNodeCount() "getTubeObjectNodeCount()"</li>
+	 <li>\ref helios::Context::getTubeObjectSubdivisionCount() "getTubeObjectSubdivisionCount()"</li>
+	 <li>\ref helios::Context::getTubeObjectVolume() "getTubeObjectVolume()"</li>
+	 <li>\ref helios::Context::getTubeObjectSegmentVolume() "getTubeObjectSegmentVolume()"</li>
        </ul>
- </td>
- <tr><td>Box</td><td>\ref helios::Context::getBoxObjectPointer() "getBoxObjectPointer()"</td><td>
+ </td></tr>
+ <tr><td>Box</td><td>
        <ul>
-	 <li>\ref helios::Box::getSize() "getSize()"</li>
-	 <li>\ref helios::Box::getCenter() "getCenter()"</li>
-	 <li>\ref helios::Box::getSubdivisionCount() "getSubdivisionCount()"</li>
-	 <li>\ref helios::Box::scale() "scale()"</li>
+	 <li>\ref helios::Context::getBoxObjectCenter() "getBoxObjectCenter()"</li>
+	 <li>\ref helios::Context::getBoxObjectSize() "getBoxObjectSize()"</li>
+	 <li>\ref helios::Context::getBoxObjectSubdivisionCount() "getBoxObjectSubdivisionCount()"</li>
+	 <li>\ref helios::Context::getBoxObjectVolume() "getBoxObjectVolume()"</li>
        </ul>
- </td>
- <tr><td>Disk</td><td>\ref helios::Context::getDiskObjectPointer() "getDiskObjectPointer()"</td><td>
+ </td></tr>
+ <tr><td>Disk</td><td>
        <ul>
-	 <li>\ref helios::Disk::getSize() "getSize()"</li>
-	 <li>\ref helios::Disk::getCenter() "getCenter()"</li>
-	 <li>\ref helios::Disk::getSubdivisionCount() "getSubdivisionCount()"</li>
-	 <li>\ref helios::Disk::scale() "scale()"</li>
+	 <li>\ref helios::Context::getDiskObjectCenter() "getDiskObjectCenter()"</li>
+	 <li>\ref helios::Context::getDiskObjectSize() "getDiskObjectSize()"</li>
+	 <li>\ref helios::Context::getDiskObjectSubdivisionCount() "getDiskObjectSubdivisionCount()"</li>
        </ul>
- </td>
- <tr><td>Cone</td><td>\ref helios::Context::getConeObjectPointer() "getConeObjectPointer()"</td><td>
+ </td></tr>
+ <tr><td>Cone</td><td>
        <ul>
-	 <li>\ref helios::Cone::getNodeCoordinates() "getNodeCoordinates()"</li>
-	 <li>\ref helios::Cone::getNodeCoordinate() "getNodeCoordinate()"</li>
-	 <li>\ref helios::Cone::getNodeRadii() "getNodeRadii()"</li>
-	 <li>\ref helios::Cone::getNodeRadius() "getNodeRadius()"</li>
-	 <li>\ref helios::Cone::getSubdivisionCount() "getSubdivisionCount()"</li>
-	 <li>\ref helios::Cone::getAxisUnitVector() "getAxisUnitVector()"</li>
-	 <li>\ref helios::Cone::getLength() "getLength()"</li>
-	 <li>\ref helios::Cone::scaleLength() "scaleLength()"</li>
-	 <li>\ref helios::Cone::scaleGirth() "scaleGirth()"</li>
+	 <li>\ref helios::Context::getConeObjectNodes() "getConeObjectNodes()"</li>
+	 <li>\ref helios::Context::getConeObjectNode() "getConeObjectNode()"</li>
+	 <li>\ref helios::Context::getConeObjectNodeRadii() "getConeObjectNodeRadii()"</li>
+	 <li>\ref helios::Context::getConeObjectNodeRadius() "getConeObjectNodeRadius()"</li>
+	 <li>\ref helios::Context::getConeObjectSubdivisionCount() "getConeObjectSubdivisionCount()"</li>
+	 <li>\ref helios::Context::getConeObjectAxisUnitVector() "getConeObjectAxisUnitVector()"</li>
+	 <li>\ref helios::Context::getConeObjectLength() "getConeObjectLength()"</li>
+	 <li>\ref helios::Context::getConeObjectVolume() "getConeObjectVolume()"</li>
        </ul>
- </td>
- </tr>
+ </td></tr>
  </table>
 
  \subsection AdaptiveTileObjects Adaptive Tile Objects
@@ -1551,14 +1551,16 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
 
      Context context;
 
-     uint UUID = context.addPatch( center, size, RGB::red );
+     vec3 center = make_vec3(0,0,0);
+     vec2 size = make_vec2(1,1);
+     uint UUID = context.addPatch( center, size, nullrotation, RGB::red );
 
      float eps = 0.9;
      context.setPrimitiveData(UUID,"emissivity",eps);
   }
  ~~~~~~
 
- There are multiple ways of setting vector primitive data. One method uses STL vectors to pass the data to the \ref helios::Context::setPrimitiveData() "setPrimitiveData()", and another is accomplished using a pointer to a standard C vector.  Both of these equivalent methods are illustrated below.
+ Vector primitive data is set by passing an STL vector to \ref helios::Context::setPrimitiveData() "setPrimitiveData()". Data held in a plain C array is set by first constructing a vector from it, as illustrated below.
 
  ~~~~~~{.cpp}
   #include "Context.h"
@@ -1576,12 +1578,12 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
      std::vector<float> A;
      A.push_back(2.3);
      A.push_back(9.2);
-     context.setPrimitiveData(UUID,"somedataA",HELIOS_TYPE_FLOAT,A.size(),&A[0]);
+     context.setPrimitiveData(UUID,"somedataA",A);
 
      float B[2];
      B[0] = 2.3;
      B[1] = 9.2;
-     context.setPrimitiveData(UUID,"somedataB",HELIOS_TYPE_FLOAT,2,&B[0]);
+     context.setPrimitiveData(UUID,"somedataB",std::vector<float>(B,B+2));
        
   }
 
@@ -1697,8 +1699,8 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
 
         for( uint i=0; i<context.getTimeseriesLength("temperature"); i++ ){
 	     T = context.queryTimeseriesData( "temperature", i );
-             time = context.getTimeseriesTime( "temperature", i );
-	     printf("Temperature at time %02d:%02d:%02d is %f\n", time.hour, time.minute, time.second );							 
+             time = context.queryTimeseriesTime( "temperature", i );
+	     printf("Temperature at time %02d:%02d:%02d is %f\n", time.hour, time.minute, time.second, T );							 
 	 }
 
   }
@@ -1757,52 +1759,55 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
 
   \subsection PrimXML Adding Primitives
 
-  Primitives are added by giving a tag with the primitive type, followed by elements that specify necessary inputs.  The table below gives examples of adding each primitive type in an .xml file.  Note that the parameters used to specify the primitives are the same as when adding them to the Context via 'add[*]' commands (e.g., addPatch()).
+  Primitives are added by giving a tag with the primitive type, followed by elements that specify necessary inputs.
+
+  Primitive geometry is <b>not</b> specified by separate center/size/rotation or vertex elements. Every primitive is created in a canonical position and size and is then placed by a \<transform\> element, which gives the 16 values of its 4x4 transformation matrix in row-major order. A patch is created as a unit square in the x-y plane centered on the origin, and a triangle is created with vertices (0,0,0), (0,1,0) and (1,1,0); the transformation matrix carries all of the translation, scaling and rotation.
+
+  Because of this, XML scene files are normally produced by \ref helios::Context::writeXML() "writeXML()" rather than written by hand. The table below gives the elements read by \ref helios::Context::loadXML() "loadXML()" for each primitive type, in the form that writeXML() emits them.
 
   <table>
   <tr><th>Primitive Type</th><th>Code Sample</th></tr>
   <tr><td>Patch</td><td>
 	<div style="padding:0.5px;background-color:#D0D0D0 ;line-height:1.2;">
 	  <pre><code> \<patch\>
-	   \<center\>0 0 0\</center\>
-	   \<size\>1 1\</size\>
-	   \<rotation\>0 0\</rotation\> \<!-- OPTIONAL -->
-	   \<color\>1 0 0\</color\> \<!-- OPTIONAL -->
-	   \<texture\>"grass.jpg"\</texture\> \<!-- OPTIONAL -->
+	   \<UUID\>0\</UUID\> \<!-- OPTIONAL -->
+	   \<material\>my_material\</material\> \<!-- OPTIONAL; or \<color\>/\<texture\> -->
+	   \<transform\>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\</transform\>
+	   \<textureUV\>0 0 1 0 1 1 0 1\</textureUV\> \<!-- OPTIONAL -->
+	   \<solid_fraction\>1\</solid_fraction\> \<!-- OPTIONAL -->
 	\</patch\></code></pre>
 	</div>
   </td></tr>
   <tr><td>Triangle</td><td>
 	<div style="padding:0.5px;background-color:#D0D0D0 ;line-height:1.2;">
 	  <pre><code> \<triangle\>
-	   \<vertex\>0 0 0\</vertex\>
-	   \<vertex\>1 0 0\</vertex\>
-	   \<vertex\>1 1 0\</vertex\>
-	   \<color\>1 0 0\</color\>
+	   \<UUID\>1\</UUID\> \<!-- OPTIONAL -->
+	   \<material\>my_material\</material\> \<!-- OPTIONAL; or \<color\>/\<texture\> -->
+	   \<transform\>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\</transform\>
 	\</triangle\></code></pre>
 	</div>
   </td></tr>
   <tr><td>Disk</td><td>
 	<div style="padding:0.5px;background-color:#D0D0D0 ;line-height:1.2;">
 	  <pre><code> \<disk\>
-	   \<center\>0 0 0\</center\>
-	   \<size\>1 1\</size\>
-	   \<rotation\>0 0\</rotation\>
-	   \<color\>1 0 0\</color\>
-	   \<texture\>"grass.jpg"\</texture\>
+	   \<transform\>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\</transform\>
+	   \<subdivisions\>16\</subdivisions\>
+	   \<color\>1 0 0 1\</color\> \<!-- OPTIONAL -->
 	\</disk\></code></pre>
 	</div>
+	Note that a \<disk\> is loaded as a Disk <i>object</i> rather than as a primitive.
   </td></tr>
   <tr><td>Voxel</td><td>
 	<div style="padding:0.5px;background-color:#D0D0D0 ;line-height:1.2;">
 	  <pre><code> \<voxel\>
-	   \<center\>0 0 0\</center\>
-	   \<size\>1 1 1\</size\>
-	   \<color\>1 0 0\</color\>
+	   \<UUID\>2\</UUID\> \<!-- OPTIONAL -->
+	   \<material\>my_material\</material\> \<!-- OPTIONAL; or \<color\>/\<texture\> -->
+	   \<transform\>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\</transform\>
 	\</voxel\></code></pre>
 	</div>
   </td></tr>
   </table>
+
 
   \subsection TimeXML Adding Timeseries Data
 
@@ -1957,7 +1962,7 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
        float scale = 1.0;
 
        // rotation to apply to model (optional argument to loadPLY)
-       SphericalCoord rotation( 0., M_PI );
+       SphericalCoord rotation = make_SphericalCoord( 0.f, M_PI );
 
        // default color for model (optional argument to loadPLY)
        RGBcolor color = RGB::red;
@@ -2107,7 +2112,7 @@ This will first rotate the patch by 0.25\f$\pi\f$ rad about the x-axis such that
          context.setPrimitiveData( UUID, "somedata", 10.2f );
          context.setPrimitiveData( UUID, "otherdata", 5 );
 
-         std::string columns{"somedata","otherdata"};
+         std::vector<std::string> columns{"somedata","otherdata"};
 
          context.writePrimitiveData( "file.txt", columns );
 

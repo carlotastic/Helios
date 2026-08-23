@@ -716,6 +716,13 @@ private:
         return grid_cells.at(index).azimuthal_rotation;
     }
 
+    //! Test-only accessor for the private test/diagnostic state below
+    /**
+     * Defined solely in the plug-in's selfTest.cpp, so nothing test-related is exposed to users
+     * of the library.
+     */
+    friend class LiDARTestHelper;
+
     //! Test/diagnostic hook: when true, \ref calculateLeafArea_inner() uses the brute-force per-cell slab loop even for
     //! regular lattices that would otherwise use the fast DDA path. Used by the self-tests to A/B the two paths against
     //! each other; has no effect on results, only on which code path computes them.
@@ -2381,8 +2388,8 @@ public:
      * of recorded returns). A very small budget is clamped up internally so each chunk still contains at least one beam and
      * stays large enough for efficient batched ray tracing.
      *
-     * If never called, the budget is automatic and path-dependent: \ref SYNTHETIC_SCAN_DEFAULT_BUDGET_GPU (8 GiB) on a
-     * GPU build and \ref SYNTHETIC_SCAN_DEFAULT_BUDGET_CPU (4 GiB) otherwise. Call this to override that with a fixed cap
+     * If never called, the budget is automatic and path-dependent: 8 GiB on a
+     * GPU build and 4 GiB otherwise. Call this to override that with a fixed cap
      * (typically to lower peak memory on a constrained host).
      * \param[in] bytes Soft cap in bytes on the live ray-tracing scratch buffers. Must be > 0.
      */
@@ -2526,15 +2533,6 @@ public:
      */
     std::vector<helios::vec3> gapfillMisses(uint scanID, const bool gapfill_grid_only, const bool add_flags);
 
-
-    //! Test/diagnostic hook: force the leaf-area inversion to use the brute-force per-cell slab loop
-    /** By default \ref calculateLeafArea() uses a fast per-beam 3D-DDA traversal of the voxel lattice. When this is set
-        true, the slower brute-force per-cell path is used instead (it produces identical results). This exists so the
-        self-tests can verify the two paths agree; it is not needed in normal use.
-        \param[in] force True to force the brute-force path, false (default) to use the fast DDA path when applicable. */
-    void forceBruteForceLeafArea(bool force) {
-        force_bruteforce_LAD = force;
-    }
 
     //! Calculate the leaf area for each grid volume
     /**

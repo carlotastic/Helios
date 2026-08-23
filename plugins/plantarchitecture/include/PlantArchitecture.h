@@ -87,6 +87,11 @@ public:
         return *this;
     }
 
+    //! Sample the parameter from a uniform distribution
+    /**
+     * \param[in] minval Minimum value of the distribution.
+     * \param[in] maxval Maximum value of the distribution.
+     */
     void uniformDistribution(float minval, float maxval) {
         if (minval > maxval) {
             throw(std::runtime_error("ERROR (PlantArchitecture): RandomParameter_float::uniformDistribution() - minval must be less than or equal to maxval."));
@@ -96,18 +101,32 @@ public:
         sampled = false;
     }
 
+    //! Sample the parameter from a normal distribution
+    /**
+     * \param[in] mean Mean of the distribution.
+     * \param[in] std_dev Standard deviation of the distribution.
+     */
     void normalDistribution(float mean, float std_dev) {
         distribution = "normal";
         distribution_parameters = {mean, std_dev};
         sampled = false;
     }
 
+    //! Sample the parameter from a Weibull distribution
+    /**
+     * \param[in] shape Shape parameter of the distribution.
+     * \param[in] scale Scale parameter of the distribution.
+     */
     void weibullDistribution(float shape, float scale) {
         distribution = "weibull";
         distribution_parameters = {shape, scale};
         sampled = false;
     }
 
+    //! Get the value of the parameter, sampling from its distribution if it has not already been sampled
+    /**
+     * \return Current value of the parameter.
+     */
     float val() {
         if (!sampled) {
             constval = resample();
@@ -177,6 +196,11 @@ public:
         return *this;
     }
 
+    //! Sample the parameter from a uniform distribution
+    /**
+     * \param[in] minval Minimum value of the distribution.
+     * \param[in] maxval Maximum value of the distribution.
+     */
     void uniformDistribution(int minval, int maxval) {
         if (minval > maxval) {
             throw(std::runtime_error("ERROR (PlantArchitecture): RandomParameter_int::uniformDistribution() - minval must be less than or equal to maxval."));
@@ -186,12 +210,20 @@ public:
         sampled = false;
     }
 
+    //! Sample the parameter from a set of discrete values, each chosen with equal probability
+    /**
+     * \param[in] values Vector of discrete values that may be chosen.
+     */
     void discreteValues(const std::vector<int> &values) {
         distribution = "discretevalues";
         distribution_parameters = values;
         sampled = false;
     }
 
+    //! Get the value of the parameter, sampling from its distribution if it has not already been sampled
+    /**
+     * \return Current value of the parameter.
+     */
     int val() {
         if (!sampled) {
             constval = resample();
@@ -434,6 +466,9 @@ public:
     LeafPrototype() = default;
 
     //! Custom prototype function for creating leaf prototypes
+    /**
+     * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
+     */
     uint (*prototype_function)(helios::Context *, LeafPrototype *prototype_parameters, int compound_leaf_index) = nullptr;
 
     //! OBJ model file to load for the leaf
@@ -765,10 +800,16 @@ private:
         //! Uniform scale factor applied to the flower prototype geometry
         RandomParameter_float flower_prototype_scale;
         //! Pointer to user-supplied function that returns a flower prototype mesh ID (Context*, subdivisions, flower_is_open)
+        /**
+         * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
+         */
         uint (*flower_prototype_function)(helios::Context *, uint subdivisions, bool flower_is_open) = nullptr;
         //! Uniform scale factor applied to the fruit prototype geometry
         RandomParameter_float fruit_prototype_scale;
         //! Pointer to user-supplied function that returns a fruit prototype mesh ID (Context*, subdivisions)
+        /**
+         * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
+         */
         uint (*fruit_prototype_function)(helios::Context *, uint subdivisions) = nullptr;
         //! Fraction (0‒1) of gravitational influence used to bend peduncles under fruit load
         RandomParameter_float fruit_gravity_factor_fraction;
@@ -851,12 +892,14 @@ public:
      * \param[in] parent_shoot_node_index Node index of the current shoot along it's parent shoot
      * \param[in] shoot_max_nodes Maximum number of phytomers in the shoot
      * \param[in] plant_age Age of the plant in days
+     * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
      */
     void (*phytomer_creation_function)(std::shared_ptr<Phytomer> phytomer_ptr, uint shoot_node_index, uint parent_shoot_node_index, uint shoot_max_nodes, float plant_age) = nullptr;
 
     // Custom user-defined function that is called for each phytomer on every time step
     /**
      * \param[in] phytomer_ptr Pointer to the phytomer to which the function will be applied
+     * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
      */
     void (*phytomer_callback_function)(std::shared_ptr<Phytomer> phytomer_ptr) = nullptr;
 
@@ -954,54 +997,57 @@ struct ShootParameters {
      */
     void defineChildShootTypes(const std::vector<std::string> &child_shoot_type_labels, const std::vector<float> &child_shoot_type_probabilities);
 
+    //! Copy the user-defined callback and prototype function pointers from another ShootParameters
+    /**
+     * Copies all five function pointers held in the phytomer parameters -- the phytomer creation and callback hooks, and the leaf, flower, and fruit prototype functions -- from \a source into this
+     * ShootParameters. All other parameter values are left unchanged, and no random parameters are resampled.
+     *
+     * This is intended for callers that reconstruct a ShootParameters from plain values, such as a scripting-language binding that flattens the structure to a dictionary, applies user edits, and
+     * rebuilds it. Such a reconstruction cannot carry function pointers, so they must be re-attached from the original structure before it is passed to \ref PlantArchitecture::defineShootType() or
+     * \ref PlantArchitecture::updateCurrentShootParameters(), both of which replace the stored shoot type entry in its entirety.
+     *
+     * \param[in] source ShootParameters to copy the function pointers from, typically the structure originally returned by \ref PlantArchitecture::getCurrentShootParameters().
+     * \note Pointers that are null in \a source are copied as null, overwriting any existing value. The operation is an unconditional assignment rather than a merge, so repeated calls are idempotent
+     * and a deliberately cleared hook stays cleared.
+     */
+    void inheritCustomFunctionsFrom(const ShootParameters &source);
+
     ShootParameters &operator=(const ShootParameters &a) {
+        // Shoot-level parameters are copied by value and are NOT resampled here. Per-shoot variation
+        // is produced by the explicit resample() calls in the growth engine at the points where a new
+        // shoot is created (see PlantArchitecture.cpp, e.g. base_yaw/insertion_angle_tip when a
+        // vegetative bud breaks). Resampling here as well made committing a shoot type through
+        // defineShootType()/updateCurrentShootParameters() silently perturb parameters the caller
+        // never edited, so an identity round-trip was not a no-op.
+        //
+        // Note this does NOT apply to the nested PhytomerParameters assignment below: Phytomer's
+        // constructor relies on that assignment to re-randomize per-phytomer parameters, so the
+        // sub-structure operator= implementations resample deliberately.
         this->phytomer_parameters = a.phytomer_parameters;
         this->max_nodes = a.max_nodes;
-        this->max_nodes.resample();
         this->max_nodes_per_season = a.max_nodes_per_season;
-        this->max_nodes_per_season.resample();
         this->phyllochron_min = a.phyllochron_min;
-        this->phyllochron_min.resample();
+        this->elongation_rate_max = a.elongation_rate_max;
         this->girth_area_factor = a.girth_area_factor;
-        this->girth_area_factor.resample();
         this->vegetative_bud_break_probability_min = a.vegetative_bud_break_probability_min;
-        this->vegetative_bud_break_probability_min.resample();
         this->vegetative_bud_break_probability_max = a.vegetative_bud_break_probability_max;
-        this->vegetative_bud_break_probability_max.resample();
         this->flower_bud_break_probability = a.flower_bud_break_probability;
-        this->flower_bud_break_probability.resample();
         this->fruit_set_probability = a.fruit_set_probability;
-        this->fruit_set_probability.resample();
         this->gravitropic_curvature = a.gravitropic_curvature;
-        this->gravitropic_curvature.resample();
         this->tortuosity = a.tortuosity;
-        this->tortuosity.resample();
         this->vegetative_bud_break_probability_min = a.vegetative_bud_break_probability_min;
-        this->vegetative_bud_break_probability_min.resample();
         this->vegetative_bud_break_probability_decay_rate = a.vegetative_bud_break_probability_decay_rate;
-        this->vegetative_bud_break_probability_decay_rate.resample();
         this->max_terminal_floral_buds = a.max_terminal_floral_buds;
-        this->max_terminal_floral_buds.resample();
         this->flower_bud_break_probability = a.flower_bud_break_probability;
-        this->flower_bud_break_probability.resample();
         this->fruit_set_probability = a.fruit_set_probability;
-        this->fruit_set_probability.resample();
         this->vegetative_bud_break_time = a.vegetative_bud_break_time;
-        this->vegetative_bud_break_time.resample();
         this->insertion_angle_tip = a.insertion_angle_tip;
-        this->insertion_angle_tip.resample();
         this->insertion_angle_decay_rate = a.insertion_angle_decay_rate;
-        this->insertion_angle_decay_rate.resample();
         this->internode_length_max = a.internode_length_max;
-        this->internode_length_max.resample();
         this->internode_length_min = a.internode_length_min;
-        this->internode_length_min.resample();
         this->internode_length_decay_rate = a.internode_length_decay_rate;
-        this->internode_length_decay_rate.resample();
         this->base_roll = a.base_roll;
-        this->base_roll.resample();
         this->base_yaw = a.base_yaw;
-        this->base_yaw.resample();
         this->flowers_require_dormancy = a.flowers_require_dormancy;
         this->growth_requires_dormancy = a.growth_requires_dormancy;
         this->child_shoot_type_labels = a.child_shoot_type_labels;
@@ -1612,12 +1658,24 @@ struct Shoot {
      */
     [[nodiscard]] helios::vec3 getShootAxisVector(float shoot_fraction) const;
 
+    //! Reports whether this shoot has been pruned away entirely
+    /**
+     * A shoot pruned at node 0 keeps its slot in the plant's shoot tree so that shoot IDs remain
+     * stable, but it has no phytomers, no internode geometry, and is no longer listed as a child of
+     * its parent. Such a shoot contributes nothing to the plant and cannot be queried for geometry.
+     * \return True if the shoot has no phytomers because it was pruned.
+     * \sa PlantArchitecture::isShootPruned(), PlantArchitecture::pruneBranch()
+     */
+    [[nodiscard]] bool isPruned() const {
+        return phytomers.empty();
+    }
+
     /**
      * \brief Calculates the total leaf area of a shoot starting from a given node index.
      *
      * \param[in] start_node_index [optional] The index of the starting node in the shoot.
      * \return Total leaf area of the shoot and its child shoots starting from the given node.
-     * \note Throws an error if the start_node_index is out of range.
+     * \note Returns zero for a pruned shoot. Throws an error if start_node_index is out of range on a shoot that still has phytomers.
      */
     [[nodiscard]] float sumShootLeafArea(uint start_node_index = 0) const;
 
@@ -1625,7 +1683,7 @@ struct Shoot {
      * \brief Calculates the total volume of all child shoots starting from a specified node index.
      * \param[in] start_node_index The starting index of the node from which to sum child volumes.
      * \return The total volume of all child shoots starting from the given node index.
-     * \note Throws an error if start_node_index is out of range.
+     * \note Returns zero for a pruned shoot. Throws an error if start_node_index is out of range on a shoot that still has phytomers.
      */
     [[nodiscard]] float sumChildVolume(uint start_node_index = 0) const;
 
@@ -1996,14 +2054,15 @@ public:
     /**
      * \param[in] shoot_type_label User-defined label for the shoot type to be updated.
      * \param[in] params Updated parameters structure for the shoot type.
-     * \note This will overwrite any existing shoot parameter definitions.
+     * \note This will overwrite any existing shoot parameter definitions in their entirety rather than merging into them. The stored parameters are the values passed in: shoot-level random parameters
+     * are not resampled, so reading a shoot type and writing it straight back is a no-op.
      */
     void updateCurrentShootParameters(const std::string &shoot_type_label, const ShootParameters &params);
 
     //! Update the parameters of all shoot types in the current plant model
     /**
      * \param[in] params Updated parameters structure for the shoot type.
-     * \note This will overwrite any existing shoot parameter definitions.
+     * \note This replaces the full set of shoot types, so any shoot type not present in \a params is removed. Shoot-level random parameters are not resampled.
      */
     void updateCurrentShootParameters(const std::map<std::string, ShootParameters> &params);
 
@@ -2019,6 +2078,13 @@ public:
 
     //! Duplicate an existing plant instance and specify its base position and age
     /**
+     * The copy is an independent plant instance carrying the source's configuration: its name, shoot parameters, phenological thresholds,
+     * maximum age, epicormic shoot probability, carbohydrate and nitrogen parameters, and dormancy state. Per-plant attraction points are
+     * translated onto the new base position, since they are absolute world coordinates.
+     *
+     * The carbohydrate and nitrogen pools are not copied, as they are simulation state rather than configuration; the copy starts with the
+     * pools of a newly created plant of the given age.
+     *
      * \param[in] plantID ID of the existing plant instance to be duplicated.
      * \param[in] base_position Cartesian coordinates of the base of the new plant copy.
      * \param[in] base_rotation Rotation of the new plant copy.
@@ -2139,6 +2205,8 @@ public:
     /**
      * \param[in] shoot_type_label User-defined label for the new shoot type. This string is used later to reference this type of shoot.
      * \param[in] shoot_params Parameters structure for the new shoot type.
+     * \note If a shoot type with this label already exists, its definition is replaced in its entirety rather than merged into. The stored parameters are the values passed in: shoot-level random
+     * parameters are not resampled, so reading a shoot type and writing it straight back is a no-op.
      */
     void defineShootType(const std::string &shoot_type_label, const ShootParameters &shoot_params);
 
@@ -2541,8 +2609,19 @@ public:
      */
     void setPlantLeafAngleDistribution(const std::vector<uint> &plantIDs, float Beta_mu_inclination, float Beta_nu_inclination, float eccentricity, float ellipse_rotation_degrees) const;
 
-    //! Don't use this
-    void setPlantAge(uint plantID, float current_age);
+    /**
+     * \brief Sets the maximum age of a plant, beyond which it stops growing.
+     *
+     * Once a plant's age reaches this value, PlantArchitecture::advanceTime() stops advancing it and its geometry becomes static.
+     * The default is 999 days. Every plant model in the library sets its own value as part of its builder (an apple tree, for example, uses 1460 days),
+     * but a plant assembled manually with PlantArchitecture::addPlantInstance() keeps the default, and so silently stops growing after 999 days.
+     *
+     * Setting a maximum age below the plant's current age is permitted, and freezes the plant at its current form.
+     *
+     * \param[in] plantID ID of the plant instance.
+     * \param[in] max_age Maximum age of the plant in days. Must be greater than or equal to zero.
+     */
+    void setPlantMaxAge(uint plantID, float max_age);
 
     /**
      * \brief Harvests a plant by removing all leaves and fruit.
@@ -2596,12 +2675,26 @@ public:
      */
     void breakPlantDormancy(uint plantID);
 
+    //! Prunes a branch from a specific plant at a designated node index
     /**
-     * \brief Prunes a branch from a specific plant at a designated node index.
+     * The node at node_index and every node above it are removed, along with their leaves,
+     * inflorescences and internode geometry, and the same is done recursively to every shoot
+     * descending from those nodes. Pruning at node_index 0 therefore removes the shoot entirely.
+     *
+     * A shoot removed entirely keeps its slot in the plant's shoot tree so that shoot IDs are not
+     * renumbered, but it becomes inert: it has zero nodes, contributes no leaf area or volume, and
+     * is unlinked from its parent so that traversals of the plant structure no longer reach it. Use
+     * isShootPruned() to detect such shoots when iterating over getAllShootIDs().
+     *
+     * Pruning is idempotent -- calling this on a shoot that has already been pruned away does
+     * nothing. This is what allows a whole branch system to be pruned by looping over shoot IDs,
+     * since removing a shoot also empties its descendants.
      *
      * \param[in] plantID Unique identifier of the plant to prune.
      * \param[in] shootID Identifier of the shoot to prune from within the plant.
      * \param[in] node_index Index of the node on the shoot where the branch will be pruned.
+     * \note Throws an error if node_index is out of range for a shoot that still has nodes.
+     * \sa isShootPruned()
      */
     void pruneBranch(uint plantID, uint shootID, uint node_index);
 
@@ -2624,6 +2717,14 @@ public:
     [[nodiscard]] float getPlantAge(uint plantID) const;
 
     /**
+     * \brief Retrieves the maximum age of a specific plant, beyond which it stops growing.
+     *
+     * \param[in] plantID Unique identifier of the plant.
+     * \return The maximum age of the plant in days. See PlantArchitecture::setPlantMaxAge().
+     */
+    [[nodiscard]] float getPlantMaxAge(uint plantID) const;
+
+    /**
      * \brief Retrieves the number of nodes in a specific shoot of a specific plant.
      *
      * \param[in] plantID The unique identifier of the plant.
@@ -2631,6 +2732,21 @@ public:
      * \return The current number of nodes in the specified shoot.
      */
     [[nodiscard]] uint getShootNodeCount(uint plantID, uint shootID) const;
+
+    //! Reports whether a shoot of a plant has been pruned away entirely
+    /**
+     * PlantArchitecture::pruneBranch() called with a node index of 0 removes all of a shoot's
+     * phytomers and geometry, but keeps the shoot in the plant's shoot tree so that shoot IDs stay
+     * stable across a prune. The shoot ID therefore remains valid and is still returned by
+     * getAllShootIDs(), but the shoot itself is inert: it has zero nodes, contributes no leaf area
+     * or volume, is no longer listed as a child of its parent, and cannot be queried for geometry
+     * (getShootTaper() throws for it). Use this to skip such shoots when walking getAllShootIDs().
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant (see getAllShootIDs()).
+     * \return True if the shoot was pruned away and no longer forms part of the plant.
+     */
+    [[nodiscard]] bool isShootPruned(uint plantID, uint shootID) const;
 
     /**
      * \brief Retrieves the IDs of all shoots belonging to a specific plant.
@@ -2642,6 +2758,103 @@ public:
      * \return Vector of shoot IDs for all shoots in the plant.
      */
     [[nodiscard]] std::vector<uint> getAllShootIDs(uint plantID) const;
+
+    //! Retrieves the parent shoot of a shoot
+    /**
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return ID of the shoot this shoot grew from, or -1 if it is the base stem shoot.
+     * \note A pruned shoot still reports the parent it grew from, even though it is no longer listed among that parent's children. Its parent is always a live shoot, since pruning a shoot also prunes everything descending from it.
+     */
+    [[nodiscard]] int getParentShootID(uint plantID, uint shootID) const;
+
+    //! Retrieves the branching rank of a shoot
+    /**
+     * Rank is the botanical branching order: the base stem shoot is rank 0, a branch off it is rank 1,
+     * a branch off that is rank 2, and so on. A shoot created by appendShoot() continues its parent's
+     * axis rather than branching from it, so it keeps the parent's rank. Rank is therefore not the same
+     * as the number of steps to the base shoot -- see getShootDepth() for that.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return Branching rank of the shoot.
+     */
+    [[nodiscard]] uint getShootRank(uint plantID, uint shootID) const;
+
+    //! Retrieves the number of shoots between a shoot and the base stem shoot
+    /**
+     * The base stem shoot has depth 0, its children depth 1, and so on. Unlike getShootRank() this
+     * counts every step in the shoot tree, including axis continuations created by appendShoot().
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return Number of steps from this shoot to the base stem shoot.
+     */
+    [[nodiscard]] uint getShootDepth(uint plantID, uint shootID) const;
+
+    //! Retrieves the chain of shoots connecting a shoot to the base stem shoot
+    /**
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return Shoot IDs ordered from the given shoot to the base stem shoot, including both. For the base stem shoot this is a single element.
+     */
+    [[nodiscard]] std::vector<uint> getPathToRoot(uint plantID, uint shootID) const;
+
+    //! Retrieves the shoots that grew directly out of a given shoot
+    /**
+     * Ordered by the node they attach to. This includes shoots created by appendShoot(), which continue
+     * the parent's axis rather than branching from it; compare their getShootRank() with the parent's to
+     * tell the two apart. Shoots that have been pruned away are not included.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return IDs of the direct children of the shoot, empty if it has none.
+     */
+    [[nodiscard]] std::vector<uint> getChildShootIDs(uint plantID, uint shootID) const;
+
+    //! Retrieves every shoot descending from a given shoot
+    /**
+     * Collected depth-first, so a shoot is always listed before its own descendants. The shoot itself is
+     * not included. Shoots that have been pruned away are not included.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return IDs of all descendants of the shoot, empty if it has none.
+     */
+    [[nodiscard]] std::vector<uint> getAllDescendantShootIDs(uint plantID, uint shootID) const;
+
+    //! Retrieves the shoots of a plant grouped by branching rank
+    /**
+     * The index into the outer vector is the rank, so element 0 holds the base stem shoot and element 2
+     * holds every second-order branch. A rank with no live shoots is an empty entry rather than being
+     * skipped, so the index always equals the rank. Shoots that have been pruned away are not included.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \return Shoot IDs grouped by rank, indexed by rank.
+     */
+    [[nodiscard]] std::vector<std::vector<uint>> getShootIDsByRank(uint plantID) const;
+
+    //! Retrieves the parent-to-children structure of a plant
+    /**
+     * Only shoots that actually have children appear as keys. Shoots that have been pruned away appear
+     * neither as keys nor among the children.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \return Map of shoot ID to the IDs of its direct children.
+     */
+    [[nodiscard]] std::map<uint, std::vector<uint>> getShootHierarchyMap(uint plantID) const;
+
+    //! Retrieves the shoots of a plant that have no children
+    /**
+     * These are the tips of the shoot tree. Note that this is a topological test rather than a botanical
+     * one: a shoot whose axis is continued by appendShoot() has that continuation as a child and so is
+     * not terminal. Shoots that have been pruned away are not included -- an empty pruned shell has no
+     * children but is not a tip of the plant.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \return IDs of all shoots with no children.
+     */
+    [[nodiscard]] std::vector<uint> getTerminalShootIDs(uint plantID) const;
 
     /**
      * \brief Retrieves a read-only handle to a specific shoot of a specific plant.
@@ -2661,6 +2874,7 @@ public:
      * \param[in] plantID The unique identifier of the plant.
      * \param[in] shootID The unique identifier of the shoot within the specified plant.
      * \return The taper of the shoot as a float value, constrained between 0 and 1.
+     * \note Throws an error if the shoot has no internodes because it was pruned away. Check isShootPruned() first when iterating over getAllShootIDs().
      */
     [[nodiscard]] float getShootTaper(uint plantID, uint shootID) const;
 
@@ -3172,6 +3386,13 @@ public:
     friend struct Phytomer;
     friend struct Shoot;
 
+    //! Grants the plug-in's self-tests access to private per-plant state.
+    /**
+     * Defined solely in the plug-in's selfTest.cpp, so nothing test-related is exposed to users
+     * of the library.
+     */
+    friend class PlantArchitectureTestHelper;
+
 private:
     //! Get a validated parameter value from the build parameters map
     /**
@@ -3296,6 +3517,15 @@ protected:
     [[nodiscard]] bool detectGroundCollision(uint objID);
 
     [[nodiscard]] bool detectGroundCollision(const std::vector<uint> &objID) const;
+
+    //! Throws if the given plant does not exist or the shoot ID is out of range for it
+    /**
+     * Shared by the shoot topology accessors so that they all report a bad ID the same way.
+     * \param[in] plantID Plant to validate.
+     * \param[in] shootID Shoot to validate within that plant.
+     * \param[in] function_name Name of the calling function, used in the error message.
+     */
+    void validateShootID(uint plantID, uint shootID, const std::string &function_name) const;
 
     void setPlantLeafAngleDistribution_private(const std::vector<uint> &plantIDs, float Beta_mu_inclination, float Beta_nu_inclination, float eccentricity_azimuth, float ellipse_rotation_azimuth_degrees, bool set_elevation, bool set_azimuth) const;
 
