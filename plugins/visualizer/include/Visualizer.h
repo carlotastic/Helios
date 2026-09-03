@@ -97,6 +97,45 @@ struct Shader {
     //! Set the intensity of the light source
     void setLightIntensity(float lightintensity) const;
 
+    //! Set the multiplier applied to vertex-interpolated primitive colors
+    /**
+     * \param[in] colorboost Multiplier applied to vertex colors in the fragment shader.
+     */
+    void setColorBoost(float colorboost) const;
+
+    //! Enable or disable the linear-light rendering pipeline
+    /**
+     * \param[in] enabled True to decode albedo to linear light, tone-map, and re-encode to sRGB; false to write shaded values directly.
+     */
+    void setLinearPipeline(bool enabled) const;
+
+    //! Set the exposure applied in linear light before tone mapping
+    /**
+     * \param[in] exposure Linear exposure multiplier. Has no effect when the linear pipeline is disabled.
+     */
+    void setExposure(float exposure) const;
+
+    //! Set the camera position in world space, used to form the view vector for the specular term
+    void setCameraPositionUniform(const helios::vec3 &position) const;
+
+    //! Set the Phong material reflectance parameters
+    /**
+     * \param[in] ambient Ambient reflectance weight.
+     * \param[in] diffuse Diffuse reflectance weight.
+     * \param[in] specular Specular reflectance weight.
+     * \param[in] shininess Specular exponent.
+     */
+    void setPhongMaterial(float ambient, float diffuse, float specular, float shininess) const;
+
+    //! Set the hemispheric ambient sky and ground colors
+    void setAmbientColors(const helios::RGBcolor &sky_color, const helios::RGBcolor &ground_color) const;
+
+    //! Enable or disable smooth (interpolated per-vertex) normals
+    void setSmoothShading(bool enabled) const;
+
+    //! Bind the packed per-material Phong parameter table
+    void setPhongMaterialTable(GLint table_size) const;
+
     //! Set shader as current
     void useShader() const;
 
@@ -123,6 +162,20 @@ struct Shader {
     GLint lightingModelUniform;
     GLint RboundUniform;
     GLint lightIntensityUniform;
+    GLint colorBoostUniform;
+    GLint linearPipelineUniform;
+    GLint exposureUniform;
+    GLint cameraPositionUniform;
+    GLint materialAmbientUniform;
+    GLint materialDiffuseUniform;
+    GLint materialSpecularUniform;
+    GLint materialShininessUniform;
+    GLint ambientSkyColorUniform;
+    GLint ambientGroundColorUniform;
+    GLint smoothShadingUniform;
+    GLint phongMaterialTableUniform;
+    GLint phongMaterialTableSizeUniform;
+    GLint materialIndexTextureObjectUniform;
     std::vector<GLuint> vertex_array_IDs;
     GLint uvRescaleUniform;
 
@@ -376,12 +429,74 @@ public:
     //! Coordinate system to be used when specifying spatial coordinates
     enum CoordinateSystem {
         //! Coordinates are normalized to unity and are window-aligned.  The point (x,y)=(0,0) is in the bottom left corner of the window, and (x,y)=(1,1) is in the upper right corner of the window.  The z-coordinate specifies the depth in the
-        //! screen-normal direction, with values ranging from -1 to 1.  For example, an object at z=0.5 would be in front of an object at z=0.
+        //! screen-normal direction, with values ranging from -1 to 1.  Smaller z is nearer to the viewer, so an object at z=0.5 would be behind an object at z=0.
         COORDINATES_WINDOW_NORMALIZED = 0,
 
         //! Coordinates are specified in a 3D Cartesian system (right-handed), where +z is vertical.
         COORDINATES_CARTESIAN = 1
     };
+
+    //! A single bounding box read from a bounding box annotation file
+    /**
+     * Coordinates follow the YOLO convention: normalized to [0,1] by the image width and height, with the origin at the TOP-LEFT corner of the image and y increasing downward. Note that this is not the
+     * convention of Visualizer::COORDINATES_WINDOW_NORMALIZED, whose origin is the bottom-left corner. This is the convention written by RadiationModel::writeImageBoundingBoxes().
+     */
+    struct BoundingBox {
+        //! Integer class identifier of the object enclosed by the box
+        uint class_ID = 0;
+        //! Center of the box, normalized by the image dimensions, with the origin at the top-left corner of the image
+        helios::vec2 center;
+        //! Width and height of the box, normalized by the image width and height respectively
+        helios::vec2 size;
+    };
+
+    //! Read a bounding box annotation file in Ultralytics YOLO format
+    /**
+     * Every non-blank line must hold exactly five whitespace-separated fields, `class_ID x_center y_center width height`, where the four geometry fields are normalized to [0,1] and are measured from the
+     * top-left corner of the image. Blank lines are ignored. Both plain and scientific float notation are accepted. This is the format written by RadiationModel::writeImageBoundingBoxes().
+     * \param[in] bbox_file Path to the bounding box annotation file.
+     * \return Boxes in the order they appear in the file. Empty if the file contains no boxes.
+     */
+    [[nodiscard]] static std::vector<BoundingBox> readBoundingBoxFile(const std::string &bbox_file);
+
+    //! Read a file mapping bounding box class IDs to class names
+    /**
+     * Two line formats are accepted, detected line by line. If the first whitespace-separated token is a non-negative integer and at least one more token follows, the line is read as `class_ID class_name`,
+     * which is the format written by RadiationModel::writeImageBoundingBoxes(); the name is the remainder of the line, so names may contain spaces. Otherwise the whole trimmed line is the class name and its
+     * class ID is the index of the line among the non-blank lines, counting from zero, which is the standard Ultralytics convention.
+     * \param[in] classes_file Path to the class name file.
+     * \return Map from class ID to class name.
+     * \note A line in the implicit format whose class name begins with a number is indistinguishable from the explicit format and will be read as the explicit format.
+     */
+    [[nodiscard]] static std::map<uint, std::string> readBoundingBoxClassNames(const std::string &classes_file);
+
+    //! A single segmentation mask read from a COCO JSON annotation file
+    /**
+     * Each mask holds one or more polygon contours whose vertices are in absolute pixel coordinates measured from the TOP-LEFT corner of the image, with y increasing downward. Note that this differs both
+     * from Visualizer::BoundingBox, whose coordinates are normalized to [0,1], and from Visualizer::COORDINATES_WINDOW_NORMALIZED, whose origin is the bottom-left corner. This is the convention written by
+     * RadiationModel::writeImageSegmentationMasks().
+     */
+    struct SegmentationMask {
+        //! Integer class identifier of the masked object, taken from the annotation's COCO "category_id"
+        uint class_ID = 0;
+        //! Name of the class, resolved from the "categories" array of the same file. Empty if the file declares no name for this class ID.
+        std::string class_name;
+        //! Polygon contours bounding the mask, in absolute pixel coordinates measured from the top-left corner of the image
+        std::vector<std::vector<helios::vec2>> polygons;
+        //! Width and height in pixels of the image the polygons were authored against, taken from the "images" entry the annotation refers to
+        helios::vec2 image_size;
+    };
+
+    //! Read a segmentation mask annotation file in COCO JSON format
+    /**
+     * The file must contain the "images", "annotations" and "categories" arrays of the COCO format. Each annotation contributes one mask, whose polygons come from its "segmentation" field: an array of
+     * contours, each a flat list of alternating x and y pixel coordinates. This is the format written by RadiationModel::writeImageSegmentationMasks().
+     * \param[in] mask_file Path to the COCO JSON annotation file.
+     * \param[in] image_file [optional] Path to the image whose annotations should be read. Only the file name is compared, so a path from a different directory still matches. If this is empty, which is the default, the file must describe exactly one image.
+     * \return Masks in the order their annotations appear in the file. Empty if no annotation refers to the selected image.
+     * \note Run-length encoded ("counts") segmentations are not supported, because RadiationModel::writeImageSegmentationMasks() never writes them.
+     */
+    [[nodiscard]] static std::vector<SegmentationMask> readSegmentationMaskFile(const std::string &mask_file, const std::string &image_file = "");
 
     //! Pseudocolor map tables
     enum Ctable {
@@ -454,24 +569,180 @@ public:
      */
     void setLightIntensityFactor(float lightintensityfactor);
 
-    //! Create the shadow-map framebuffer and depth texture
+    //! Render primitive colors exactly as they are set in the Context
     /**
-     * Called lazily the first time shadowed lighting is actually rendered, in both windowed
-     * and headless modes. The shadow map is large (see shadow_buffer_size), so deferring it
-     * avoids allocating it for the many Visualizer instances that never enable shadows.
-     * Does nothing if the framebuffer has already been created.
+     * By default the fragment shader multiplies vertex-interpolated primitive colors by 1.5, which
+     * brightens ordinary renders but means the color read back out of the framebuffer is not the
+     * color that was set on the primitive. This mode disables that multiplier so that a color
+     * written with \ref helios::Context::setPrimitiveColor() is reproduced exactly in the rendered
+     * image, which is required when the framebuffer is used to carry data rather than to be looked
+     * at -- for example when object ID codes are encoded as RGB values and decoded from the
+     * rendered pixels, as the synthetic annotation plug-in does.
+     *
+     * Note that exact color reproduction additionally requires that no lighting be applied (see
+     * \ref setLightingModel() with \ref LIGHTING_NONE, which is the default) and that the
+     * Visualizer be constructed with anti-aliasing disabled, since anti-aliasing blends colors at
+     * primitive edges and produces pixel values that decode to meaningless IDs.
+     *
+     * This mode also disables the linear-light rendering pipeline (see \ref enableLinearPipeline()),
+     * because tone mapping and sRGB encoding are non-linear transformations of the color channels
+     * and would corrupt any data carried in them.
+     *
+     * \sa disableExactColorMode()
      */
-    void createShadowFramebuffer();
+    void enableExactColorMode();
 
-    //! Setup offscreen framebuffer for headless rendering
-    void setupOffscreenFramebuffer();
+    //! Restore the default brightening of primitive colors
+    /**
+     * Also restores the linear-light pipeline, which \ref enableExactColorMode() turns off.
+     *
+     * \sa enableExactColorMode()
+     */
+    void disableExactColorMode();
 
-    //! Clean up offscreen framebuffer resources
-    void cleanupOffscreenFramebuffer();
+    //! Render using a physically-based linear-light pipeline
+    /**
+     * This is the default. Albedo is decoded from sRGB to linear light before shading, the shaded
+     * radiance is multiplied by the exposure (see \ref setExposure()), passed through an ACES
+     * filmic tone curve, and re-encoded to sRGB. Highlights roll off smoothly instead of clipping,
+     * and mid-tone gradients are correct.
+     *
+     * The alternative, selected with \ref disableLinearPipeline(), performs the lighting arithmetic
+     * directly on sRGB-encoded color values and writes the result straight to the framebuffer. That
+     * is not physically meaningful: sRGB values are non-linear in radiance, so summing an ambient
+     * and a diffuse term in that space produces mid-tones that are too dark and shadow terminators
+     * that are unnaturally abrupt, and bright surfaces clip hard against the 8-bit framebuffer.
+     *
+     * This method is therefore only needed to restore the default after \ref
+     * disableLinearPipeline() or \ref enableExactColorMode() has turned it off.
+     *
+     * Text and blended image overlays are authored in display space and are deliberately excluded,
+     * as is all 2D screen-space geometry.
+     *
+     * \note This mode is mutually exclusive with \ref enableExactColorMode(), which needs the
+     * framebuffer to read back bit-unchanged. Enabling exact color mode turns this off.
+     *
+     * \sa disableLinearPipeline(), setExposure()
+     */
+    void enableLinearPipeline();
 
+    //! Disable the linear-light rendering pipeline
+    /**
+     * Reverts to performing the lighting arithmetic directly on sRGB-encoded values and writing the
+     * result straight to the framebuffer, which is how the Visualizer rendered prior to v1.3.83.
+     * Use this to reproduce images generated by earlier versions.
+     *
+     * \sa enableLinearPipeline()
+     */
+    void disableLinearPipeline();
 
-    //! Switch rendering target to offscreen buffer
-    void renderToOffscreenBuffer();
+    //! Set the exposure applied in linear light before tone mapping
+    /**
+     * Values greater than 1 brighten the image, values less than 1 darken it. Because the tone
+     * curve rolls off smoothly, raising exposure recovers highlight detail rather than clipping it.
+     *
+     * \param[in] exposure Linear exposure multiplier. Must be positive. Default is 1.0.
+     * \note Has no effect if the linear-light pipeline has been turned off (see \ref disableLinearPipeline()).
+     */
+    void setExposure(float exposure);
+
+    //! Get the exposure applied in linear light before tone mapping
+    [[nodiscard]] float getExposure() const;
+
+    //! Query whether the linear-light rendering pipeline is enabled
+    [[nodiscard]] bool isLinearPipelineEnabled() const;
+
+    //! Phong material reflectance parameters
+    /**
+     * The shaded radiance is `ambient*A + diffuse*max(0,N.L) + specular*max(0,N.H)^shininess`,
+     * where `A` is the hemispheric ambient term (see \ref Visualizer::setAmbientColors()).
+     *
+     * \sa Visualizer::setPhongMaterial()
+     */
+    struct PhongMaterial {
+        //! Ambient reflectance weight, scaling the hemispheric ambient contribution
+        float ambient = 1.0f;
+        //! Diffuse (Lambertian) reflectance weight
+        float diffuse = 0.8f;
+        //! Specular reflectance weight. Zero disables the highlight entirely.
+        float specular = 0.2f;
+        //! Specular exponent. Larger values give a tighter, glossier highlight; typical range is 4 (matte sheen) to 128 (near-mirror).
+        float shininess = 32.f;
+    };
+
+    //! Set the Phong material parameters used to shade Context primitives
+    /**
+     * Controls the relative weights of the ambient, diffuse and specular lighting terms, and the
+     * tightness of the specular highlight.
+     *
+     * The defaults (ambient 1.0, diffuse 0.8, specular 0.2, shininess 32) approximate a matte
+     * surface with a slight sheen, which suits foliage. Raising `specular` and `shininess` gives a
+     * glossier, wetter-looking leaf; setting `specular` to zero removes the highlight and recovers
+     * a purely Lambertian appearance.
+     *
+     * \param[in] material Phong material parameters.
+     * \note Has no effect unless a lighting model other than \ref LIGHTING_NONE is active.
+     * \note The specular highlight is most useful in combination with \ref enableLinearPipeline(),
+     * which lets bright highlights roll off smoothly rather than clipping.
+     * \sa getPhongMaterial(), setAmbientColors()
+     */
+    void setPhongMaterial(const PhongMaterial &material);
+
+    //! Get the Phong material parameters used to shade Context primitives
+    [[nodiscard]] PhongMaterial getPhongMaterial() const;
+
+    //! Set the sky and ground colors used by the hemispheric ambient term
+    /**
+     * Ambient light is approximated as a sky color arriving from above and a ground-bounce color
+     * arriving from below, blended according to the vertical component of the surface normal. This
+     * gives surfaces facing away from the light soft directional grounding, rather than the flat
+     * uniform fill produced by a single constant ambient color.
+     *
+     * Defaults are a cool sky (0.5, 0.6, 0.75) and a warm ground bounce (0.35, 0.3, 0.22).
+     * Setting both to the same value recovers a constant, non-directional ambient term.
+     *
+     * \param[in] sky_color Ambient color arriving from above.
+     * \param[in] ground_color Ambient color arriving from below.
+     * \sa getAmbientSkyColor(), getAmbientGroundColor(), setPhongMaterial()
+     */
+    void setAmbientColors(const helios::RGBcolor &sky_color, const helios::RGBcolor &ground_color);
+
+    //! Get the sky color used by the hemispheric ambient term
+    [[nodiscard]] helios::RGBcolor getAmbientSkyColor() const;
+
+    //! Get the ground-bounce color used by the hemispheric ambient term
+    [[nodiscard]] helios::RGBcolor getAmbientGroundColor() const;
+
+    //! Shade surfaces using smooth, interpolated per-vertex normals
+    /**
+     * Each fragment is shaded using a normal interpolated across the primitive from its vertices,
+     * rather than the single geometric normal of the face. On a tessellated curved surface this
+     * removes the faceted appearance, so that a stem, fruit or trunk reads as smoothly curved
+     * rather than as a series of flat panels.
+     *
+     * This only changes the appearance of geometry that actually supplies distinct vertex normals.
+     * Primitives added without them carry the face normal replicated across every vertex, so they
+     * shade identically whether smooth shading is enabled or not. Vertex normals are supplied by
+     * \ref helios::Context "Context" `Sphere`, `Tube` and `Cone` objects, whose normals are
+     * evaluated exactly from the shape's own definition, and by `Polymesh` objects that retain
+     * them -- for example a mesh loaded from an OBJ or PLY file carrying vertex normals.
+     *
+     * Smooth shading is the default. Note that on alpha-masked cutouts such as leaf textures it can
+     * look worse than flat shading, because the interpolated normal no longer agrees with the
+     * visible silhouette; \ref disableSmoothShading() is the remedy.
+     *
+     * \sa disableSmoothShading(), isSmoothShadingEnabled()
+     */
+    void enableSmoothShading();
+
+    //! Shade surfaces using the flat geometric normal of each face
+    /**
+     * \sa enableSmoothShading()
+     */
+    void disableSmoothShading();
+
+    //! Query whether smooth shading is enabled
+    [[nodiscard]] bool isSmoothShadingEnabled() const;
 
     //! Set the background color for the visualizer window
     /**
@@ -807,6 +1078,19 @@ public:
      */
     std::vector<size_t> addTextboxByCenter(const char *textstring, const helios::vec3 &center, const helios::SphericalCoord &rotation, const helios::RGBcolor &fontcolor, uint fontsize, const char *fontname, CoordinateSystem coordinate_system);
 
+    //! Measure the rendered size of a text string without adding it to the visualizer
+    /**
+     * Returns the extent that \ref addTextboxByCenter() would occupy for the same string, font and font size, in window-normalized units. The width is the sum of the glyph advances, so it includes the side
+     * bearings; the height is that of the tallest glyph in the string, so it depends on which characters the string contains. The '_' and '^' subscript and superscript markers are handled exactly as
+     * \ref addTextboxByCenter() handles them: they occupy no width themselves and halve the size of the character that follows.
+     * \param[in] textstring Text to be measured.
+     * \param[in] fontsize Size of the text font in points.
+     * \param[in] fontname Name of a font in the plugins/visualizer/fonts directory, for example "OpenSans-Regular".
+     * \return Width and height of the text in window-normalized units.
+     * \note The result depends on the current framebuffer dimensions and DPI scale, and therefore changes when the window is resized.
+     */
+    [[nodiscard]] helios::vec2 getTextboxSize(const char *textstring, uint fontsize, const char *fontname) const;
+
     //! Removes the geometry with the specified ID from the visualizer.
     /**
      * \param[in] geometry_id The unique identifier of the geometry to delete.
@@ -872,14 +1156,15 @@ public:
     //! Set the range of the Colorbar
     /**
      * \param[in] cmin Minimum value
-     * \param[out] cmax Maximum value
+     * \param[in] cmax Maximum value
+     * \note The command is ignored if cmin is greater than cmax.
      */
     void setColorbarRange(float cmin, float cmax);
 
     //! Set the values in the colorbar where ticks and labels should be placed
     /**
      * \param[in] ticks Vector of values corresponding to ticks
-        \note If tick values are outside of the colorbar range (see setColorBarRange()), the colorbar will be automatically expanded to fit the tick values.
+        \note If tick values are outside of the colorbar range (see setColorbarRange()), the colorbar range will be automatically expanded to fit the tick values, and a warning is issued if messages are enabled. Because the colormap limits follow the colorbar range, this changes the colors shown as well as the labels. To keep an explicit range authoritative, call setColorbarRange() after setColorbarTicks().
     */
     void setColorbarTicks(const std::vector<float> &ticks);
 
@@ -917,33 +1202,6 @@ public:
 
     //! Get the current colormap used in Colorbar/visualization
     [[nodiscard]] Colormap getCurrentColormap() const;
-
-    //! Helper function to round a value to a "nice" number (1, 2, or 5 times a power of 10)
-    /**
-     * \param[in] value The value to round
-     * \param[in] round If true, round to nearest nice number; if false, round up
-     * \return The rounded "nice" number
-     */
-    static double niceNumber(double value, bool round);
-
-    //! Helper function to format a tick label with appropriate precision
-    /**
-     * \param[in] value The tick value to format
-     * \param[in] spacing The spacing between ticks
-     * \param[in] isIntegerData Whether the data represents integer values
-     * \return The formatted label string
-     */
-    static std::string formatTickLabel(double value, double spacing, bool isIntegerData);
-
-    //! Generate optimal tick values using nice numbers algorithm
-    /**
-     * \param[in] dataMin Minimum data value
-     * \param[in] dataMax Maximum data value
-     * \param[in] isIntegerData Whether the data represents integer values
-     * \param[in] targetTicks Target number of ticks (default 5)
-     * \return Vector of tick values
-     */
-    static std::vector<float> generateNiceTicks(float dataMin, float dataMax, bool isIntegerData, int targetTicks = 5);
 
     //! Add all geometry from the Context to the visualizer
     /**
@@ -1055,6 +1313,11 @@ public:
 
     //! Run one rendering loop from plotInteractive()
     /**
+     * This is the body of plotInteractive()'s render loop, exposed so that an external loop can
+     * drive rendering itself. Any geometry pending upload is transferred to the GPU before
+     * rendering, but unlike plotUpdate() the Context geometry is not rebuilt: call
+     * buildContextGeometry() or plotUpdate() if primitives have been added to or changed in the
+     * Context since the last render.
      * \param[in] getKeystrokes If false, do not update visualization with input keystrokes.
      */
     void plotOnce(bool getKeystrokes);
@@ -1108,16 +1371,56 @@ public:
      */
     void displayImage(const std::string &file_name);
 
+    //! Display an image file in the visualizer with bounding boxes overlaid
+    /**
+     * Loads and displays the image exactly as \ref displayImage( const std::string & ) does, then overlays every box in `bbox_file` as a colored outline with the class name drawn on a filled chip inside the
+     * box's top-left corner. Boxes are colored by class ID from a fixed palette of seven colors, so classes whose IDs differ by a multiple of seven share a color.
+     *
+     * \param[in] image_file Path to the image file (JPEG or PNG) to display.
+     * \param[in] bbox_file Path to the bounding box annotation file for this image. See \ref readBoundingBoxFile().
+     * \param[in] classes_file [optional] Path to the class name file. See \ref readBoundingBoxClassNames(). If this is empty, which is the default, a file named "classes.txt" in the same directory as `bbox_file` is used when one exists; when none exists, boxes are labeled with their numeric class ID.
+     * \param[in] line_width [optional] Width of the box outlines in screen pixels. Default is 2.
+     * \param[in] fontsize [optional] Size of the class label font in points. Default is 12.
+     * \note As with \ref displayImage(), this function clears any existing geometry and does not return until the window is closed.
+     */
+    void displayImageWithBoundingBoxes(const std::string &image_file, const std::string &bbox_file, const std::string &classes_file = "", float line_width = 2.f, uint fontsize = 12);
+
+    //! Display an image file in the visualizer with segmentation masks overlaid
+    /**
+     * Loads and displays the image exactly as \ref displayImage( const std::string & ) does, then overlays every mask in `mask_file` as a translucent filled polygon with a solid outline and the class name
+     * drawn on a filled chip. Masks are colored by their position in the file from a fixed palette of seven colors, so each mask is colored independently of its class and two touching objects of the same
+     * class remain distinguishable.
+     *
+     * \param[in] image_file Path to the image file (JPEG or PNG) to display.
+     * \param[in] mask_file Path to the COCO JSON segmentation mask file for this image. See \ref readSegmentationMaskFile().
+     * \param[in] fill_opacity [optional] Opacity of the translucent polygon fill, between 0 and 1. Default is 0.4. A value of 0 draws the outline without a fill.
+     * \param[in] line_width [optional] Width of the mask outlines in screen pixels. Default is 2.
+     * \param[in] fontsize [optional] Size of the class label font in points. Default is 12.
+     * \param[in] show_labels [optional] Whether to draw the class name chip on each mask. Default is true. Pass false to see the masks alone, which is useful when many masks overlap and their chips would cover the image.
+     * \note As with \ref displayImage(), this function clears any existing geometry and does not return until the window is closed.
+     * \note The fill is computed by an even-odd scanline fill in image pixel space, so it is correct even for a contour that crosses itself. The contours written by RadiationModel::writeImageSegmentationMasks() are traced around a pixel mask and are routinely not simple polygons, because a traced boundary crosses itself wherever the mask narrows to a one-pixel neck.
+     */
+    void displayImageWithSegmentationMasks(const std::string &image_file, const std::string &mask_file, float fill_opacity = 0.4f, float line_width = 2.f, uint fontsize = 12, bool show_labels = true);
+
     //! Get R-G-B pixel data in the current display window
     /**
-     * \param[out] buffer Pixel data. The data is stored as r-g-b * column * row. So indices (0,1,2) would be the RGB values for row 0 and column 0, indices (3,4,5) would be RGB values for row 0 and column 1, and so on. Thus, buffer is of size
-     * 3*width*height.
+     * \param[out] buffer Pixel data. The data is stored as r-g-b * column * row. So indices (0,1,2) would be the RGB values for row 0 and column 0, indices (3,4,5) would be RGB values for row 0 and column 1, and so on.
+     * \note The buffer must hold `3*width*height` elements, where width and height come from \ref getFramebufferSize() — **not** from \ref getWindowSize() and not from the dimensions passed to the constructor. On a high-DPI (Retina) display the framebuffer is larger than the window, typically by a factor of two per axis, so sizing the buffer from the window dimensions overflows it. Prefer the std::vector overload, which allocates correctly on the caller's behalf.
      */
     void getWindowPixelsRGB(uint *buffer) const;
 
+    //! Get R-G-B pixel data in the current display window
+    /**
+     * Resizes the vector to the current framebuffer dimensions, so it cannot be undersized by the caller.
+     * \param[out] pixel_data Pixel data, stored as r-g-b * column * row.
+     * \param[out] width_pixels Width of the returned image in pixels
+     * \param[out] height_pixels Height of the returned image in pixels
+     */
+    void getWindowPixelsRGB(std::vector<uint> &pixel_data, uint &width_pixels, uint &height_pixels) const;
+
     //! Get depth buffer data for the current display window
     /**
-     * \param[out] buffer Distance to nearest object from the camera location.
+     * \param[out] buffer Distance to nearest object from the camera location. The buffer must hold `width*height` elements as reported by \ref getWindowSize(). Note this differs from \ref getWindowPixelsRGB(), which is sized from the framebuffer rather than the window.
      */
     [[deprecated]]
     void getDepthMap(float *buffer);
@@ -1214,6 +1517,55 @@ public:
     void getPointRenderingMetrics(size_t &total_points, size_t &rendered_points, float &culling_time_ms) const;
 
 private:
+    //! Helper function to round a value to a "nice" number (1, 2, or 5 times a power of 10)
+    /**
+     * \param[in] value The value to round
+     * \param[in] round If true, round to nearest nice number; if false, round up
+     * \return The rounded "nice" number
+     */
+    static double niceNumber(double value, bool round);
+
+    //! Helper function to format a tick label with appropriate precision
+    /**
+     * \param[in] value The tick value to format
+     * \param[in] spacing The spacing between ticks
+     * \param[in] isIntegerData Whether the data represents integer values
+     * \return The formatted label string
+     */
+    static std::string formatTickLabel(double value, double spacing, bool isIntegerData);
+
+    //! Generate optimal tick values using nice numbers algorithm
+    /**
+     * Tick bounds are extended outward to the next "nice" number past the data, which is the
+     * correct behavior for general axis labeling. For a colorbar, whose ends are fixed at the
+     * colormap limits, use generateColorbarTicks() instead.
+     * \param[in] dataMin Minimum data value
+     * \param[in] dataMax Maximum data value
+     * \param[in] isIntegerData Whether the data represents integer values
+     * \param[in] targetTicks Target number of ticks (default 5)
+     * \return Vector of tick values
+     */
+    static std::vector<float> generateNiceTicks(float dataMin, float dataMax, bool isIntegerData, int targetTicks = 5);
+
+    //! Generate "nice" tick values confined to the colorbar range [cmin, cmax]
+    /**
+     * Unlike generateNiceTicks(), which extends outward past the data for true axis semantics,
+     * every returned tick lies within [cmin, cmax] because a colorbar has hard ends. At least two
+     * ticks are returned whenever cmax > cmin and both are finite, falling back to progressively
+     * finer "nice" spacings and finally to the range endpoints if no nice grid fits.
+     *
+     * This is called from the rendering path, so degenerate input (non-finite limits, or a range
+     * that is empty or narrower than 1e-10) returns a single-tick vector rather than throwing.
+     *
+     * \param[in] cmin Lower colorbar limit
+     * \param[in] cmax Upper colorbar limit
+     * \param[in] isIntegerData Whether the data represents integer values
+     * \param[in] targetTicks Target number of ticks
+     * \param[out] tick_spacing_out If non-null, receives the spacing used to generate the ticks. This is the generating spacing, not one derived from the returned values, so it remains correct when the endpoint fallback produces non-uniform ticks.
+     * \return Vector of tick values, all within [cmin, cmax]
+     */
+    static std::vector<float> generateColorbarTicks(float cmin, float cmax, bool isIntegerData, int targetTicks, double *tick_spacing_out = nullptr);
+
     /**
      * \brief Retrieves the size of the framebuffer.
      *
@@ -1270,6 +1622,24 @@ private:
     void openWindow();
 
     void createOffscreenContext();
+
+    //! Create the shadow-map framebuffer and depth texture
+    /**
+     * Called lazily the first time shadowed lighting is actually rendered, in both windowed
+     * and headless modes. The shadow map is large (see shadow_buffer_size), so deferring it
+     * avoids allocating it for the many Visualizer instances that never enable shadows.
+     * Does nothing if the framebuffer has already been created.
+     */
+    void createShadowFramebuffer();
+
+    //! Setup offscreen framebuffer for headless rendering
+    void setupOffscreenFramebuffer();
+
+    //! Clean up offscreen framebuffer resources
+    void cleanupOffscreenFramebuffer();
+
+    //! Switch rendering target to offscreen buffer
+    void renderToOffscreenBuffer();
 
     //! Remove background rectangle (helper for background mode switching)
     void removeBackgroundRectangle();
@@ -1383,6 +1753,50 @@ private:
      */
     std::vector<size_t> addColorbarByCenter(const char *title, const helios::vec2 &size, const helios::vec3 &center, const helios::RGBcolor &font_color, const Colormap &colormap);
 
+    //! Forget every cached identifier of geometry the visualizer manages internally
+    /**
+     * Call immediately after clearing all geometry. The watermark, background rectangle, background sky, coordinate axes, navigation gizmo and colorbar each cache the identifiers of the geometry they
+     * created, and clearing the geometry destroys those identifiers without resetting the caches. Deleting by a stale identifier afterwards indexes GeometryHandler's UUID_map with at() on a key that is
+     * no longer there, which throws.
+     */
+    void resetCachedGeometryIDs();
+
+    //! Clear existing geometry and add the quad that displays an image, without entering the render loop
+    /**
+     * This is the shared body of \ref displayImage() and \ref displayImageWithBoundingBoxes(): everything those two do apart from plotting. The extent is returned so that overlay geometry can be positioned
+     * against the displayed image rather than against the window, which differ whenever the image and window aspect ratios do not match.
+     *
+     * \param[in] pixel_data Pixel data of the image, of length 4*width_pixels*height_pixels.
+     * \param[in] width_pixels Width of the image in pixels.
+     * \param[in] height_pixels Height of the image in pixels.
+     * \return Extent of the image quad in window-normalized coordinates, ordered as x_min, y_min, x_max, y_max.
+     */
+    helios::vec4 buildImageDisplayGeometry(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels);
+
+    //! Add outline, label chip and label text geometry for a set of bounding boxes drawn over a displayed image
+    /**
+     * \param[in] bounding_boxes Boxes in normalized image coordinates, measured from the top-left corner of the image.
+     * \param[in] class_names Map from class ID to the name displayed on the label. If this is empty, boxes are labeled with their numeric class ID. If it is not empty, a box whose class ID it does not contain is an error, because that means the annotation file and the class name file do not correspond.
+     * \param[in] image_extent Extent of the displayed image quad in window-normalized coordinates, as returned by \ref buildImageDisplayGeometry().
+     * \param[in] line_width Width of the box outlines in screen pixels.
+     * \param[in] fontsize Size of the class label font in points.
+     * \return Identifiers of every geometry element added, per box in input order: the four outline lines, then the label chip, then one rectangle per glyph of the label.
+     */
+    std::vector<size_t> addBoundingBoxOverlay(const std::vector<BoundingBox> &bounding_boxes, const std::map<uint, std::string> &class_names, const helios::vec4 &image_extent, float line_width, uint fontsize);
+
+    //! Add fill, outline, label chip and label text geometry for a set of segmentation masks drawn over a displayed image
+    /**
+     * \param[in] masks Masks whose polygon vertices are in absolute pixel coordinates measured from the top-left corner of the image.
+     * \param[in] image_extent Extent of the displayed image quad in window-normalized coordinates, as returned by \ref buildImageDisplayGeometry().
+     * \param[in] fill_opacity Opacity of the translucent polygon fill, between 0 and 1. No fill geometry is added when this is 0.
+     * \param[in] line_width Width of the mask outlines in screen pixels.
+     * \param[in] fontsize Size of the class label font in points.
+     * \param[in] show_labels Whether to add the label chip and its text. When false, neither is added and a mask contributes only its fill and outline.
+     * \return Identifiers of every geometry element added, per mask in input order: the fill runs, then the outline lines, then the label chip, then one rectangle per glyph of the label.
+     * \note The fill is emitted as one rectangle per horizontal run of covered pixels, so its element count scales with the height of the mask rather than with its vertex count.
+     */
+    std::vector<size_t> addSegmentationMaskOverlay(const std::vector<SegmentationMask> &masks, const helios::vec4 &image_extent, float fill_opacity, float line_width, uint fontsize, bool show_labels);
+
     void updateDepthBuffer();
 
     //! Width of the display window in screen coordinates
@@ -1394,6 +1808,16 @@ private:
     uint Wframebuffer;
     //! Height of the display window in pixels
     uint Hframebuffer;
+
+    //! Ratio of framebuffer pixels to window screen coordinates
+    /**
+     * On a high-DPI (Retina) display the framebuffer is larger than the window in screen
+     * coordinates, typically by a factor of two per axis. Content rasterized on the CPU at
+     * screen-coordinate resolution and then drawn into the framebuffer is magnified by this
+     * factor, so text glyphs must be rasterized at framebuffer resolution to appear sharp.
+     * \return Scale factor, or 1 when the framebuffer matches the window (including headless mode).
+     */
+    [[nodiscard]] float getDPIScale() const;
 
     helios::uint2 shadow_buffer_size;
 
@@ -1439,15 +1863,130 @@ private:
     uint offscreenColorTexture = 0;
     uint offscreenDepthTexture = 0;
 
+    //! Multisampled framebuffer that headless rendering draws into, resolved into offscreenFramebufferID
+    /**
+     * Windowed rendering gets anti-aliasing from the GLFW window's own multisampled default
+     * framebuffer, but the offscreen framebuffer used in headless mode is single-sampled, so every
+     * headless image -- which is what saved figures are made from -- came out fully aliased. These
+     * attachments give headless rendering the same anti-aliasing: geometry is drawn into the
+     * multisampled framebuffer and blit-resolved into the single-sampled color texture before
+     * readback. Zero when anti-aliasing is disabled, in which case rendering targets
+     * offscreenFramebufferID directly.
+     */
+    uint offscreenMultisampleFramebufferID = 0;
+    uint offscreenMultisampleColorBuffer = 0;
+    uint offscreenMultisampleDepthBuffer = 0;
+
+    //! Number of anti-aliasing samples requested at construction
+    int antialiasing_sample_count = 0;
+
+    //! Resolve the multisampled headless framebuffer into the single-sampled color texture
+    /**
+     * Does nothing when headless multisampling is not active. Must be called after all rendering for
+     * a frame is complete and before the color texture is read back or sampled.
+     */
+    void resolveOffscreenMultisampleFramebuffer() const;
+
+public:
+    //! Query whether headless rendering is using a multisampled framebuffer
+    /**
+     * True when anti-aliasing was requested, the Visualizer is headless, and the driver provided the
+     * multisampled attachments. False when anti-aliasing is off or the driver refused them, in which
+     * case headless images are rendered without anti-aliasing.
+     */
+    [[nodiscard]] bool isHeadlessMultisamplingActive() const;
+
+private:
+
     //! Lighting model for Context object primitives (default is LIGHTING_NONE)
     LightingModel primaryLightingModel;
 
     float lightintensity = 1.f;
 
+    //! Multiplier applied to vertex-interpolated primitive colors in the fragment shader.
+    //! 1.5 by default to brighten ordinary renders; set to 1 by enableExactColorMode() so that
+    //! colors survive a Context -> framebuffer round trip unchanged.
+    float colorboost = 1.5f;
+
+    //! Whether the linear-light pipeline (sRGB decode, tone map, sRGB encode) is active
+    bool linear_pipeline_enabled = true;
+
+    //! Exposure multiplier applied in linear light before tone mapping
+    float exposure = 1.f;
+
+    //! Phong material parameters used to shade Context primitives
+    PhongMaterial phong_material;
+
+    //! Sky color for the hemispheric ambient term
+    helios::RGBcolor ambient_sky_color = helios::make_RGBcolor(0.5f, 0.6f, 0.75f);
+
+    //! Ground-bounce color for the hemispheric ambient term
+    helios::RGBcolor ambient_ground_color = helios::make_RGBcolor(0.35f, 0.3f, 0.22f);
+
+    //! Whether fragments are shaded with interpolated per-vertex normals rather than face normals
+    bool smooth_shading_enabled = true;
+
+    //! Resolve per-material Phong parameters into the packed GPU table
+    /**
+     * Walks only the distinct material IDs actually referenced by the geometry, reads each one's
+     * Phong material data once, and packs the result into \ref phong_material_table_buffer. The
+     * returned map assigns each material ID a dense index into that table; a material that
+     * specifies no Phong data is absent from the map and its primitives keep an index of -1,
+     * meaning they fall back to the global Phong material.
+     *
+     * This runs once per geometry build over the handful of materials in the scene, rather than
+     * once per primitive, so the string-keyed material data lookups never enter the hot loop.
+     *
+     * \param[in] context Pointer to the Context whose materials are to be resolved.
+     * \param[in] referenced_material_IDs Distinct material IDs used by the geometry being built.
+     * \return Map from material ID to its dense index in the packed table.
+     */
+    std::unordered_map<uint, int> buildPhongMaterialTable(const helios::Context *context, const std::set<uint> &referenced_material_IDs);
+
+    //! Resolve per-material Phong parameters and stamp the resulting table index onto each primitive
+    /**
+     * Called at every exit of \ref buildContextGeometry_private(), including the early return taken
+     * when no primitive is dirty: material data can change without dirtying any primitive, because
+     * \ref helios::Context::setMaterialData() does not touch the primitives that reference the
+     * material.
+     *
+     * The per-primitive loop is skipped entirely when the resolved Phong data is unchanged from the
+     * previous build, which is the common case in an interactive session.
+     */
+    void updatePhongMaterialIndices();
+
+    //! Fingerprint of the Phong material data resolved into the packed table on the last build
+    /**
+     * Used to skip the whole per-material resolve and per-primitive index assignment when no Phong
+     * material data has changed since the previous build, which is the overwhelmingly common case.
+     * Rebuilding the table is cheap, but reassigning indices walks every displayed primitive, so it
+     * must not run on every frame of an interactive session.
+     */
+    std::vector<float> phong_material_fingerprint;
+
+    //! Whether the per-primitive Phong material indices have ever been assigned
+    bool phong_material_indices_assigned = false;
+
     bool isWatermarkVisible;
 
     //! UUID associated with the watermark rectangle
+    //! Add a textured rectangle whose texture alpha is blended rather than thresholded
+    /**
+     * Used for image overlays such as the watermark. The usual textured-rectangle path tests the
+     * texture's alpha against a fixed threshold, which is what produces the cutout of an
+     * alpha-masked leaf or bark texture but discards the partially-transparent edge pixels of an
+     * image that is genuinely antialiased, leaving a jagged boundary.
+     * \param[in] center (x,y,z) location of the rectangle center
+     * \param[in] size Width and height of the rectangle
+     * \param[in] rotation Spherical rotation angle
+     * \param[in] texture_file Path to the image file
+     * \param[in] coordFlag Coordinate system used for the spatial coordinates
+     * \return Unique identifier for the rectangle geometry
+     */
+    size_t addAlphaBlendedRectangleByCenter(const helios::vec3 &center, const helios::vec2 &size, const helios::SphericalCoord &rotation, const char *texture_file, CoordinateSystem coordFlag);
+
     size_t watermark_ID;
+
 
     //! Color of the window background
     helios::RGBcolor backgroundColor;
@@ -1527,11 +2066,21 @@ private:
     std::vector<size_t> colorbar_IDs;
 
     //! Buffer objects to hold per-vertex data
-    std::vector<GLuint> face_index_buffer, vertex_buffer, uv_buffer;
+    std::vector<GLuint> face_index_buffer, vertex_buffer, uv_buffer, vertex_normal_buffer;
     //! Buffer objects to hold per-primitive data. We will use textures to hold this data.
-    std::vector<GLuint> color_buffer, normal_buffer, texture_flag_buffer, texture_ID_buffer, coordinate_flag_buffer, sky_geometry_flag_buffer, hidden_flag_buffer;
+    std::vector<GLuint> color_buffer, normal_buffer, texture_flag_buffer, texture_ID_buffer, coordinate_flag_buffer, sky_geometry_flag_buffer, hidden_flag_buffer, material_index_buffer;
     //! Texture objects to hold per-primitive data.
-    std::vector<GLuint> color_texture_object, normal_texture_object, texture_flag_texture_object, texture_ID_texture_object, coordinate_flag_texture_object, sky_geometry_flag_texture_object, hidden_flag_texture_object;
+    std::vector<GLuint> color_texture_object, normal_texture_object, texture_flag_texture_object, texture_ID_texture_object, coordinate_flag_texture_object, sky_geometry_flag_texture_object, hidden_flag_texture_object, material_index_texture_object;
+
+    //! Buffer and texture holding the packed per-material Phong parameter table
+    /** One RGBA32F texel per material: (ambient, diffuse, specular, shininess). Primitives index
+        into this by the integer in material_index_buffer, so the four Phong floats are stored once
+        per material rather than once per primitive. */
+    GLuint phong_material_table_buffer = 0;
+    GLuint phong_material_table_texture = 0;
+
+    //! Number of entries currently in the packed Phong material table
+    GLint phong_material_table_size = 0;
 
     //! Rescaling factor for texture (u,v)'s for when the texture size is smaller than the maximum texture size
     GLuint uv_rescale_buffer;
@@ -1570,6 +2119,21 @@ private:
 
     bool build_all_context_geometry = false;
 
+    //! UUIDs that have already been built into the geometry handler, and the Context dirty state they were built from
+    /**
+     * Context dirty flags are sticky: Context::markGeometryClean() is the only thing that clears them, and it is the
+     * user's call to make once every plug-in has processed the change. A plug-in must therefore not clear them itself,
+     * or the other consumers of getDirtyUUIDs() (e.g. CollisionDetection) would silently miss updates.
+     *
+     * Without plug-in-local tracking, though, getDirtyUUIDs() keeps reporting every primitive in the scene on every
+     * frame, and each one is re-uploaded to the GPU one primitive at a time. Recording what has already been built lets
+     * buildContextGeometry_private() re-upload only genuinely new or changed primitives, which is what makes the
+     * per-frame cost proportional to what actually changed rather than to the size of the scene.
+     *
+     * \sa buildContextGeometry_private()
+     */
+    std::unordered_set<uint> contextUUIDs_uploaded;
+
     bool primitiveColorsNeedUpdate;
 
     helios::Context *context;
@@ -1602,6 +2166,12 @@ private:
 
     float colorbar_min;
     float colorbar_max;
+
+    //! Whether the colorbar range was set explicitly by the user
+    /**
+     * Distinguishes an explicit range from an unset one. Inferring this from `colorbar_min == 0 && colorbar_max == 0` made a legitimate setColorbarRange(0, 0) indistinguishable from "never set", so it was silently replaced by the auto-detected data range.
+     */
+    bool colorbar_range_set = false;
     std::vector<float> colorbar_ticks;
     bool colorbar_integer_data;
 
@@ -1638,7 +2208,35 @@ private:
 
     GLuint texArray = 0;
     size_t texture_array_layers = 0;
+    //! Dimensions each layer of the texture array is currently allocated at, in texels
+    /**
+     * Every layer of a texture array is the same size, so this is the size of the largest texture
+     * in the manager rather than a fixed maximum. Allocating every layer at
+     * \ref maximum_texture_size instead would give a 7x9-texel glyph a 2048x2048 RGBA8 layer, or
+     * 16 MB to store roughly 250 bytes. It is tracked here because the array is immutable once
+     * created, so a change in the required size forces the same reallocation a change in the layer
+     * count does, and because the shader's UV rescale factors are relative to it.
+     */
+    helios::uint2 texture_array_layer_size = helios::make_uint2(0, 0);
     bool textures_dirty;
+
+    //! Sampler applying linear filtering, bound only while drawing text glyphs
+    /**
+     * The texture array is shared by glyphs and image textures. Glyphs carry an antialiased
+     * coverage mask that must be interpolated to look smooth, whereas image textures are
+     * alpha-masked against a fixed threshold and are filtered with GL_NEAREST so that the
+     * resulting cutout is not shifted. A sampler object overrides the texture object's own filter
+     * state for the duration of a draw, which keeps the two cases separate.
+     */
+    GLuint glyph_sampler = 0;
+
+    //! Sampler applying linear filtering, bound only while drawing the watermark
+    /**
+     * Shares its filter settings with \ref glyph_sampler but is bound from the opaque draw path
+     * rather than the transparent one. Kept as a separate object so that the two uses can diverge
+     * without disturbing each other.
+     */
+    GLuint image_sampler = 0;
 
     helios::uint2 maximum_texture_size;
 
@@ -1724,6 +2322,14 @@ private:
 
     friend struct Shader;
     friend struct Texture;
+
+    //! Test-only accessor for private tick-generation helpers and colorbar state
+    /**
+     * Defined solely in plugins/visualizer/tests/selfTest.cpp. The tick helpers are private
+     * because they are internal implementation details rather than user-facing API, but they are
+     * pure functions that are worth unit testing directly.
+     */
+    friend class VisualizerTestHelper;
 };
 
 inline glm::vec3 glm_vec3(const helios::vec3 &v) {

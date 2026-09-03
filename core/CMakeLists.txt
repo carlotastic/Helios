@@ -13,6 +13,7 @@ set(HELIOS_SOURCES
         src/Context_object.cpp
         src/Context_fileIO.cpp
         src/Context_data.cpp
+        src/annotation_io.cpp
         src/exif_writer.cpp
         src/global.cpp
         tests/selfTest.cpp
@@ -27,19 +28,21 @@ target_include_directories(helios
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pugixml>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/doctest>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/json>
         $<INSTALL_INTERFACE:include>
         $<INSTALL_INTERFACE:lib/pugixml>
         $<INSTALL_INTERFACE:lib/doctest>
+        $<INSTALL_INTERFACE:lib/json>
 )
 
 # External libraries
 set(SAVED_LOG_LEVEL ${CMAKE_MESSAGE_LOG_LEVEL})
 set(CMAKE_MESSAGE_LOG_LEVEL WARNING)
 
-include_directories( "${CMAKE_CURRENT_SOURCE_DIR}/lib/zlib")
+include_directories( "${CMAKE_BINARY_DIR}/lib/zlib" "${CMAKE_CURRENT_SOURCE_DIR}/lib/zlib")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/lib/zlib"     "${CMAKE_BINARY_DIR}/lib/zlib")
 
-include_directories( "${CMAKE_CURRENT_SOURCE_DIR}/lib/libpng")
+include_directories( "${CMAKE_BINARY_DIR}/lib/libpng" "${CMAKE_CURRENT_SOURCE_DIR}/lib/libpng")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/lib/libpng"   "${CMAKE_BINARY_DIR}/lib/libpng")
 add_dependencies( png_static zlibstatic )
 

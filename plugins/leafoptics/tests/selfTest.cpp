@@ -1890,6 +1890,42 @@ DOCTEST_TEST_CASE("LeafOptics Invalid Input Parameters Throw") {
     }
 }
 
+DOCTEST_TEST_CASE("LeafOptics PROSPECT Direct Entry Point Validates Inputs") {
+    // PROSPECT() is a spectrum-computing entry point in its own right, so it must reject
+    // the same unphysical inputs getLeafSpectra() rejects. numberlayers divides the mean
+    // absorption coefficient k, so N == 0 divides by zero and produces non-finite spectra
+    // rather than an error.
+
+    Context context_test;
+    LeafOptics leafoptics(&context_test);
+    leafoptics.disableMessages();
+
+    std::vector<float> reflectivities, transmissivities;
+
+    {
+        capture_cerr capture;
+
+        // N == 0 divides by zero when computing k.
+        DOCTEST_CHECK_THROWS(leafoptics.PROSPECT(0.0f, 30.f, 10.f, 0.f, 0.f, 0.01f, 0.005f, 0.f, 0.f, reflectivities, transmissivities));
+
+        // N < 1 inverts the layer stack via the negative Stokes exponent.
+        DOCTEST_CHECK_THROWS(leafoptics.PROSPECT(0.5f, 30.f, 10.f, 0.f, 0.f, 0.01f, 0.005f, 0.f, 0.f, reflectivities, transmissivities));
+
+        // Negative constituent contents would contribute negative absorption.
+        DOCTEST_CHECK_THROWS(leafoptics.PROSPECT(1.5f, -10.f, 10.f, 0.f, 0.f, 0.01f, 0.005f, 0.f, 0.f, reflectivities, transmissivities));
+
+        DOCTEST_CHECK_THROWS(leafoptics.PROSPECT(1.5f, 30.f, 10.f, 0.f, 0.f, -0.01f, 0.005f, 0.f, 0.f, reflectivities, transmissivities));
+    }
+
+    // Valid inputs must still compute a finite spectrum.
+    DOCTEST_CHECK_NOTHROW(leafoptics.PROSPECT(1.5f, 30.f, 10.f, 0.f, 0.f, 0.01f, 0.005f, 0.f, 0.f, reflectivities, transmissivities));
+    DOCTEST_CHECK(!reflectivities.empty());
+    for (size_t i = 0; i < reflectivities.size(); i++) {
+        DOCTEST_CHECK(std::isfinite(reflectivities.at(i)));
+        DOCTEST_CHECK(std::isfinite(transmissivities.at(i)));
+    }
+}
+
 int LeafOptics::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);
 }

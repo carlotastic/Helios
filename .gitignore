@@ -9,3 +9,8 @@ projects/*
 plugins/*/build/*
 # Throwaway --project-dir builds used when debugging tests
 utilities/.scratch/
+
+# Radiation spectral data not distributed with the library
+plugins/radiation/spectral_data/GEMINI_LV1/
+plugins/radiation/spectral_data/camera_spectral_datasets/
+plugins/radiation/spectral_data/export_fluspect_optipar.m

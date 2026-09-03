@@ -1,5 +1,6 @@
 #include "CameraCalibration.h"
 #include "RadiationModel.h"
+#include "annotation_io.h"
 #include "BufferIndexing.h"
 #include "FluspectB.h"
 #include "test_helpers.h"
@@ -75,8 +76,224 @@ namespace helios {
             return RadiationModel(context); // Unreachable, silence compiler warning
 #endif
         }
+
+        //! Forwarders to the private color-correction matrix I/O helpers
+        /**
+         * These are implementation details of autoCalibrateCameraImage() with no user-facing
+         * meaning, so they are private; the tests exercise them directly through this friend.
+         */
+        static void exportColorCorrectionMatrixXML(RadiationModel &model, const std::string &file_path, const std::string &camera_label, const std::vector<std::vector<float>> &matrix, const std::string &source_image_path,
+                                                   const std::string &colorboard_type, float average_delta_e) {
+            model.exportColorCorrectionMatrixXML(file_path, camera_label, matrix, source_image_path, colorboard_type, average_delta_e);
+        }
+
+        static std::vector<std::vector<float>> loadColorCorrectionMatrixXML(RadiationModel &model, const std::string &file_path, std::string &camera_label_out) {
+            return model.loadColorCorrectionMatrixXML(file_path, camera_label_out);
+        }
+
+        //! Forwarder to the shared segmentation-mask annotation builder
+        /**
+         * Takes the label masks directly, so the connected-component and boundary-tracing logic can
+         * be exercised on hand-built masks without rendering a scene. The implementation now lives
+         * in the core annotation utilities, shared with the synthetic annotation plug-in, but the
+         * forwarder is kept so that the existing tests continue to exercise it through this path.
+         */
+        static std::vector<std::map<std::string, std::vector<float>>> generateAnnotationsFromMasks(RadiationModel &model, const std::map<int, std::vector<std::vector<bool>>> &label_masks, uint object_class_ID, const helios::int2 &camera_resolution,
+                                                                                                   int image_id) {
+            return helios::annotation::maskToAnnotations(label_masks, object_class_ID, camera_resolution, image_id);
+        }
     };
 } // namespace helios
+
+GPU_TEST_CASE("RadiationModel::writeImageSegmentationMasks refuses a pixel-to-primitive map that no longer resolves") {
+    // The per-camera "camera_<label>_pixel_UUID" map holds Context UUIDs (offset by one, zero meaning the pixel hit
+    // nothing) and is published as global data. Context::writeXML() stores global data verbatim while
+    // Context::loadXML() assigns every primitive a fresh UUID, so a map that arrives with a reloaded scene describes
+    // primitives that are gone -- or, where the value happens to land in range again, entirely different ones, which
+    // would silently mislabel the annotations. Writing masks against a map that no longer resolves must fail loudly.
+    Context context;
+    uint patch = context.addPatch(make_vec3(0, 0, 0), make_vec2(1, 1));
+    context.setPrimitiveData(patch, "patch_id", uint(1));
+
+    RadiationModel radiationmodel = RadiationModelTestHelper::createWithSharedDevice(&context);
+    radiationmodel.disableMessages();
+
+    CameraProperties cam_props;
+    cam_props.camera_resolution = make_int2(8, 8);
+    cam_props.HFOV = 70;
+    cam_props.focal_plane_distance = 10;
+    cam_props.lens_diameter = 0.f;
+    radiationmodel.addRadiationCamera("stale_cam", {"SW"}, make_vec3(0, -10, 0), make_vec3(0, 0, 0), cam_props, 1);
+
+    // Stand in for a map carried over from another Context: one pixel that hit nothing, and one naming a primitive
+    // that does not exist here.
+    std::vector<uint> stale_map = {0u, 999999u};
+    context.setGlobalData("camera_stale_cam_pixel_UUID", stale_map);
+
+    std::string message;
+    bool threw = false;
+    try {
+        radiationmodel.writeImageSegmentationMasks("stale_cam", {"patch_id"}, {1}, "stale_masks.json", "does_not_exist.jpeg");
+    } catch (const std::runtime_error &e) {
+        threw = true;
+        message = e.what();
+    }
+    DOCTEST_CHECK(threw);
+    // Must be rejected for the stale map specifically, not for the missing image file that is checked afterwards.
+    DOCTEST_CHECK(message.find("no longer exist in the Context") != std::string::npos);
+
+    std::remove("stale_masks.json");
+}
+
+GPU_TEST_CASE("RadiationModel::writeImageBoundingBoxes classes file argument is not taken as the output path") {
+    // Regression test for an overload-resolution trap. The current API is
+    //     writeImageBoundingBoxes(camera, label, class_ID, image_file, classes_txt_file, image_path)
+    // but a deprecated overload
+    //     writeImageBoundingBoxes(camera, label, class_ID, imagefile_base, image_path, append, frame)
+    // also matches a six-argument call whose trailing arguments are all strings. The deprecated one
+    // was selected, so the classes file name was bound to its image_path parameter and the call
+    // failed with "Expected a directory path but got a file path for argument 'image_path'" -- for
+    // a call that is correct against the documented signature. [[deprecated]] produced no warning,
+    // because the declaration itself is well-formed.
+
+    Context context;
+    SphericalCoord rotation = make_SphericalCoord(M_PI / 2, 0);
+    uint patch = context.addPatch(make_vec3(0, 0, 0), make_vec2(0.8, 1.5), rotation);
+    context.setPrimitiveData(patch, "patch_id", uint(10));
+
+    RadiationModel radiationmodel = RadiationModelTestHelper::createWithSharedDevice(&context);
+    radiationmodel.disableMessages();
+
+    CameraProperties cam_props;
+    cam_props.camera_resolution = make_int2(64, 64);
+    cam_props.HFOV = 70;
+    cam_props.focal_plane_distance = 10;
+    cam_props.lens_diameter = 0.f;
+    radiationmodel.addRadiationCamera("bbox_cam", {"SW"}, make_vec3(0, -10, 0), make_vec3(0, 0, 0), cam_props, 1);
+
+    radiationmodel.addRadiationBand("SW");
+    radiationmodel.setScatteringDepth("SW", 1);
+    uint source = radiationmodel.addCollimatedRadiationSource(make_vec3(0, 1, 0));
+    radiationmodel.setSourceFlux(source, "SW", 1000.f);
+    radiationmodel.updateGeometry();
+    radiationmodel.runBand("SW");
+
+    const std::string outdir = "./bbox_overload_test/";
+    std::filesystem::remove_all(outdir);
+    std::filesystem::create_directories(outdir);
+
+    const std::string image_file = radiationmodel.writeCameraImage("bbox_cam", {"SW"}, "overload", outdir);
+
+    // A call written against the current six-argument signature must reach that overload. The
+    // trailing arguments are string literals, which is how a user naturally writes the call and is
+    // exactly the form that selected the deprecated overload: its by-value uint parameter is a
+    // better match for the literal 1u than the current overload's const uint&, so it won the
+    // resolution whenever the string arguments needed a const char* to std::string conversion.
+    DOCTEST_CHECK_NOTHROW(radiationmodel.writeImageBoundingBoxes("bbox_cam", "patch_id", 1u, image_file, "classes.txt", "./bbox_overload_test/"));
+
+    // The classes file must be written under the output directory, named as asked. If the
+    // deprecated overload had been selected, the name would have been treated as a directory and
+    // no such file would exist.
+    const bool classes_written = std::filesystem::exists(outdir + "classes.txt");
+
+    // The annotation file is named after the image.
+    const std::string expected_labels = outdir + std::filesystem::path(image_file).stem().string() + ".txt";
+    const bool labels_written = std::filesystem::exists(expected_labels);
+
+    std::filesystem::remove_all(outdir);
+
+    DOCTEST_CHECK(classes_written);
+    DOCTEST_CHECK(labels_written);
+}
+
+GPU_TEST_CASE("RadiationModel segmentation mask attributes correspond to their own annotation") {
+    // Regression test for a connectivity mismatch between the two passes that build a segmentation
+    // mask annotation. The annotations come from an 8-connected component search, but the optional
+    // per-annotation attribute averaging ran its own 4-connected search over the same masks, and
+    // the two result lists were then paired by index. A region whose pixels touch only diagonally
+    // is one component to the first search and many to the second, so the lists fall out of step
+    // and an annotation receives the mean values belonging to a different object.
+    //
+    // Two thin patches are rotated off-axis so that each rasterizes to a diagonal staircase, which
+    // is the shape the two searches disagree about. They are given clearly different attribute
+    // values, so a mispaired annotation is unambiguous: before the fix both annotations reported
+    // the first patch's value.
+
+    Context context;
+
+    const float left_temperature = 300.f;
+    const float right_temperature = 400.f;
+
+    uint left_sliver = context.addPatch(make_vec3(-0.9, 0, 0), make_vec2(1.6, 0.10), make_SphericalCoord(0.5 * M_PI, 0.f));
+    context.rotatePrimitive(left_sliver, 0.7f, "y");
+    context.setPrimitiveData(left_sliver, "patch_id", uint(1));
+    context.setPrimitiveData(left_sliver, "patch_temp", left_temperature);
+
+    uint right_sliver = context.addPatch(make_vec3(0.9, 0, 0), make_vec2(1.6, 0.10), make_SphericalCoord(0.5 * M_PI, 0.f));
+    context.rotatePrimitive(right_sliver, 0.7f, "y");
+    context.setPrimitiveData(right_sliver, "patch_id", uint(2));
+    context.setPrimitiveData(right_sliver, "patch_temp", right_temperature);
+
+    RadiationModel radiationmodel = RadiationModelTestHelper::createWithSharedDevice(&context);
+    radiationmodel.disableMessages();
+
+    CameraProperties cam_props;
+    cam_props.camera_resolution = make_int2(128, 128);
+    cam_props.HFOV = 70;
+    cam_props.focal_plane_distance = 10;
+    cam_props.lens_diameter = 0.f;
+    radiationmodel.addRadiationCamera("attr_cam", {"SW"}, make_vec3(0, -10, 0), make_vec3(0, 0, 0), cam_props, 1);
+
+    radiationmodel.addRadiationBand("SW");
+    radiationmodel.setScatteringDepth("SW", 1);
+    uint source = radiationmodel.addCollimatedRadiationSource(make_vec3(0, 1, 0));
+    radiationmodel.setSourceFlux(source, "SW", 1000.f);
+    radiationmodel.updateGeometry();
+    radiationmodel.runBand("SW");
+
+    const std::string outdir = "./attr_conn_test/";
+    std::filesystem::remove_all(outdir);
+    std::filesystem::create_directories(outdir);
+
+    const std::string image_file = radiationmodel.writeCameraImage("attr_cam", {"SW"}, "attr", outdir);
+    radiationmodel.writeImageSegmentationMasks("attr_cam", "patch_id", 1u, outdir + "attr_masks.json", image_file, {"patch_temp"}, false);
+
+    nlohmann::json coco;
+    const std::string json_file = outdir + "attr_masks.json";
+    const bool json_exists = std::filesystem::exists(json_file);
+    if (json_exists) {
+        std::ifstream file(json_file);
+        file >> coco;
+    }
+
+    std::filesystem::remove_all(outdir);
+
+    DOCTEST_REQUIRE(json_exists);
+    DOCTEST_REQUIRE(coco.contains("annotations"));
+
+    std::vector<double> reported_temperatures;
+    for (const auto &ann: coco["annotations"]) {
+        if (ann.contains("attributes") && ann["attributes"].contains("patch_temp")) {
+            reported_temperatures.push_back(ann["attributes"]["patch_temp"]);
+        }
+    }
+
+    // Both patches are visible and each carries an attribute.
+    DOCTEST_REQUIRE(coco["annotations"].size() == 2);
+    DOCTEST_CHECK(reported_temperatures.size() == 2);
+
+    // The two annotations describe different objects, so they must report different values. Before
+    // the fix both reported the left patch's temperature.
+    if (reported_temperatures.size() == 2) {
+        DOCTEST_CHECK(std::abs(reported_temperatures.at(0) - reported_temperatures.at(1)) > 1.0);
+
+        // And each reported value must be one the scene actually contains.
+        for (double temperature: reported_temperatures) {
+            const bool recognized = std::abs(temperature - double(left_temperature)) < 1.0 || std::abs(temperature - double(right_temperature)) < 1.0;
+            DOCTEST_CHECK(recognized);
+        }
+    }
+}
 
 int RadiationModel::selfTest(int argc, char **argv) {
     return helios::runDoctestWithValidation(argc, argv);
@@ -95,7 +312,8 @@ DOCTEST_TEST_CASE("Backend Identification") {
 #ifdef HELIOS_HAVE_VULKAN
     compiled_backends += "Vulkan ";
 #endif
-    if (compiled_backends.empty()) compiled_backends = "(none)";
+    if (compiled_backends.empty())
+        compiled_backends = "(none)";
     DOCTEST_MESSAGE("Compiled backends: " << compiled_backends);
 
     bool gpu_available = RadiationModelTestHelper::isGPUAvailable();
@@ -3703,7 +3921,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::string ccm_file_path = "test_ccm_3x3.xml";
 
         // Test the exportColorCorrectionMatrixXML function directly
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix, "/path/to/test_image.jpg", "DGK", 15.5f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix, "/path/to/test_image.jpg", "DGK", 15.5f);
 
         // Verify file was created
         std::ifstream test_file(ccm_file_path);
@@ -3712,7 +3930,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
 
         // Test the loadColorCorrectionMatrixXML function
         std::string loaded_camera_label;
-        std::vector<std::vector<float>> loaded_matrix = radiationmodel.loadColorCorrectionMatrixXML(ccm_file_path, loaded_camera_label);
+        std::vector<std::vector<float>> loaded_matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, ccm_file_path, loaded_camera_label);
 
         // Verify loaded data matches exported data
         DOCTEST_CHECK(loaded_camera_label == camera_label);
@@ -3738,11 +3956,11 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::string ccm_file_path = "test_ccm_4x3.xml";
 
         // Export 4x3 matrix
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix_4x3, "/path/to/test_image.jpg", "Calibrite", 12.3f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix_4x3, "/path/to/test_image.jpg", "Calibrite", 12.3f);
 
         // Load and verify
         std::string loaded_camera_label;
-        std::vector<std::vector<float>> loaded_matrix = radiationmodel.loadColorCorrectionMatrixXML(ccm_file_path, loaded_camera_label);
+        std::vector<std::vector<float>> loaded_matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, ccm_file_path, loaded_camera_label);
 
         DOCTEST_CHECK(loaded_camera_label == camera_label);
         DOCTEST_CHECK(loaded_matrix.size() == 3);
@@ -3765,7 +3983,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::vector<std::vector<float>> test_matrix = {{1.1f, -0.05f, 0.02f}, {-0.03f, 1.08f, 0.01f}, {0.01f, -0.04f, 1.12f}};
 
         std::string ccm_file_path = "test_apply_ccm_3x3.xml";
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "DGK", 10.0f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "DGK", 10.0f);
 
         // Get initial pixel values
         std::vector<float> initial_red = radiationmodel.getCameraPixelData(camera_label, "red");
@@ -3800,7 +4018,7 @@ GPU_TEST_CASE("RadiationModel CCM Export and Import") {
         std::vector<std::vector<float>> test_matrix = {{1.05f, -0.02f, 0.01f, 0.005f}, {-0.01f, 1.03f, 0.005f, -0.002f}, {0.005f, -0.015f, 1.08f, 0.003f}};
 
         std::string ccm_file_path = "test_apply_ccm_4x3.xml";
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "SpyderCHECKR", 8.5f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, camera_label, test_matrix, "/path/to/test.jpg", "SpyderCHECKR", 8.5f);
 
         // Reset camera data to known values
         std::fill(red_data.begin(), red_data.end(), 0.7f);
@@ -3842,7 +4060,7 @@ GPU_TEST_CASE("RadiationModel CCM Error Handling") {
         std::string camera_label;
         bool exception_thrown = false;
         try {
-            std::vector<std::vector<float>> matrix = radiationmodel.loadColorCorrectionMatrixXML("/nonexistent/path.xml", camera_label);
+            std::vector<std::vector<float>> matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, "/nonexistent/path.xml", camera_label);
         } catch (const std::runtime_error &e) {
             exception_thrown = true;
             std::string error_msg(e.what());
@@ -3866,7 +4084,7 @@ GPU_TEST_CASE("RadiationModel CCM Error Handling") {
         std::string camera_label;
         bool exception_thrown = false;
         try {
-            std::vector<std::vector<float>> matrix = radiationmodel.loadColorCorrectionMatrixXML(malformed_ccm_path, camera_label);
+            std::vector<std::vector<float>> matrix = RadiationModelTestHelper::loadColorCorrectionMatrixXML(radiationmodel, malformed_ccm_path, camera_label);
         } catch (const std::runtime_error &e) {
             exception_thrown = true;
             std::string error_msg(e.what());
@@ -3882,7 +4100,7 @@ GPU_TEST_CASE("RadiationModel CCM Error Handling") {
         std::string ccm_file_path = "test_error_ccm.xml";
         std::vector<std::vector<float>> identity_matrix = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
 
-        radiationmodel.exportColorCorrectionMatrixXML(ccm_file_path, "test_camera", identity_matrix, "/test.jpg", "DGK", 5.0f);
+        RadiationModelTestHelper::exportColorCorrectionMatrixXML(radiationmodel, ccm_file_path, "test_camera", identity_matrix, "/test.jpg", "DGK", 5.0f);
 
         bool exception_thrown = false;
         try {
@@ -5046,16 +5264,14 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         camera_props.HFOV = 35.0f;
         camera_props.sensor_width_mm = 36.0f;
 
-        radiationmodel.addRadiationCamera("exif_camera", {"RGB_R", "RGB_G", "RGB_B"},
-                                          make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
+        radiationmodel.addRadiationCamera("exif_camera", {"RGB_R", "RGB_G", "RGB_B"}, make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
 
         radiationmodel.updateGeometry();
         radiationmodel.runBand("RGB_R");
         radiationmodel.runBand("RGB_G");
         radiationmodel.runBand("RGB_B");
 
-        const std::string image_path = radiationmodel.writeCameraImage(
-                "exif_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_exif");
+        const std::string image_path = radiationmodel.writeCameraImage("exif_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_exif");
         DOCTEST_REQUIRE(!image_path.empty());
 
         // Read the JPEG bytes and hand-parse its segment markers.
@@ -5076,53 +5292,53 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
 
         size_t i = 2;
         while (i + 4 < bytes.size()) {
-            if (bytes[i] != 0xFF) break;
+            if (bytes[i] != 0xFF)
+                break;
             const unsigned char marker = bytes[i + 1];
-            if (marker == 0xD9 || marker == 0xDA) break;
+            if (marker == 0xD9 || marker == 0xDA)
+                break;
             const size_t seg_len = (static_cast<size_t>(bytes[i + 2]) << 8) | static_cast<size_t>(bytes[i + 3]);
-            if (seg_len < 2 || i + 2 + seg_len > bytes.size()) break;
+            if (seg_len < 2 || i + 2 + seg_len > bytes.size())
+                break;
             if (marker == 0xE1) {
                 const size_t payload_off = i + 4;
                 const size_t payload_len = seg_len - 2;
-                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' &&
-                    bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
+                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' && bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
                     found_exif = true;
                     // Search for "Helios" string in EXIF payload (Make and Software tags).
                     const std::string exif_str(bytes.begin() + payload_off, bytes.begin() + payload_off + payload_len);
-                    if (exif_str.find("Helios") != std::string::npos) found_helios = true;
+                    if (exif_str.find("Helios") != std::string::npos)
+                        found_helios = true;
 
                     // Walk IFD0 -> find GPS pointer (0x8825) -> walk GPS IFD for tag 0x0001/0x0003 refs.
                     const size_t tiff_base = payload_off + 6; // skip "Exif\0\0"
                     const size_t ifd0_off = tiff_base + 8;
                     if (ifd0_off + 2 <= bytes.size()) {
-                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) |
-                                            (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
+                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) | (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
                         uint32_t gps_off = 0;
                         for (uint16_t k = 0; k < n0; ++k) {
                             const size_t e = ifd0_off + 2 + static_cast<size_t>(k) * 12;
-                            if (e + 12 > bytes.size()) break;
-                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                 (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                            if (e + 12 > bytes.size())
+                                break;
+                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
                             if (tag == 0x8825) {
-                                gps_off = static_cast<uint32_t>(bytes[e + 8]) |
-                                          (static_cast<uint32_t>(bytes[e + 9]) << 8) |
-                                          (static_cast<uint32_t>(bytes[e + 10]) << 16) |
-                                          (static_cast<uint32_t>(bytes[e + 11]) << 24);
+                                gps_off = static_cast<uint32_t>(bytes[e + 8]) | (static_cast<uint32_t>(bytes[e + 9]) << 8) | (static_cast<uint32_t>(bytes[e + 10]) << 16) | (static_cast<uint32_t>(bytes[e + 11]) << 24);
                                 break;
                             }
                         }
                         if (gps_off > 0) {
                             const size_t gps_abs = tiff_base + gps_off;
                             if (gps_abs + 2 <= bytes.size()) {
-                                const uint16_t ng = static_cast<uint16_t>(bytes[gps_abs]) |
-                                                    (static_cast<uint16_t>(bytes[gps_abs + 1]) << 8);
+                                const uint16_t ng = static_cast<uint16_t>(bytes[gps_abs]) | (static_cast<uint16_t>(bytes[gps_abs + 1]) << 8);
                                 for (uint16_t k = 0; k < ng; ++k) {
                                     const size_t e = gps_abs + 2 + static_cast<size_t>(k) * 12;
-                                    if (e + 12 > bytes.size()) break;
-                                    const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                         (static_cast<uint16_t>(bytes[e + 1]) << 8);
-                                    if (tag == 0x0001) gps_lat_ref = static_cast<char>(bytes[e + 8]);
-                                    else if (tag == 0x0003) gps_lon_ref = static_cast<char>(bytes[e + 8]);
+                                    if (e + 12 > bytes.size())
+                                        break;
+                                    const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                                    if (tag == 0x0001)
+                                        gps_lat_ref = static_cast<char>(bytes[e + 8]);
+                                    else if (tag == 0x0003)
+                                        gps_lon_ref = static_cast<char>(bytes[e + 8]);
                                 }
                             }
                         }
@@ -5138,8 +5354,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
                     }
                     if (match) {
                         found_xmp = true;
-                        const std::string xmp_str(bytes.begin() + payload_off,
-                                                   bytes.begin() + payload_off + payload_len);
+                        const std::string xmp_str(bytes.begin() + payload_off, bytes.begin() + payload_off + payload_len);
                         DOCTEST_CHECK(xmp_str.find("Camera:Yaw") != std::string::npos);
                     }
                 }
@@ -5164,8 +5379,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         // that library cameras don't get a hardcoded "Helios" Make tag.
         {
             capture_cout silence_band_warnings;
-            radiationmodel.addRadiationCameraFromLibrary("canon_lib_cam", "Canon_20D",
-                                                        make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), 1);
+            radiationmodel.addRadiationCameraFromLibrary("canon_lib_cam", "Canon_20D", make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), 1);
         }
 
         radiationmodel.updateGeometry();
@@ -5173,8 +5387,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         radiationmodel.runBand("green");
         radiationmodel.runBand("blue");
 
-        const std::string image_path = radiationmodel.writeCameraImage(
-                "canon_lib_cam", {"red", "green", "blue"}, "test_library_exif");
+        const std::string image_path = radiationmodel.writeCameraImage("canon_lib_cam", {"red", "green", "blue"}, "test_library_exif");
         DOCTEST_REQUIRE(!image_path.empty());
 
         std::ifstream jpeg_in(image_path, std::ios::binary);
@@ -5187,50 +5400,48 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         std::string make_value, model_value, lens_make_value, lens_model_value;
         size_t i = 2;
         while (i + 4 < bytes.size()) {
-            if (bytes[i] != 0xFF) break;
+            if (bytes[i] != 0xFF)
+                break;
             const unsigned char marker = bytes[i + 1];
-            if (marker == 0xD9 || marker == 0xDA) break;
+            if (marker == 0xD9 || marker == 0xDA)
+                break;
             const size_t seg_len = (static_cast<size_t>(bytes[i + 2]) << 8) | static_cast<size_t>(bytes[i + 3]);
-            if (seg_len < 2 || i + 2 + seg_len > bytes.size()) break;
+            if (seg_len < 2 || i + 2 + seg_len > bytes.size())
+                break;
             if (marker == 0xE1) {
                 const size_t payload_off = i + 4;
                 const size_t payload_len = seg_len - 2;
-                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' &&
-                    bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
+                if (payload_len >= 6 && bytes[payload_off + 0] == 'E' && bytes[payload_off + 1] == 'x' && bytes[payload_off + 2] == 'i' && bytes[payload_off + 3] == 'f') {
                     const size_t tiff_base = payload_off + 6;
                     const size_t ifd0_off = tiff_base + 8;
 
                     // Helper: read an ASCII tag from the IFD at the given absolute offset.
                     auto readAsciiAt = [&](size_t ifd_off, uint16_t target_tag) -> std::string {
-                        if (ifd_off + 2 > bytes.size()) return std::string();
-                        const uint16_t n = static_cast<uint16_t>(bytes[ifd_off]) |
-                                           (static_cast<uint16_t>(bytes[ifd_off + 1]) << 8);
+                        if (ifd_off + 2 > bytes.size())
+                            return std::string();
+                        const uint16_t n = static_cast<uint16_t>(bytes[ifd_off]) | (static_cast<uint16_t>(bytes[ifd_off + 1]) << 8);
                         for (uint16_t k = 0; k < n; ++k) {
                             const size_t e = ifd_off + 2 + static_cast<size_t>(k) * 12;
-                            if (e + 12 > bytes.size()) break;
-                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                 (static_cast<uint16_t>(bytes[e + 1]) << 8);
-                            if (tag != target_tag) continue;
-                            const uint16_t type = static_cast<uint16_t>(bytes[e + 2]) |
-                                                  (static_cast<uint16_t>(bytes[e + 3]) << 8);
-                            if (type != 2 /*ASCII*/) return std::string();
-                            const uint32_t count = static_cast<uint32_t>(bytes[e + 4]) |
-                                                   (static_cast<uint32_t>(bytes[e + 5]) << 8) |
-                                                   (static_cast<uint32_t>(bytes[e + 6]) << 16) |
-                                                   (static_cast<uint32_t>(bytes[e + 7]) << 24);
+                            if (e + 12 > bytes.size())
+                                break;
+                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                            if (tag != target_tag)
+                                continue;
+                            const uint16_t type = static_cast<uint16_t>(bytes[e + 2]) | (static_cast<uint16_t>(bytes[e + 3]) << 8);
+                            if (type != 2 /*ASCII*/)
+                                return std::string();
+                            const uint32_t count = static_cast<uint32_t>(bytes[e + 4]) | (static_cast<uint32_t>(bytes[e + 5]) << 8) | (static_cast<uint32_t>(bytes[e + 6]) << 16) | (static_cast<uint32_t>(bytes[e + 7]) << 24);
                             size_t value_off;
                             if (count <= 4) {
                                 value_off = e + 8;
                             } else {
-                                const uint32_t off_in_tiff = static_cast<uint32_t>(bytes[e + 8]) |
-                                                             (static_cast<uint32_t>(bytes[e + 9]) << 8) |
-                                                             (static_cast<uint32_t>(bytes[e + 10]) << 16) |
-                                                             (static_cast<uint32_t>(bytes[e + 11]) << 24);
+                                const uint32_t off_in_tiff = static_cast<uint32_t>(bytes[e + 8]) | (static_cast<uint32_t>(bytes[e + 9]) << 8) | (static_cast<uint32_t>(bytes[e + 10]) << 16) | (static_cast<uint32_t>(bytes[e + 11]) << 24);
                                 value_off = tiff_base + off_in_tiff;
                             }
                             // count includes the trailing NUL.
                             const size_t str_len = (count > 0) ? (count - 1) : 0;
-                            if (value_off + str_len > bytes.size()) return std::string();
+                            if (value_off + str_len > bytes.size())
+                                return std::string();
                             return std::string(bytes.begin() + value_off, bytes.begin() + value_off + str_len);
                         }
                         return std::string();
@@ -5241,19 +5452,15 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
 
                     // Walk into the ExifSubIFD for LensMake / LensModel (0xA433 / 0xA434).
                     if (ifd0_off + 2 <= bytes.size()) {
-                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) |
-                                            (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
+                        const uint16_t n0 = static_cast<uint16_t>(bytes[ifd0_off]) | (static_cast<uint16_t>(bytes[ifd0_off + 1]) << 8);
                         uint32_t exif_sub_off = 0;
                         for (uint16_t k = 0; k < n0; ++k) {
                             const size_t e = ifd0_off + 2 + static_cast<size_t>(k) * 12;
-                            if (e + 12 > bytes.size()) break;
-                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) |
-                                                 (static_cast<uint16_t>(bytes[e + 1]) << 8);
+                            if (e + 12 > bytes.size())
+                                break;
+                            const uint16_t tag = static_cast<uint16_t>(bytes[e]) | (static_cast<uint16_t>(bytes[e + 1]) << 8);
                             if (tag == 0x8769) {
-                                exif_sub_off = static_cast<uint32_t>(bytes[e + 8]) |
-                                               (static_cast<uint32_t>(bytes[e + 9]) << 8) |
-                                               (static_cast<uint32_t>(bytes[e + 10]) << 16) |
-                                               (static_cast<uint32_t>(bytes[e + 11]) << 24);
+                                exif_sub_off = static_cast<uint32_t>(bytes[e + 8]) | (static_cast<uint32_t>(bytes[e + 9]) << 8) | (static_cast<uint32_t>(bytes[e + 10]) << 16) | (static_cast<uint32_t>(bytes[e + 11]) << 24);
                                 break;
                             }
                         }
@@ -5287,8 +5494,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         camera_props.HFOV = 35.0f;
         camera_props.sensor_width_mm = 36.0f;
 
-        radiationmodel.addRadiationCamera("offset_camera", {"RGB_R", "RGB_G", "RGB_B"},
-                                          make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
+        radiationmodel.addRadiationCamera("offset_camera", {"RGB_R", "RGB_G", "RGB_B"}, make_vec3(0, -3, 1.5), make_vec3(0, 0, 0), camera_props, 1);
         radiationmodel.updateGeometry();
         radiationmodel.runBand("RGB_R");
         radiationmodel.runBand("RGB_G");
@@ -5298,8 +5504,7 @@ GPU_TEST_CASE("RadiationModel - Camera Metadata Export") {
         // fractional-hour path: Helios -5.75 becomes the standard EXIF OffsetTime "+05:45".
         context.setLocation(make_Location(27.7f, -85.3f, -5.75f, 1400.f));
 
-        const std::string image_path = radiationmodel.writeCameraImage(
-                "offset_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_offset");
+        const std::string image_path = radiationmodel.writeCameraImage("offset_camera", {"RGB_R", "RGB_G", "RGB_B"}, "test_offset");
         DOCTEST_REQUIRE(!image_path.empty());
 
         std::ifstream jpeg_in(image_path, std::ios::binary);
@@ -8152,17 +8357,22 @@ GPU_TEST_CASE("RadiationModel - Pixel Label UUID Mapping With Non-Sequential Obj
     for (int j = 0; j < 64; j++) {
         for (int i = 0; i < 64; i++) {
             float label = labels[j * 64 + i];
-            if (std::isnan(label)) continue;
+            if (std::isnan(label))
+                continue;
 
             uint label_uint = static_cast<uint>(label);
             bool is_left = (i < 32);
 
             if (is_left) {
-                if (label_uint == 1u) left_polymesh++;
-                else if (label_uint == 2u) left_orphan++;
+                if (label_uint == 1u)
+                    left_polymesh++;
+                else if (label_uint == 2u)
+                    left_orphan++;
             } else {
-                if (label_uint == 1u) right_polymesh++;
-                else if (label_uint == 2u) right_orphan++;
+                if (label_uint == 1u)
+                    right_polymesh++;
+                else if (label_uint == 2u)
+                    right_orphan++;
             }
         }
     }
@@ -8171,10 +8381,8 @@ GPU_TEST_CASE("RadiationModel - Pixel Label UUID Mapping With Non-Sequential Obj
     // If the UUID mapping is broken, the values will be swapped.
     DOCTEST_CHECK_MESSAGE(left_polymesh > 0, "Polymesh patches (element_type=1) should appear on the left side of the image");
     DOCTEST_CHECK_MESSAGE(right_orphan > 0, "Orphan patch (element_type=2) should appear on the right side of the image");
-    DOCTEST_CHECK_MESSAGE(left_orphan == 0,
-        "No orphan labels should appear on the left side (got " << left_orphan << " — indicates UUID mapping error)");
-    DOCTEST_CHECK_MESSAGE(right_polymesh == 0,
-        "No polymesh labels should appear on the right side (got " << right_polymesh << " — indicates UUID mapping error)");
+    DOCTEST_CHECK_MESSAGE(left_orphan == 0, "No orphan labels should appear on the left side (got " << left_orphan << " — indicates UUID mapping error)");
+    DOCTEST_CHECK_MESSAGE(right_polymesh == 0, "No polymesh labels should appear on the right side (got " << right_polymesh << " — indicates UUID mapping error)");
 
     std::remove("test_cam_uuid_mapping_test_00000.txt");
 }
@@ -8343,7 +8551,7 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Camera Rendering") {
     for (float p: pixels_no_specular) {
         sum_no_specular += p;
     }
-    float avg_no_specular = sum_no_specular / (float)pixels_no_specular.size();
+    float avg_no_specular = sum_no_specular / (float) pixels_no_specular.size();
 
     // TEST 2: specular_exponent = 50 (strong specular highlight)
     {
@@ -8360,7 +8568,7 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Camera Rendering") {
     for (float p: pixels_with_specular) {
         sum_with_specular += p;
     }
-    float avg_with_specular = sum_with_specular / (float)pixels_with_specular.size();
+    float avg_with_specular = sum_with_specular / (float) pixels_with_specular.size();
 
     float difference = avg_with_specular - avg_no_specular;
 
@@ -8368,8 +8576,8 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Camera Rendering") {
 
     // Specular should add a visible highlight when sun, camera, and normal are aligned
     DOCTEST_CHECK_MESSAGE(difference > 5.0f, "Specular exponent should increase camera intensity. "
-                                                       "No specular: "
-                                                               << avg_no_specular << ", With specular: " << avg_with_specular << ", Difference: " << difference);
+                                             "No specular: "
+                                                     << avg_no_specular << ", With specular: " << avg_with_specular << ", Difference: " << difference);
 }
 
 GPU_TEST_CASE("RadiationModel - Specular Reflection Multiple Cameras") {
@@ -8434,10 +8642,12 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Multiple Cameras") {
     context.getGlobalData("camera_cam_B_SUN", pixels_B);
 
     float sum_A = 0.0f, sum_B = 0.0f;
-    for (float p : pixels_A) sum_A += p;
-    for (float p : pixels_B) sum_B += p;
-    float avg_A = sum_A / (float)pixels_A.size();
-    float avg_B = sum_B / (float)pixels_B.size();
+    for (float p: pixels_A)
+        sum_A += p;
+    for (float p: pixels_B)
+        sum_B += p;
+    float avg_A = sum_A / (float) pixels_A.size();
+    float avg_B = sum_B / (float) pixels_B.size();
 
     // Pure diffuse baseline: reflectivity(0.05) * flux(1000) / pi ≈ 15.9
     float diffuse_baseline = 15.0f;
@@ -8451,7 +8661,8 @@ GPU_TEST_CASE("RadiationModel - Specular Reflection Multiple Cameras") {
     // Both cameras are in the same position, so their values should be similar
     float ratio = (avg_A > avg_B) ? avg_B / avg_A : avg_A / avg_B;
     DOCTEST_CHECK_MESSAGE(ratio > 0.8f, "Both cameras should see similar specular intensity. "
-                                        "avg_A: " << avg_A << ", avg_B: " << avg_B << ", ratio: " << ratio);
+                                        "avg_A: "
+                                                << avg_A << ", avg_B: " << avg_B << ", ratio: " << ratio);
 }
 
 GPU_TEST_CASE("RadiationModel More Than 4 Simultaneous Radiation Bands") {
@@ -8523,9 +8734,7 @@ GPU_TEST_CASE("RadiationModel - Camera triangle vs patch rendering parity") {
     context.setPrimitiveData(patch_id, "twosided_flag", uint(0));
 
     // Triangle covering roughly the same area as the patch, on the right side
-    uint tri_id = context.addTriangle(make_vec3(0.05f, -0.2f, 0),
-                                      make_vec3(0.45f, -0.2f, 0),
-                                      make_vec3(0.25f, 0.2f, 0));
+    uint tri_id = context.addTriangle(make_vec3(0.05f, -0.2f, 0), make_vec3(0.45f, -0.2f, 0), make_vec3(0.25f, 0.2f, 0));
     context.setPrimitiveData(tri_id, "reflectivity_SW", reflectivity);
 
     // Single radiation band with scattering
@@ -8544,9 +8753,8 @@ GPU_TEST_CASE("RadiationModel - Camera triangle vs patch rendering parity") {
     cam_props.camera_resolution = make_int2(64, 64);
     cam_props.HFOV = 60.0f;
     cam_props.lens_diameter = 0.0f;
-    radiation.addRadiationCamera("test_cam", {"SW"},
-                                 make_vec3(0, 0, 1.5f),   // above scene
-                                 make_vec3(0, 0, 0),       // look at center
+    radiation.addRadiationCamera("test_cam", {"SW"}, make_vec3(0, 0, 1.5f), // above scene
+                                 make_vec3(0, 0, 0), // look at center
                                  cam_props, 50);
 
     radiation.updateGeometry();
@@ -8586,21 +8794,15 @@ GPU_TEST_CASE("RadiationModel - Camera triangle vs patch rendering parity") {
     float tri_avg = tri_sum / float(tri_count);
 
     // Both regions must have non-zero average radiance (lit surfaces)
-    DOCTEST_CHECK_MESSAGE(patch_avg > 0.0f,
-                          "Patch region average radiance should be > 0, got " << patch_avg);
-    DOCTEST_CHECK_MESSAGE(tri_avg > 0.0f,
-                          "Triangle region average radiance should be > 0, got " << tri_avg);
+    DOCTEST_CHECK_MESSAGE(patch_avg > 0.0f, "Patch region average radiance should be > 0, got " << patch_avg);
+    DOCTEST_CHECK_MESSAGE(tri_avg > 0.0f, "Triangle region average radiance should be > 0, got " << tri_avg);
 
     // Triangle and patch averages should be within the same order of magnitude
     // (both have the same reflectivity and similar illumination geometry)
     if (patch_avg > 0.0f && tri_avg > 0.0f) {
         float ratio = tri_avg / patch_avg;
-        DOCTEST_CHECK_MESSAGE(ratio > 0.1f,
-                              "Triangle/patch radiance ratio too low: " << ratio
-                              << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
-        DOCTEST_CHECK_MESSAGE(ratio < 10.0f,
-                              "Triangle/patch radiance ratio too high: " << ratio
-                              << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio > 0.1f, "Triangle/patch radiance ratio too low: " << ratio << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio < 10.0f, "Triangle/patch radiance ratio too high: " << ratio << " (tri_avg=" << tri_avg << ", patch_avg=" << patch_avg << ")");
     }
 }
 
@@ -8619,8 +8821,7 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
     radiation.disableMessages();
 
     // Minimal scene: single ground patch filling the camera view
-    std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(10.0f, 10.0f),
-                                               make_SphericalCoord(0, 0), make_int2(1, 1));
+    std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(10.0f, 10.0f), make_SphericalCoord(0, 0), make_int2(1, 1));
     context.setPrimitiveData(ground, "reflectivity_red", 0.3f);
     context.setPrimitiveData(ground, "reflectivity_green", 0.3f);
     context.setPrimitiveData(ground, "reflectivity_blue", 0.3f);
@@ -8648,8 +8849,7 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
 
     {
         capture_cout capture;
-        radiation.addRadiationCameraFromLibrary("iphone_cam", "iPhone12ProMAX",
-                                                cam_pos, cam_lookat, 100);
+        radiation.addRadiationCameraFromLibrary("iphone_cam", "iPhone12ProMAX", cam_pos, cam_lookat, 100);
     }
 
     radiation.updateGeometry();
@@ -8667,7 +8867,7 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
     DOCTEST_REQUIRE(H == 4032);
 
     auto pixel_red = radiation.getCameraPixelData("iphone_cam", "red");
-    DOCTEST_REQUIRE(pixel_red.size() == (size_t)W * H);
+    DOCTEST_REQUIRE(pixel_red.size() == (size_t) W * H);
 
     // With maxRays = 1B and 100 AA at 3024×4032:
     //   rays_per_row = 100 × 3024 = 302,400
@@ -8700,20 +8900,14 @@ GPU_TEST_CASE("RadiationModel - Multi-tile camera rendering consistency") {
     float tile2_avg = tile2_sum / float(tile2_count);
 
     // Both tile regions should have non-zero radiance (looking at a lit ground patch)
-    DOCTEST_CHECK_MESSAGE(tile1_avg > 0.0f,
-                          "Tile 1 (rows 500-600) average radiance should be > 0, got " << tile1_avg);
-    DOCTEST_CHECK_MESSAGE(tile2_avg > 0.0f,
-                          "Tile 2 (rows 3600-3700) average radiance should be > 0, got " << tile2_avg);
+    DOCTEST_CHECK_MESSAGE(tile1_avg > 0.0f, "Tile 1 (rows 500-600) average radiance should be > 0, got " << tile1_avg);
+    DOCTEST_CHECK_MESSAGE(tile2_avg > 0.0f, "Tile 2 (rows 3600-3700) average radiance should be > 0, got " << tile2_avg);
 
     // The two regions should have similar radiance (same ground patch, similar viewing angle)
     if (tile1_avg > 0.0f && tile2_avg > 0.0f) {
         float ratio = tile2_avg / tile1_avg;
-        DOCTEST_CHECK_MESSAGE(ratio > 0.1f,
-                              "Tile 2/tile 1 radiance ratio too low: " << ratio
-                              << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
-        DOCTEST_CHECK_MESSAGE(ratio < 10.0f,
-                              "Tile 2/tile 1 radiance ratio too high: " << ratio
-                              << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio > 0.1f, "Tile 2/tile 1 radiance ratio too low: " << ratio << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
+        DOCTEST_CHECK_MESSAGE(ratio < 10.0f, "Tile 2/tile 1 radiance ratio too high: " << ratio << " (tile1=" << tile1_avg << ", tile2=" << tile2_avg << ")");
     }
 }
 
@@ -8742,24 +8936,39 @@ namespace {
         DOCTEST_REQUIRE_MESSAGE(f.good(), "Failed to open " << p.string());
         std::string line;
         while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#' || line.substr(0, 3) == "key") continue;
+            if (line.empty() || line[0] == '#' || line.substr(0, 3) == "key")
+                continue;
             const auto comma = line.find(',');
-            if (comma == std::string::npos) continue;
+            if (comma == std::string::npos)
+                continue;
             const std::string key = line.substr(0, comma);
             const float val = std::stof(line.substr(comma + 1));
-            if      (key == "Cab")      c.Cab = val;
-            else if (key == "Cca")      c.Cca = val;
-            else if (key == "Cw")       c.Cw = val;
-            else if (key == "Cdm")      c.Cdm = val;
-            else if (key == "Cs")       c.Cs = val;
-            else if (key == "Cant")     c.Cant = val;
-            else if (key == "Cp")       c.Cp = val;
-            else if (key == "Cbc")      c.Cbc = val;
-            else if (key == "N")        c.N = val;
-            else if (key == "fqe")      c.fqe = val;
-            else if (key == "V2Z")      c.V2Z = val;
-            else if (key == "wle_step") c.wle_step = val;
-            else if (key == "wlf_step") c.wlf_step = val;
+            if (key == "Cab")
+                c.Cab = val;
+            else if (key == "Cca")
+                c.Cca = val;
+            else if (key == "Cw")
+                c.Cw = val;
+            else if (key == "Cdm")
+                c.Cdm = val;
+            else if (key == "Cs")
+                c.Cs = val;
+            else if (key == "Cant")
+                c.Cant = val;
+            else if (key == "Cp")
+                c.Cp = val;
+            else if (key == "Cbc")
+                c.Cbc = val;
+            else if (key == "N")
+                c.N = val;
+            else if (key == "fqe")
+                c.fqe = val;
+            else if (key == "V2Z")
+                c.V2Z = val;
+            else if (key == "wle_step")
+                c.wle_step = val;
+            else if (key == "wlf_step")
+                c.wlf_step = val;
         }
         return c;
     }
@@ -8770,9 +8979,7 @@ namespace {
     //   <wlf_0>,<m_00>,<m_01>,...
     //   <wlf_1>,<m_10>,<m_11>,...
     // Returns the matrix as matrix[i_wlf][j_wle] and fills out the wle/wlf grids.
-    std::vector<std::vector<double>> load_matrix_csv(const std::filesystem::path &p,
-                                                     std::vector<float> &wle_out,
-                                                     std::vector<float> &wlf_out) {
+    std::vector<std::vector<double>> load_matrix_csv(const std::filesystem::path &p, std::vector<float> &wle_out, std::vector<float> &wlf_out) {
         std::ifstream f(p);
         DOCTEST_REQUIRE_MESSAGE(f.good(), "Failed to open " << p.string());
         std::string line;
@@ -8782,20 +8989,25 @@ namespace {
 
         // Skip comment lines
         while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            break;  // this line is the header (wle grid)
+            if (line.empty() || line[0] == '#')
+                continue;
+            break; // this line is the header (wle grid)
         }
         // Parse header: ",400,405,..."
         std::stringstream hs(line);
         std::string cell;
         bool first = true;
         while (std::getline(hs, cell, ',')) {
-            if (first) { first = false; continue; }  // skip the blank first cell
+            if (first) {
+                first = false;
+                continue;
+            } // skip the blank first cell
             wle_out.push_back(std::stof(cell));
         }
         // Parse data rows
         while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#') continue;
+            if (line.empty() || line[0] == '#')
+                continue;
             std::stringstream ds(line);
             std::vector<double> row;
             bool is_first = true;
@@ -8807,7 +9019,8 @@ namespace {
                 }
                 row.push_back(std::stod(cell));
             }
-            if (!row.empty()) M.push_back(std::move(row));
+            if (!row.empty())
+                M.push_back(std::move(row));
         }
         return M;
     }
@@ -8819,7 +9032,7 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
     FluspectOptipar optipar;
     const std::filesystem::path optipar_xml = helios::resolveFilePath("plugins/radiation/spectral_data/fluspect_B_optipar.xml");
     loadFluspectOptipar(optipar_xml.string(), optipar);
-    DOCTEST_CHECK(optipar.wavelengths_nm.size() > 1000);  // sanity
+    DOCTEST_CHECK(optipar.wavelengths_nm.size() > 1000); // sanity
 
     // 2. Load reference Mf/Mb and biochemistry/grid metadata.
     const FluspectReferenceConfig cfg = load_fluspect_reference_config();
@@ -8833,17 +9046,17 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
 
     // 3. Run the C++ port with identical inputs.
     FluspectBiochemistry biochem;
-    biochem.Cab  = cfg.Cab;
-    biochem.Cca  = cfg.Cca;
-    biochem.Cw   = cfg.Cw;
-    biochem.Cdm  = cfg.Cdm;
-    biochem.Cs   = cfg.Cs;
+    biochem.Cab = cfg.Cab;
+    biochem.Cca = cfg.Cca;
+    biochem.Cw = cfg.Cw;
+    biochem.Cdm = cfg.Cdm;
+    biochem.Cs = cfg.Cs;
     biochem.Cant = cfg.Cant;
-    biochem.Cp   = cfg.Cp;
-    biochem.Cbc  = cfg.Cbc;
-    biochem.N    = cfg.N;
-    biochem.fqe  = cfg.fqe;
-    biochem.V2Z  = cfg.V2Z;
+    biochem.Cp = cfg.Cp;
+    biochem.Cbc = cfg.Cbc;
+    biochem.N = cfg.N;
+    biochem.fqe = cfg.fqe;
+    biochem.V2Z = cfg.V2Z;
     const FluspectKernel out = computeFluspectKernel(biochem, optipar, cfg.wle_step);
 
     // 4. Grid agreement.
@@ -8882,9 +9095,7 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
     }
     DOCTEST_MESSAGE("Fluspect Mf max relative error: " << max_rel_err_Mf);
     DOCTEST_MESSAGE("Fluspect Mb max relative error: " << max_rel_err_Mb);
-    DOCTEST_MESSAGE("Elements compared: Mf=" << n_checked_Mf << "/" << n_total
-                     << " Mb=" << n_checked_Mb << "/" << n_total
-                     << " (rest below 1e-10 magnitude floor — anti-Stokes wavelengths)");
+    DOCTEST_MESSAGE("Elements compared: Mf=" << n_checked_Mf << "/" << n_total << " Mb=" << n_checked_Mb << "/" << n_total << " (rest below 1e-10 magnitude floor — anti-Stokes wavelengths)");
     // Sanity: at least 90% of kernel elements should be above the floor for this
     // biochemistry (otherwise the kernel is degenerate or the test data wrong).
     DOCTEST_CHECK(n_checked_Mf > 0.9 * n_total);
@@ -8906,9 +9117,7 @@ DOCTEST_TEST_CASE("SIF V&V Tier 1 (v2): Fluspect-B C++ port matches MATLAB refer
 namespace {
     // Write a fluspect_biochem_<label> vector<float> to global data and stamp
     // "fluspect_spectrum" = label on each UUID. 11-field order matches LeafOptics::run().
-    void sif_stamp_biochem(Context &ctx, const std::vector<uint> &UUIDs, const std::string &label,
-                           float Cab = 40.f, float Cca = 10.f, float Cw = 0.009f, float Cdm = 0.012f,
-                           float Cs = 0.f, float Cant = 1.f, float Cp = 0.f, float Cbc = 0.f,
+    void sif_stamp_biochem(Context &ctx, const std::vector<uint> &UUIDs, const std::string &label, float Cab = 40.f, float Cca = 10.f, float Cw = 0.009f, float Cdm = 0.012f, float Cs = 0.f, float Cant = 1.f, float Cp = 0.f, float Cbc = 0.f,
                            float N = 1.5f, float V2Z = 0.f, float fqe = 1.f) {
         const std::string full_label = "fluspect_biochem_" + label;
         std::vector<float> biochem = {Cab, Cca, Cw, Cdm, Cs, Cant, Cp, Cbc, N, V2Z, fqe};
@@ -8948,8 +9157,7 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     // nearly all upward hemisphere emission from the small leaf below without
     // significantly shadowing the oblique solar source.
     const float sensor_side = 1.f;
-    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side),
-                                make_SphericalCoord(M_PI, 0));
+    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side), make_SphericalCoord(M_PI, 0));
     ctx.setPrimitiveData(sensor, "twosided_flag", uint(0));
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&ctx);
@@ -8962,7 +9170,7 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     radiation.setDirectRayCount("SIF_farred", 500);
     radiation.setDiffuseRayCount("SIF_red", 500);
     radiation.setDiffuseRayCount("SIF_farred", 500);
-    radiation.setScatteringDepth("SIF_red", 1);     // at least one bounce so camera rays pick up emission
+    radiation.setScatteringDepth("SIF_red", 1); // at least one bounce so camera rays pick up emission
     radiation.setScatteringDepth("SIF_farred", 1);
 
     // Oblique collimated solar source (45 deg from vertical) with ASTM G173
@@ -8977,9 +9185,8 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     SIFCameraProperties cam_props;
     cam_props.camera_resolution = make_int2(16, 16);
     cam_props.HFOV = 30.f;
-    cam_props.excitation_bin_width_nm = 50.f;   // 7 bins; coarse for test speed
-    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"},
-                            make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
+    cam_props.excitation_bin_width_nm = 50.f; // 7 bins; coarse for test speed
+    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"}, make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
 
     DOCTEST_CHECK(radiation.isSIFCamera("sif_cam"));
     DOCTEST_CHECK(!radiation.isSIFCamera("nonexistent"));
@@ -9002,8 +9209,7 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     float flux_red = 0.f, flux_farred = 0.f;
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_red", flux_red);
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_farred", flux_farred);
-    DOCTEST_MESSAGE("Sensor F_red=" << flux_red << " F_farred=" << flux_farred
-                     << " ratio=" << (flux_red / std::max(flux_farred, 1e-12f)));
+    DOCTEST_MESSAGE("Sensor F_red=" << flux_red << " F_farred=" << flux_farred << " ratio=" << (flux_red / std::max(flux_farred, 1e-12f)));
     DOCTEST_CHECK(std::isfinite(flux_red));
     DOCTEST_CHECK(std::isfinite(flux_farred));
     DOCTEST_CHECK(flux_red > 0.f);
@@ -9016,15 +9222,17 @@ GPU_TEST_CASE("SIF V&V Tier 2 (v2): full pipeline with solar source + SIF camera
     DOCTEST_CHECK(pixels_red.size() == 16 * 16);
     DOCTEST_CHECK(pixels_farred.size() == 16 * 16);
     float max_pixel_red = 0.f, max_pixel_farred = 0.f;
-    for (float v : pixels_red) {
+    for (float v: pixels_red) {
         DOCTEST_CHECK(std::isfinite(v));
         DOCTEST_CHECK(v >= 0.f);
-        if (v > max_pixel_red) max_pixel_red = v;
+        if (v > max_pixel_red)
+            max_pixel_red = v;
     }
-    for (float v : pixels_farred) {
+    for (float v: pixels_farred) {
         DOCTEST_CHECK(std::isfinite(v));
         DOCTEST_CHECK(v >= 0.f);
-        if (v > max_pixel_farred) max_pixel_farred = v;
+        if (v > max_pixel_farred)
+            max_pixel_farred = v;
     }
     DOCTEST_CHECK(max_pixel_red > 0.f);
     DOCTEST_CHECK(max_pixel_farred > 0.f);
@@ -9078,7 +9286,7 @@ GPU_TEST_CASE("SIF regression: piggybacked excitation bands receive direct sourc
     // SIF emission bands (image channels).
     radiation.addRadiationBand("SIF_red", 680.f, 700.f);
     radiation.addRadiationBand("SIF_farred", 730.f, 760.f);
-    for (const auto &b : {"SIF_red", "SIF_farred"}) {
+    for (const auto &b: {"SIF_red", "SIF_farred"}) {
         radiation.setDirectRayCount(b, 500);
         radiation.setDiffuseRayCount(b, 500);
         radiation.setScatteringDepth(b, 1);
@@ -9091,8 +9299,7 @@ GPU_TEST_CASE("SIF regression: piggybacked excitation bands receive direct sourc
     cam_props.camera_resolution = make_int2(8, 8);
     cam_props.HFOV = 30.f;
     cam_props.excitation_bin_width_nm = 50.f; // coarse for test speed
-    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"},
-                            make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
+    radiation.addSIFCamera("sif_cam", {"SIF_red", "SIF_farred"}, make_vec3(2.f, 0.f, 0.3f), make_vec3(0, 0, 0), cam_props, 1);
 
     radiation.updateGeometry();
 
@@ -9146,18 +9353,17 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
 
     // Small absorbing sensor directly above the leaf for upward-flux capture.
     const float sensor_side = 1.f;
-    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side),
-                                make_SphericalCoord(M_PI, 0));
+    uint sensor = ctx.addPatch(make_vec3(0, 0, 0.2f), make_vec2(sensor_side, sensor_side), make_SphericalCoord(M_PI, 0));
     ctx.setPrimitiveData(sensor, "twosided_flag", uint(0));
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&ctx);
     radiation.disableMessages();
 
     // Two disjoint SIF emission bands — one for each camera's resolution.
-    radiation.addRadiationBand("SIF_red_fine", 680.f, 700.f);   // 10 nm bin width camera
+    radiation.addRadiationBand("SIF_red_fine", 680.f, 700.f); // 10 nm bin width camera
     radiation.addRadiationBand("SIF_red_coarse", 680.f, 700.f); // 25 nm bin width camera
     radiation.addRadiationBand("SIF_farred_fine", 730.f, 760.f);
-    for (const auto &b : {"SIF_red_fine", "SIF_red_coarse", "SIF_farred_fine"}) {
+    for (const auto &b: {"SIF_red_fine", "SIF_red_coarse", "SIF_farred_fine"}) {
         radiation.setDirectRayCount(b, 500);
         radiation.setDiffuseRayCount(b, 500);
         radiation.setScatteringDepth(b, 0);
@@ -9172,7 +9378,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     cam10.HFOV = 20.f;
     cam10.excitation_bin_width_nm = 10.f;
 
-    SIFCameraProperties cam10_second = cam10;  // same bin width → dedup path
+    SIFCameraProperties cam10_second = cam10; // same bin width → dedup path
 
     SIFCameraProperties cam25;
     cam25.camera_resolution = make_int2(8, 8);
@@ -9180,15 +9386,12 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     cam25.excitation_bin_width_nm = 25.f;
 
     // cam_a: 10 nm bin width, flags SIF_red_fine + SIF_farred_fine
-    radiation.addSIFCamera("cam_a", {"SIF_red_fine", "SIF_farred_fine"},
-                            make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam10, 1);
+    radiation.addSIFCamera("cam_a", {"SIF_red_fine", "SIF_farred_fine"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam10, 1);
     // cam_b: also 10 nm → reuses the same excitation set; flags nothing new.
     // Use an already-flagged band (dedup of sif_emission_bands is inherent since it's a set).
-    radiation.addSIFCamera("cam_b", {"SIF_farred_fine"},
-                            make_vec3(0, 0.5f, 1), make_vec3(0, 0, 0), cam10_second, 1);
+    radiation.addSIFCamera("cam_b", {"SIF_farred_fine"}, make_vec3(0, 0.5f, 1), make_vec3(0, 0, 0), cam10_second, 1);
     // cam_c: 25 nm bin width → gets its own excitation set; uses a disjoint emission band.
-    radiation.addSIFCamera("cam_c", {"SIF_red_coarse"},
-                            make_vec3(0.5f, 0, 1), make_vec3(0, 0, 0), cam25, 1);
+    radiation.addSIFCamera("cam_c", {"SIF_red_coarse"}, make_vec3(0.5f, 0, 1), make_vec3(0, 0, 0), cam25, 1);
 
     // (a) + (e): isSIFCamera introspection.
     DOCTEST_CHECK(radiation.isSIFCamera("cam_a"));
@@ -9200,8 +9403,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     CameraProperties regular_props;
     regular_props.camera_resolution = make_int2(8, 8);
     regular_props.HFOV = 20.f;
-    radiation.addRadiationCamera("regular_cam", {"SIF_red_fine"},
-                                  make_vec3(1, 1, 1), make_vec3(0, 0, 0), regular_props, 1);
+    radiation.addRadiationCamera("regular_cam", {"SIF_red_fine"}, make_vec3(1, 1, 1), make_vec3(0, 0, 0), regular_props, 1);
     DOCTEST_CHECK(!radiation.isSIFCamera("regular_cam"));
 
     // (b): Both the 10 nm and 25 nm internal band sets exist. If dedup failed, duplicate
@@ -9216,10 +9418,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     // (c): binding the same emission band to different bin widths must error.
     {
         capture_cerr cap;
-        DOCTEST_CHECK_THROWS_AS(
-            radiation.addSIFCamera("cam_conflict", {"SIF_red_fine"},
-                                    make_vec3(2, 0, 1), make_vec3(0, 0, 0), cam25, 1),
-            std::runtime_error);
+        DOCTEST_CHECK_THROWS_AS(radiation.addSIFCamera("cam_conflict", {"SIF_red_fine"}, make_vec3(2, 0, 1), make_vec3(0, 0, 0), cam25, 1), std::runtime_error);
     }
 
     // (d): full pipeline with two distinct excitation sets. Both emission bands should
@@ -9233,9 +9432,7 @@ GPU_TEST_CASE("SIF V&V Tier 3 (v2): multi-camera pipeline with distinct excitati
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_red_fine", flux_red_fine);
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_red_coarse", flux_red_coarse);
     ctx.getPrimitiveData(sensor, "radiation_flux_SIF_farred_fine", flux_farred_fine);
-    DOCTEST_MESSAGE("Sensor F_red_fine=" << flux_red_fine
-                     << " F_red_coarse=" << flux_red_coarse
-                     << " F_farred_fine=" << flux_farred_fine);
+    DOCTEST_MESSAGE("Sensor F_red_fine=" << flux_red_fine << " F_red_coarse=" << flux_red_coarse << " F_farred_fine=" << flux_farred_fine);
     DOCTEST_CHECK(flux_red_fine > 0.f);
     DOCTEST_CHECK(flux_red_coarse > 0.f);
     DOCTEST_CHECK(flux_farred_fine > 0.f);
@@ -9279,8 +9476,7 @@ GPU_TEST_CASE("SIF warnings: no source spectrum set") {
     std::string captured;
     {
         capture_cerr cap;
-        radiation.addSIFCamera("warn_cam_no_spectrum", {"SIF_red"},
-                                make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addSIFCamera("warn_cam_no_spectrum", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(captured.find("no radiation source has a spectrum set") != std::string::npos);
@@ -9305,8 +9501,7 @@ GPU_TEST_CASE("SIF warnings: no fluspect_spectrum on any primitive") {
     std::string captured;
     {
         capture_cerr cap;
-        radiation.addSIFCamera("warn_no_biochem", {"SIF_red"},
-                                make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addSIFCamera("warn_no_biochem", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(captured.find("fluspect_spectrum") != std::string::npos);
@@ -9338,8 +9533,7 @@ GPU_TEST_CASE("SIF warnings: leaves have biochemistry but lack electron_transpor
     std::string setup_captured;
     {
         capture_cerr cap;
-        radiation.addSIFCamera("warn_no_etr", {"SIF_red"},
-                                make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addSIFCamera("warn_no_etr", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         setup_captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(setup_captured.find("electron_transport_ratio") == std::string::npos);
@@ -9372,8 +9566,7 @@ GPU_TEST_CASE("SIF warnings: camera bound to band with scattering depth 0") {
     std::string captured;
     {
         capture_cerr cap;
-        radiation.addRadiationCamera("warn_scatter0", {"PAR"},
-                                      make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
+        radiation.addRadiationCamera("warn_scatter0", {"PAR"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_props, 1);
         captured = cap.get_captured_output();
     }
     DOCTEST_CHECK(captured.find("scatteringDepth == 0") != std::string::npos);
@@ -9396,7 +9589,7 @@ GPU_TEST_CASE("SIF: non-blackbody leaf optics (rho+tau<1) should not trip ε+ρ+
     // Leaf optics that violate Stefan-Boltzmann ε+ρ+τ=1 with ε=1 (the default):
     // rho=0.4, tau=0.43 (typical PROSPECT values at 740 nm). Pre-fix, these would
     // crash in validateAndCorrectMaterialProperties with the "sum to 1" error.
-    ctx.setPrimitiveData(leaf, "reflectivity_SIF_farred",   0.4f);
+    ctx.setPrimitiveData(leaf, "reflectivity_SIF_farred", 0.4f);
     ctx.setPrimitiveData(leaf, "transmissivity_SIF_farred", 0.43f);
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&ctx);
@@ -9483,7 +9676,7 @@ GPU_TEST_CASE("SIF: excitation_scattering_depth propagates to excitation bands a
     cam_a.camera_resolution = make_int2(4, 4);
     cam_a.HFOV = 20.f;
     cam_a.excitation_bin_width_nm = 50.f;
-    cam_a.excitation_scattering_depth = 0;  // default, explicit for clarity
+    cam_a.excitation_scattering_depth = 0; // default, explicit for clarity
     radiation_a.addSIFCamera("cam_scat0", {"SIF_red"}, make_vec3(0, 0, 1), make_vec3(0, 0, 0), cam_a, 1);
 
     // Also give the auto-generated excitation bands non-default rho/tau on the leaf.
@@ -9508,8 +9701,7 @@ GPU_TEST_CASE("SIF: excitation_scattering_depth propagates to excitation bands a
     }
     // No per-band "scattering iterations are disabled" warnings should appear for
     // any "_SIF_exc_*" bands.
-    const bool exc_warning_absent = (captured.find("_SIF_exc_") == std::string::npos) ||
-                                     (captured.find("scattering iterations are disabled") == std::string::npos);
+    const bool exc_warning_absent = (captured.find("_SIF_exc_") == std::string::npos) || (captured.find("scattering iterations are disabled") == std::string::npos);
     DOCTEST_CHECK(exc_warning_absent);
 
     // --- Second scene: camera with excitation_scattering_depth = 2 ---
@@ -9609,8 +9801,8 @@ DOCTEST_TEST_CASE("Glass cover Fresnel+Bouguer reference math") {
 
     // Absorption: KL=0.05 at normal incidence multiplies transmittance by tau_a = exp(-0.05) = 0.9512.
     helios::vec3 tA = glass_tau_rho_alpha_ref(1.0f, 1.5f, 0.05f);
-    DOCTEST_CHECK(tA.x < t0.x);                 // absorbing sheet transmits less
-    DOCTEST_CHECK(tA.z > 0.01f);                // nonzero absorption
+    DOCTEST_CHECK(tA.x < t0.x); // absorbing sheet transmits less
+    DOCTEST_CHECK(tA.z > 0.01f); // nonzero absorption
     DOCTEST_CHECK((tA.x + tA.y + tA.z) == doctest::Approx(1.0f).epsilon(1e-4));
 }
 
@@ -9624,9 +9816,9 @@ GPU_TEST_CASE("RadiationModel Glass Cover Normal-Incidence Transmittance") {
     // Cover at z=1, receiver at z=0, both horizontal 2x2 (large enough to fully shadow the receiver).
     uint cover = context.addPatch(make_vec3(0, 0, 1), make_vec2(4, 4));
     uint receiver = context.addPatch(make_vec3(0, 0, 0), make_vec2(2, 2));
-    context.setPrimitiveData(receiver, "twosided_flag", uint(0));    // one-sided, top only
-    context.setPrimitiveData(receiver, "reflectivity_SW", 0.0f);     // fully absorbing
-    context.setPrimitiveData(cover, "glass_n_SW", 1.5f);             // activate glass model, lossless
+    context.setPrimitiveData(receiver, "twosided_flag", uint(0)); // one-sided, top only
+    context.setPrimitiveData(receiver, "reflectivity_SW", 0.0f); // fully absorbing
+    context.setPrimitiveData(cover, "glass_n_SW", 1.5f); // activate glass model, lossless
 
     RadiationModel radiation = RadiationModelTestHelper::createWithSharedDevice(&context);
     radiation.disableMessages();
@@ -9736,14 +9928,14 @@ GPU_TEST_CASE("RadiationModel Glass Cover Preserves Beam Direction") {
     Context context;
     // Opaque ceiling spanning x in roughly [-1, +4], with a glass window gap around x=0.
     // Build it from two opaque panels plus a small glass window patch covering the gap.
-    uint ceil_left = context.addPatch(make_vec3(-3.0f, 0, dz), make_vec2(4.0f, 6.0f));   // covers x in [-5,-1]
-    uint ceil_right = context.addPatch(make_vec3(3.0f, 0, dz), make_vec2(4.0f, 6.0f));   // covers x in [1,5]
-    uint window = context.addPatch(make_vec3(0, 0, dz), make_vec2(2.0f, 6.0f));          // glass, x in [-1,1]
+    uint ceil_left = context.addPatch(make_vec3(-3.0f, 0, dz), make_vec2(4.0f, 6.0f)); // covers x in [-5,-1]
+    uint ceil_right = context.addPatch(make_vec3(3.0f, 0, dz), make_vec2(4.0f, 6.0f)); // covers x in [1,5]
+    uint window = context.addPatch(make_vec3(0, 0, dz), make_vec2(2.0f, 6.0f)); // glass, x in [-1,1]
     context.setPrimitiveData(ceil_left, "twosided_flag", uint(1));
     context.setPrimitiveData(ceil_right, "twosided_flag", uint(1));
-    context.setPrimitiveData(ceil_left, "reflectivity_SW", 0.0f);  // opaque absorber
+    context.setPrimitiveData(ceil_left, "reflectivity_SW", 0.0f); // opaque absorber
     context.setPrimitiveData(ceil_right, "reflectivity_SW", 0.0f);
-    context.setPrimitiveData(window, "glass_n_SW", 1.5f);          // glass window
+    context.setPrimitiveData(window, "glass_n_SW", 1.5f); // glass window
 
     // In-path receiver under the displaced beam exit; control receiver directly under the window.
     uint receiver_inpath = context.addPatch(make_vec3(-shift, 0, 0), make_vec2(1.0f, 1.0f));
@@ -9924,3 +10116,1091 @@ GPU_TEST_CASE("Launch batching covers every primitive") {
     DOCTEST_CHECK(max_flux == doctest::Approx(1000.0f).epsilon(0.02));
 }
 
+// ---- Segmentation mask connected components ----------------------------------------------------
+//
+// generateAnnotationsFromMasks() is private and needs no rendered scene, so these build label masks
+// by hand and reach it through RadiationModelTestHelper. GPU_TEST_CASE is still required: the
+// RadiationModel constructor calls RayTracingBackend::create("auto"), which throws with no backend.
+
+//! Build an empty label mask of the given resolution
+static std::vector<std::vector<bool>> makeEmptyMask(const helios::int2 &resolution) {
+    return std::vector<std::vector<bool>>(resolution.y, std::vector<bool>(resolution.x, false));
+}
+
+//! Set every pixel of an axis-aligned rectangle in a mask
+static void fillMaskRectangle(std::vector<std::vector<bool>> &mask, int x_min, int y_min, int x_max, int y_max) {
+    for (int j = y_min; j <= y_max; j++) {
+        for (int i = x_min; i <= x_max; i++) {
+            mask.at(j).at(i) = true;
+        }
+    }
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks annotate every connected component") {
+    // Two objects sharing one label value must produce two annotations. Before this was fixed the
+    // writer emitted only the component containing the topmost-leftmost boundary pixel of the whole
+    // mask, and dropped every other one silently: no warning, no error, just a COCO file missing
+    // objects that were plainly visible in the image.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(40, 40);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 2, 2, 10, 10); // component A
+    fillMaskRectangle(mask, 20, 20, 30, 30); // component B
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[7] = mask; // both regions carry the same label value
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_REQUIRE(annotations.size() == 2);
+
+    // Areas are the two rectangles, in whichever order the components were found.
+    std::vector<float> areas{annotations.at(0).at("area").at(0), annotations.at(1).at("area").at(0)};
+    std::sort(areas.begin(), areas.end());
+    DOCTEST_CHECK(areas.at(0) == doctest::Approx(81.f)); // 9x9
+    DOCTEST_CHECK(areas.at(1) == doctest::Approx(121.f)); // 11x11
+
+    // Annotation IDs must stay distinct, since they key the annotation in the COCO file.
+    DOCTEST_CHECK(annotations.at(0).at("id").at(0) != annotations.at(1).at("id").at(0));
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks annotate both halves of an occluded object") {
+    // The case that needs no user error at all. One object with one ID, split into two visible
+    // regions by something in front of it -- a leaf behind a stem, a fruit behind a branch. Half the
+    // object used to vanish from the dataset.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(30, 20);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 2, 5, 27, 14);
+    for (int j = 0; j < resolution.y; j++) { // an occluder splits it down the middle
+        for (int i = 14; i <= 16; i++) {
+            mask.at(j).at(i) = false;
+        }
+    }
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[1] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_REQUIRE(annotations.size() == 2);
+
+    // The two visible pieces together must account for every lit pixel, so nothing is lost.
+    const float total_area = annotations.at(0).at("area").at(0) + annotations.at(1).at("area").at(0);
+    DOCTEST_CHECK(total_area == doctest::Approx(10.f * (12.f + 11.f))); // rows 5..14, columns 2..13 and 17..27
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks treat a diagonal chain as one component") {
+    // The component flood fill was 4-connected while the boundary tracer is 8-connected, so a
+    // diagonally-connected object was one region to the tracer but many single-pixel regions to the
+    // flood fill. Left unfixed alongside the start-pixel fix, this would turn a diagonal streak into
+    // a shower of one-pixel annotations.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(30, 30);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    for (int t = 0; t < 12; t++) { // a purely diagonal chain of pixels
+        mask.at(5 + t).at(5 + t) = true;
+    }
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[3] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_CHECK(annotations.size() == 1);
+    if (annotations.size() == 1) {
+        DOCTEST_CHECK(annotations.at(0).at("area").at(0) == doctest::Approx(12.f));
+    }
+}
+
+GPU_TEST_CASE("RadiationModel segmentation mask polygons lie within their own bounding box") {
+    // The dropped-component bug was masked by a guard that rejected any component not containing the
+    // whole mask's start pixel. Removing that guard must not let a component be described by another
+    // component's outline, so every polygon point is checked against the bbox reported beside it.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(60, 60);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 3, 3, 12, 12);
+    fillMaskRectangle(mask, 40, 5, 52, 20);
+    fillMaskRectangle(mask, 25, 35, 45, 50);
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[2] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 0u, resolution, 0);
+
+    DOCTEST_REQUIRE(annotations.size() == 3);
+
+    for (const auto &annotation: annotations) {
+        const std::vector<float> &bbox = annotation.at("bbox");
+        const std::vector<float> &segmentation = annotation.at("segmentation");
+        DOCTEST_REQUIRE(bbox.size() == 4);
+        DOCTEST_REQUIRE(segmentation.size() % 2 == 0);
+
+        size_t points_outside_bbox = 0;
+        for (size_t i = 0; i < segmentation.size(); i += 2) {
+            const float x = segmentation.at(i);
+            const float y = segmentation.at(i + 1);
+            if (x < bbox.at(0) || x > bbox.at(0) + bbox.at(2) || y < bbox.at(1) || y > bbox.at(1) + bbox.at(3)) {
+                points_outside_bbox++;
+            }
+        }
+        DOCTEST_CHECK(points_outside_bbox == 0);
+    }
+}
+
+GPU_TEST_CASE("RadiationModel segmentation masks leave a single component unchanged") {
+    // The fix must be purely additive for scenes that already worked, which is every scene whose
+    // objects are each one unoccluded region. A lone square must still yield exactly one annotation
+    // whose bbox and area describe it exactly.
+    Context context;
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    const int2 resolution = make_int2(40, 40);
+
+    std::vector<std::vector<bool>> mask = makeEmptyMask(resolution);
+    fillMaskRectangle(mask, 10, 12, 25, 30);
+
+    std::map<int, std::vector<std::vector<bool>>> label_masks;
+    label_masks[5] = mask;
+
+    const std::vector<std::map<std::string, std::vector<float>>> annotations = RadiationModelTestHelper::generateAnnotationsFromMasks(model, label_masks, 4u, resolution, 9);
+
+    DOCTEST_REQUIRE(annotations.size() == 1);
+
+    const std::vector<float> &bbox = annotations.at(0).at("bbox");
+    DOCTEST_CHECK(bbox.at(0) == doctest::Approx(10.f));
+    DOCTEST_CHECK(bbox.at(1) == doctest::Approx(12.f));
+    DOCTEST_CHECK(bbox.at(2) == doctest::Approx(15.f)); // COCO width is max-min, as this writer defines it
+    DOCTEST_CHECK(bbox.at(3) == doctest::Approx(18.f));
+    DOCTEST_CHECK(annotations.at(0).at("area").at(0) == doctest::Approx(16.f * 19.f));
+
+    // The class ID and image ID passed in must be carried through onto the annotation.
+    DOCTEST_CHECK(annotations.at(0).at("category_id").at(0) == doctest::Approx(4.f));
+    DOCTEST_CHECK(annotations.at(0).at("image_id").at(0) == doctest::Approx(9.f));
+}
+
+// ================================================================================================
+// Vulkan compute backend regression tests
+//
+// These cover defects that were live only on the Vulkan compute (software BVH) backend, where no
+// CI job exercised the runtime path. They are backend-agnostic by construction — each asserts an
+// analytic result or a finiteness invariant that must hold on OptiX too — so they run wherever the
+// suite runs and are meaningful on a build configured with -DFORCE_VULKAN_BACKEND=ON.
+//
+// They share the "Backend Invariant - " name prefix so a runner too slow for the full suite can
+// select just this group. The Linux Vulkan workflow does exactly that, because lavapipe is a CPU
+// driver and some existing tests trace half a million diffuse rays per primitive.
+// ================================================================================================
+
+//! Mean radiation_flux over a set of primitives, for the analytic energy tests below.
+static float meanRadiationFlux(helios::Context &context, const std::vector<uint> &UUIDs, const std::string &band) {
+    double sum = 0.0;
+    for (uint UUID: UUIDs) {
+        float flux = 0.f;
+        context.getPrimitiveData(UUID, ("radiation_flux_" + band).c_str(), flux);
+        sum += double(flux);
+    }
+    return float(sum / double(UUIDs.size()));
+}
+
+GPU_TEST_CASE("Backend Invariant - Camera Render of Alpha-Masked Geometry is Finite") {
+    // A camera image of texture-masked geometry with scattering enabled. Every pixel must be
+    // finite. A single non-finite pixel is not a local defect: applyCameraExposure() derives its
+    // gain from a statistic over the frame, so one NaN scales the whole image to NaN and the
+    // result is an entirely black render with no error — which is how this failure presented.
+    //
+    // No existing test rendered a camera image of textured geometry: the tests that use a texture
+    // file and the tests that add a camera were disjoint sets.
+    Context context;
+
+    // Ground plus a stack of alpha-masked textured patches, arranged so that rays are rejected
+    // both by the transparency mask and by occlusion, and so the camera sees a mixture of the two.
+    context.addPatch(make_vec3(0, 0, 0), make_vec2(4, 4));
+    for (int i = 0; i < 6; i++) {
+        context.addPatch(make_vec3(-0.4f + 0.16f * float(i), 0.1f * float(i), 0.5f + 0.18f * float(i)), make_vec2(1.1f, 1.1f), make_SphericalCoord(0.35f * float(i), 0.7f * float(i)), "plugins/radiation/disk.png");
+    }
+
+    std::vector<uint> all_UUIDs = context.getAllUUIDs();
+
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    uint sun = model.addCollimatedRadiationSource(make_vec3(0.2f, 0.1f, 1.f));
+
+    const std::vector<std::string> bands = {"red", "green", "blue"};
+    for (const std::string &band: bands) {
+        model.addRadiationBand(band);
+        model.disableEmission(band);
+        model.setScatteringDepth(band, 2);
+        model.setDirectRayCount(band, 200);
+        model.setDiffuseRayCount(band, 200);
+        model.setSourceFlux(sun, band, 500.f);
+        model.setDiffuseRadiationFlux(band, 100.f);
+        context.setPrimitiveData(all_UUIDs, ("reflectivity_" + band).c_str(), 0.35f);
+        context.setPrimitiveData(all_UUIDs, ("transmissivity_" + band).c_str(), 0.1f);
+    }
+
+    CameraProperties camera_properties;
+    camera_properties.camera_resolution = make_int2(24, 24);
+    camera_properties.HFOV = 60.f;
+    camera_properties.focal_plane_distance = 2.f;
+    camera_properties.lens_diameter = 0.f;
+    model.addRadiationCamera("cam", bands, make_vec3(0, -2.5f, 1.2f), make_vec3(0, 0, 0.4f), camera_properties, 4);
+
+    model.updateGeometry();
+    model.runBand(bands);
+
+    for (const std::string &band: bands) {
+        std::vector<float> pixels;
+        context.getGlobalData(("camera_cam_" + band).c_str(), pixels);
+        DOCTEST_REQUIRE(pixels.size() == size_t(camera_properties.camera_resolution.x * camera_properties.camera_resolution.y));
+
+        size_t non_finite = 0;
+        float max_pixel = 0.f;
+        for (float pixel: pixels) {
+            if (!std::isfinite(pixel)) {
+                non_finite++;
+            } else {
+                max_pixel = std::max(max_pixel, pixel);
+            }
+        }
+        DOCTEST_CHECK_MESSAGE(non_finite == 0, "band " << band << ": " << non_finite << " of " << pixels.size() << " camera pixels are non-finite");
+        // An all-zero frame would satisfy the finiteness check while proving nothing.
+        DOCTEST_CHECK_MESSAGE(max_pixel > 0.f, "band " << band << ": camera rendered an entirely black frame");
+
+        // Also check the per-primitive fluxes: a non-finite value in the direct pass can be
+        // masked at the camera if no camera ray happens to hit the affected primitive.
+        for (uint UUID: all_UUIDs) {
+            float flux = 0.f;
+            context.getPrimitiveData(UUID, ("radiation_flux_" + band).c_str(), flux);
+            DOCTEST_REQUIRE_MESSAGE(std::isfinite(flux), "band " << band << ": primitive " << UUID << " has non-finite radiation_flux");
+        }
+    }
+}
+
+GPU_TEST_CASE("Backend Invariant - Multiple Collimated Sources Each Contribute") {
+    // Every source after the first must contribute its own flux. On the Vulkan backend the source
+    // position array was declared `vec3 positions[]` in the shaders, which std430 gives a 16-byte
+    // stride, while the host uploaded tightly-packed 12-byte helios::vec3. Element 0 read
+    // correctly and element 1 read the wrong 12 bytes (running past the end of the allocation),
+    // producing a garbage direction: the second source delivered exactly zero flux, silently.
+    //
+    // A horizontal surface under a collimated source at zenith angle theta absorbs
+    // flux * cos(theta), so the two-source total is analytic.
+    Context context;
+    std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(2, 2), nullrotation, make_int2(10, 10));
+
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    uint source_zenith = model.addCollimatedRadiationSource(make_vec3(0.f, 0.f, 1.f)); // cos = 1.0
+    uint source_oblique = model.addCollimatedRadiationSource(make_vec3(0.6f, 0.f, 0.8f)); // cos = 0.8 once normalized
+
+    model.addRadiationBand("SW");
+    model.disableEmission("SW");
+    model.setScatteringDepth("SW", 0);
+    model.setDirectRayCount("SW", 500);
+    model.setDiffuseRadiationFlux("SW", 0.f);
+
+    std::vector<uint> all_UUIDs = context.getAllUUIDs();
+    context.setPrimitiveData(all_UUIDs, "reflectivity_SW", 0.f);
+    context.setPrimitiveData(all_UUIDs, "transmissivity_SW", 0.f);
+
+    model.updateGeometry();
+
+    // Each source in isolation, then both together.
+    model.setSourceFlux(source_zenith, "SW", 1000.f);
+    model.setSourceFlux(source_oblique, "SW", 0.f);
+    model.runBand("SW");
+    const float zenith_only = meanRadiationFlux(context, ground, "SW");
+
+    model.setSourceFlux(source_zenith, "SW", 0.f);
+    model.setSourceFlux(source_oblique, "SW", 1000.f);
+    model.runBand("SW");
+    const float oblique_only = meanRadiationFlux(context, ground, "SW");
+
+    model.setSourceFlux(source_zenith, "SW", 1000.f);
+    model.setSourceFlux(source_oblique, "SW", 1000.f);
+    model.runBand("SW");
+    const float both = meanRadiationFlux(context, ground, "SW");
+
+    DOCTEST_CHECK(zenith_only == doctest::Approx(1000.f).epsilon(0.02));
+    // This is the assertion that failed before the fix: the second source contributed 0.
+    DOCTEST_CHECK(oblique_only == doctest::Approx(800.f).epsilon(0.02));
+    DOCTEST_CHECK(both == doctest::Approx(1800.f).epsilon(0.02));
+}
+
+GPU_TEST_CASE("Backend Invariant - Per-Band Diffuse Peak Direction") {
+    // The sky peak direction is per band, and each band must use its own. The same std430 stride
+    // mismatch described above applied to the diffuse peak-direction array, so in a three-band
+    // run bands 1 and 2 sampled the sky around the wrong direction (errors of 21% and 27%).
+    //
+    // A horizontal surface under a power-law sky absorbs an amount that depends on where the sky
+    // peaks, so per-band absorbed flux reads back the direction actually used. Ground truth is
+    // measured one band at a time, where the index is always 0 and therefore always correct.
+    const vec3 zenith = make_vec3(0.f, 0.f, 1.f);
+    const vec3 tilted = make_vec3(0.9f, 0.f, 0.4f);
+    const std::vector<vec3> peak_directions = {zenith, tilted, zenith};
+
+    auto measure = [&](const std::vector<vec3> &directions, size_t band_to_report) {
+        Context context;
+        std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(2, 2), nullrotation, make_int2(10, 10));
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+
+        std::vector<std::string> bands;
+        std::vector<uint> all_UUIDs = context.getAllUUIDs();
+        for (size_t b = 0; b < directions.size(); b++) {
+            const std::string band = "B" + std::to_string(b);
+            bands.push_back(band);
+            model.addRadiationBand(band);
+            model.disableEmission(band);
+            model.setScatteringDepth(band, 0);
+            model.setDiffuseRayCount(band, 500);
+            model.setDiffuseRadiationFlux(band, 1000.f);
+            model.setDiffuseRadiationExtinctionCoeff(band, 0.9f, directions.at(b));
+            context.setPrimitiveData(all_UUIDs, ("reflectivity_" + band).c_str(), 0.f);
+            context.setPrimitiveData(all_UUIDs, ("transmissivity_" + band).c_str(), 0.f);
+        }
+
+        model.updateGeometry();
+        model.runBand(bands);
+        return meanRadiationFlux(context, ground, bands.at(band_to_report));
+    };
+
+    for (size_t b = 0; b < peak_directions.size(); b++) {
+        const float truth = measure({peak_directions.at(b)}, 0);
+        const float in_multi_band_run = measure(peak_directions, b);
+        DOCTEST_CHECK_MESSAGE(in_multi_band_run == doctest::Approx(truth).epsilon(0.05), "band " << b << " sampled the sky around the wrong peak direction");
+    }
+}
+
+GPU_TEST_CASE("Backend Invariant - Occlusion and Texture Masking Conserve Energy") {
+    // Absorbed flux under a collimated source must equal source_flux * (1 - blocked_fraction),
+    // whether the blocking comes from an opaque occluder or from a transparency mask. Both cases
+    // make the ray-generation shaders take a per-ray early exit, which is the control flow the
+    // Vulkan backend's subgroup reductions run under; this pins down that the reductions deposit
+    // exactly the right amount of energy under that divergence.
+    auto measure = [](int occluder_kind, float &blocked_fraction) {
+        Context context;
+        std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(2, 2), nullrotation, make_int2(20, 20));
+
+        blocked_fraction = 0.f;
+        if (occluder_kind == 1) {
+            // Opaque 1x1 patch over a 2x2 ground: blocks one quarter.
+            context.addPatch(make_vec3(0, 0, 1), make_vec2(1, 1));
+            blocked_fraction = 0.25f;
+        } else if (occluder_kind == 2) {
+            // disk.png is an opaque inscribed disk on a transparent background, so a 1x1 patch
+            // blocks pi/4 of its own area, i.e. pi/16 of the ground.
+            context.addPatch(make_vec3(0, 0, 1), make_vec2(1, 1), make_SphericalCoord(0, 0), "plugins/radiation/disk.png");
+            blocked_fraction = float(M_PI) / 16.f;
+        }
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+
+        uint sun = model.addCollimatedRadiationSource(make_vec3(0.f, 0.f, 1.f));
+        model.addRadiationBand("SW");
+        model.disableEmission("SW");
+        model.setScatteringDepth("SW", 0);
+        model.setDirectRayCount("SW", 1000);
+        model.setSourceFlux(sun, "SW", 1000.f);
+        model.setDiffuseRadiationFlux("SW", 0.f);
+
+        std::vector<uint> all_UUIDs = context.getAllUUIDs();
+        context.setPrimitiveData(all_UUIDs, "reflectivity_SW", 0.f);
+        context.setPrimitiveData(all_UUIDs, "transmissivity_SW", 0.f);
+
+        model.updateGeometry();
+        model.runBand("SW");
+        return meanRadiationFlux(context, ground, "SW");
+    };
+
+    float blocked_fraction = 0.f;
+
+    const float unoccluded = measure(0, blocked_fraction);
+    DOCTEST_CHECK(unoccluded == doctest::Approx(1000.f).epsilon(0.01));
+
+    const float opaque_occluder = measure(1, blocked_fraction);
+    DOCTEST_CHECK(opaque_occluder == doctest::Approx(1000.f * (1.f - blocked_fraction)).epsilon(0.02));
+
+    const float masked_occluder = measure(2, blocked_fraction);
+    DOCTEST_CHECK(masked_occluder == doctest::Approx(1000.f * (1.f - blocked_fraction)).epsilon(0.02));
+}
+
+// A surface's reflectivity is integrated against each SOURCE's spectrum, so two sources with
+// different spectra see different rho on the same surface. The Vulkan direct-ray shader indexed
+// rho/tau as [primitive][band] with no source term, silently applying source 0's properties to
+// every source: two sources whose reflectivities differed by 60 percentage points deposited
+// identical flux. This asserts the transport against the model's own per-source reflectivity, so it
+// holds whatever the spectra integrate to.
+GPU_TEST_CASE("Backend Invariant - Per-Source Radiative Properties") {
+    // Reflectance steps from 0.2 to 0.8 at 600 nm; the two source spectra occupy opposite halves of
+    // the band and have equal integrals, so they differ only in which half of the surface they see.
+    const std::vector<vec2> surface_rho = {make_vec2(400, 0.2f), make_vec2(590, 0.2f), make_vec2(610, 0.8f), make_vec2(800, 0.8f)};
+    const std::vector<vec2> spectrum_short = {make_vec2(400, 1.f), make_vec2(590, 1.f), make_vec2(610, 0.f), make_vec2(800, 0.f)};
+    const std::vector<vec2> spectrum_long = {make_vec2(400, 0.f), make_vec2(590, 0.f), make_vec2(610, 1.f), make_vec2(800, 1.f)};
+
+    auto absorbed_with = [&](const std::vector<vec2> &active_spectrum, const std::vector<vec2> &idle_spectrum, uint which, float &rho_out) {
+        Context context;
+        context.setGlobalData("probe_surface_rho", surface_rho);
+        std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(2, 2), nullrotation, make_int2(8, 8));
+        context.setPrimitiveData(ground, "reflectivity_spectrum", "probe_surface_rho");
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+        model.optionalOutputPrimitiveData("reflectivity");
+
+        // Both sources are geometrically identical, so only the spectrum can change the result.
+        uint source_a = model.addCollimatedRadiationSource(make_vec3(0.f, 0.f, 1.f));
+        uint source_b = model.addCollimatedRadiationSource(make_vec3(0.f, 0.f, 1.f));
+        model.setSourceSpectrum(source_a, which == 0 ? active_spectrum : idle_spectrum);
+        model.setSourceSpectrum(source_b, which == 0 ? idle_spectrum : active_spectrum);
+
+        // Explicit band bounds give the spectral integration a range without needing a camera.
+        model.addRadiationBand("SW", 400, 800);
+        model.disableEmission("SW");
+        model.setScatteringDepth("SW", 1);
+        model.setDirectRayCount("SW", 200);
+        model.setDiffuseRayCount("SW", 200);
+        model.setDiffuseRadiationFlux("SW", 0.f);
+
+        model.setSourceFlux(source_a, "SW", which == 0 ? 1000.f : 0.f);
+        model.setSourceFlux(source_b, "SW", which == 0 ? 0.f : 1000.f);
+
+        model.updateGeometry();
+        model.runBand("SW");
+
+        rho_out = 0.f;
+        context.getPrimitiveData(ground.front(), which == 0 ? "reflectivity_0_SW" : "reflectivity_1_SW", rho_out);
+        return meanRadiationFlux(context, ground, "SW");
+    };
+
+    float rho_short = 0.f, rho_long = 0.f;
+    const float absorbed_short = absorbed_with(spectrum_short, spectrum_long, 0, rho_short);
+    const float absorbed_long = absorbed_with(spectrum_long, spectrum_short, 1, rho_long);
+
+    // Precondition: the two sources must genuinely see different reflectivities, otherwise the test
+    // cannot distinguish per-source indexing from source-0-for-everything.
+    DOCTEST_REQUIRE(std::abs(rho_short - rho_long) > 0.1f);
+
+    // A flat tile cannot illuminate itself, so absorbed = incident * (1 - rho) for each source.
+    DOCTEST_CHECK(absorbed_short == doctest::Approx(1000.f * (1.f - rho_short)).epsilon(0.02));
+    DOCTEST_CHECK(absorbed_long == doctest::Approx(1000.f * (1.f - rho_long)).epsilon(0.02));
+
+    // This is the assertion that failed before the fix: both sources deposited the same flux.
+    DOCTEST_CHECK(absorbed_long / absorbed_short == doctest::Approx((1.f - rho_long) / (1.f - rho_short)).epsilon(0.03));
+}
+
+// A camera integrates scattered radiance against its own spectral response, which is a different
+// integral over wavelength than the band-weighted scatter that drives the scattering iterations.
+// The Vulkan backend aliased the two (scatter_buff_top_cam = scatter_buff_top), so the camera saw
+// band-weighted radiance whenever a source spectrum and a non-uniform camera response were both
+// present -- measured 60-75% error on a scene with spectral soil, spectral lamps and per-band
+// camera responses. Aliasing makes the ratio below exactly 1.
+GPU_TEST_CASE("Backend Invariant - Camera-Weighted Scatter") {
+    // The surface reflects 0.2 below 600 nm and 0.8 above. Explicit band bounds fix the transport
+    // weighting, and the source spectrum is flat, so both runs share identical rho and identical
+    // incident radiation -- only the camera's own weighting differs between them.
+    const std::vector<vec2> surface_rho = {make_vec2(400, 0.2f), make_vec2(590, 0.2f), make_vec2(610, 0.8f), make_vec2(800, 0.8f)};
+    const std::vector<vec2> flat_source = {make_vec2(400, 1.f), make_vec2(800, 1.f)};
+    // Mirror-image responses with equal integrals, each confined to one half of the band.
+    const std::vector<vec2> response_low = {make_vec2(400, 1.f), make_vec2(590, 1.f), make_vec2(610, 0.f), make_vec2(800, 0.f)};
+    const std::vector<vec2> response_high = {make_vec2(400, 0.f), make_vec2(590, 0.f), make_vec2(610, 1.f), make_vec2(800, 1.f)};
+
+    auto render_with = [&](const std::vector<vec2> &response) {
+        Context context;
+        context.setGlobalData("probe_surface_rho", surface_rho);
+        context.setGlobalData("probe_camera_response", response);
+
+        std::vector<uint> ground = context.addTile(make_vec3(0, 0, 0), make_vec2(4, 4), nullrotation, make_int2(8, 8));
+        context.setPrimitiveData(ground, "reflectivity_spectrum", "probe_surface_rho");
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+
+        uint sun = model.addCollimatedRadiationSource(make_vec3(0.f, 0.f, 1.f));
+        model.setSourceSpectrum(sun, flat_source);
+
+        model.addRadiationBand("SW", 400, 800);
+        model.disableEmission("SW");
+        model.setScatteringDepth("SW", 1);
+        model.setDirectRayCount("SW", 200);
+        model.setDiffuseRayCount("SW", 200);
+        model.setDiffuseRadiationFlux("SW", 0.f);
+        model.setSourceFlux(sun, "SW", 1000.f);
+
+        CameraProperties camera_properties;
+        camera_properties.camera_resolution = make_int2(16, 16);
+        camera_properties.HFOV = 40.f;
+        camera_properties.focal_plane_distance = 2.f;
+        camera_properties.lens_diameter = 0.f;
+        camera_properties.exposure = "manual"; // no auto gain, so the two runs stay comparable
+        camera_properties.white_balance = "off";
+        model.addRadiationCamera("cam", {"SW"}, make_vec3(0, 0, 2.f), make_vec3(0, 0, 0), camera_properties, 4);
+        model.setCameraSpectralResponse("cam", "SW", "probe_camera_response");
+
+        model.updateGeometry();
+        model.runBand("SW");
+
+        std::vector<float> pixels;
+        context.getGlobalData("camera_cam_SW", pixels);
+        double sum = 0;
+        for (float pixel: pixels) {
+            DOCTEST_REQUIRE(std::isfinite(pixel));
+            sum += pixel;
+        }
+        return float(sum / double(pixels.size()));
+    };
+
+    const float seen_low = render_with(response_low);
+    const float seen_high = render_with(response_high);
+
+    DOCTEST_REQUIRE(seen_low > 0.f);
+
+    // The camera looking through the long-wavelength half must see the surface's 0.8 reflectance,
+    // the other its 0.2. Band-weighted scatter is identical for both and would give a ratio of 1.
+    const float ratio = seen_high / seen_low;
+    DOCTEST_CHECK_MESSAGE(ratio > 2.f, "camera-weighted scatter appears to be aliased onto band-weighted scatter (ratio " << ratio << ", expected well above 1)");
+    DOCTEST_CHECK(ratio == doctest::Approx(4.f).epsilon(0.25));
+}
+
+
+
+// Camera flux smoothing tests
+//
+// Smoothing reconstructs a camera image by interpolating the outgoing flux across each facet instead of holding it constant. The tests below pin the three properties that make that safe: it is exactly the
+// identity on a field that is already uniform, it leaves geometry that does not take part untouched, and it does not average across an edge the mesh genuinely resolved.
+
+//! Largest difference between neighbouring pixels that both see geometry
+/**
+ * Faceting shows up as a step at every facet edge, so the largest step between neighbouring pixels is a direct measure of how faceted the image looks. Both image directions are considered, because which one
+ * crosses the facets depends on how the object happens to be oriented on the sensor. Pixels where either side sees the sky are skipped: the step from geometry to background is not faceting and is there
+ * either way.
+ */
+static float maxAdjacentPixelJump(const std::vector<float> &pixels, const helios::int2 &resolution) {
+    auto pixel_at = [&](int i, int j) { return pixels.at(size_t(j) * size_t(resolution.x) + size_t(i)); };
+
+    float largest_jump = 0.f;
+    for (int j = 0; j < resolution.y; j++) {
+        for (int i = 0; i < resolution.x; i++) {
+            const float here = pixel_at(i, j);
+            if (here <= 0.f) {
+                continue;
+            }
+            if (i + 1 < resolution.x && pixel_at(i + 1, j) > 0.f) {
+                largest_jump = std::max(largest_jump, std::fabs(pixel_at(i + 1, j) - here));
+            }
+            if (j + 1 < resolution.y && pixel_at(i, j + 1) > 0.f) {
+                largest_jump = std::max(largest_jump, std::fabs(pixel_at(i, j + 1) - here));
+            }
+        }
+    }
+    return largest_jump;
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - defaults to off and validates its crease angle") {
+    Context context;
+    context.addPatch(make_vec3(0, 0, 0), make_vec2(1, 1));
+
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    DOCTEST_CHECK(!model.isCameraFluxSmoothingEnabled());
+
+    model.enableCameraFluxSmoothing();
+    DOCTEST_CHECK(model.isCameraFluxSmoothingEnabled());
+    DOCTEST_CHECK(model.getCameraFluxSmoothingCreaseAngle() == doctest::Approx(30.f));
+
+    model.enableCameraFluxSmoothing(45.f);
+    DOCTEST_CHECK(model.getCameraFluxSmoothingCreaseAngle() == doctest::Approx(45.f));
+
+    model.disableCameraFluxSmoothing();
+    DOCTEST_CHECK(!model.isCameraFluxSmoothingEnabled());
+
+    // A crease angle outside [0,180] has no meaning as an angle between two normals, so it is rejected rather than clamped.
+    DOCTEST_CHECK_THROWS_AS(model.enableCameraFluxSmoothing(-5.f), std::runtime_error);
+    DOCTEST_CHECK_THROWS_AS(model.enableCameraFluxSmoothing(200.f), std::runtime_error);
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - a uniform flux field is reproduced exactly") {
+    // Averaging a per-facet quantity onto the vertices and interpolating it back must not create or destroy energy. The sharpest statement of that is a field which is already uniform: every vertex then
+    // carries the same value, every set of interpolation weights sums to one, and the reconstruction has to return that value at every point of every facet.
+    //
+    // A blackbody tube at a single temperature gives exactly that. With emissivity one there is no reflected component to vary from facet to facet, so every facet radiates sigma*T^4 whatever its
+    // orientation, and a pinhole camera with manual exposure must read sigma*T^4/pi on every pixel covering the tube whether or not smoothing is on. A weight that does not sum to one, or a vertex index
+    // pointing at the wrong slot, shows up here immediately as a changed radiance.
+    const float temperature = 350.f;
+    const float sigma = 5.670374419e-8f;
+    const float expected_radiance = sigma * powf(temperature, 4) / float(M_PI);
+
+    auto render = [&](bool enable_smoothing) {
+        Context context;
+        const std::vector<vec3> nodes = {make_vec3(0, 0, -1), make_vec3(0, 0, 0), make_vec3(0, 0, 1)};
+        const uint ObjID = context.addTubeObject(6, nodes, {0.3f, 0.3f, 0.3f});
+        const std::vector<uint> tube_UUIDs = context.getObjectPrimitiveUUIDs(ObjID);
+        context.setPrimitiveData(tube_UUIDs, "temperature", temperature);
+        context.setPrimitiveData(tube_UUIDs, "emissivity_TH", 1.f);
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+        if (enable_smoothing) {
+            model.enableCameraFluxSmoothing();
+        }
+
+        model.addRadiationBand("TH");
+        model.enableEmission("TH");
+        model.setScatteringDepth("TH", 1);
+        model.setDiffuseRayCount("TH", 100);
+
+        CameraProperties camera_properties;
+        camera_properties.camera_resolution = make_int2(64, 64);
+        camera_properties.HFOV = 40.f;
+        camera_properties.lens_diameter = 0.f; // pinhole, so no aperture weighting
+        camera_properties.exposure = "manual"; // raw radiance, so the two runs stay comparable
+        camera_properties.white_balance = "off";
+
+        model.addRadiationCamera("tube_cam", {"TH"}, make_vec3(0, -5, 0), make_vec3(0, 0, 0), camera_properties, 1);
+        model.updateGeometry();
+        model.runBand("TH");
+
+        std::vector<float> pixels = model.getCameraPixelData("tube_cam", "TH");
+        DOCTEST_REQUIRE(pixels.size() == 64 * 64);
+
+        float max_radiance = 0.f;
+        for (float pixel: pixels) {
+            DOCTEST_REQUIRE(std::isfinite(pixel));
+            max_radiance = std::max(max_radiance, pixel);
+        }
+        return max_radiance;
+    };
+
+    const float flat_radiance = render(false);
+    const float smoothed_radiance = render(true);
+
+    DOCTEST_INFO("flat " << flat_radiance << ", smoothed " << smoothed_radiance << ", expected " << expected_radiance);
+    DOCTEST_CHECK(flat_radiance == doctest::Approx(expected_radiance).epsilon(0.05));
+    DOCTEST_CHECK(smoothed_radiance == doctest::Approx(expected_radiance).epsilon(0.05));
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - removes the faceting on a coarsely tessellated tube") {
+    // A tube of six radial divisions lit from one side gives six plateaus of constant radiance around its circumference, with a visible step between each. Smoothing must turn those steps into a gradient.
+    // The effect is deliberately made order-of-magnitude rather than marginal, so that Monte-Carlo noise in the scattered component cannot account for it.
+    auto render = [](bool enable_smoothing) {
+        Context context;
+        const std::vector<vec3> nodes = {make_vec3(0, 0, -1), make_vec3(0, 0, 1)};
+        const uint ObjID = context.addTubeObject(6, nodes, {0.4f, 0.4f});
+        const std::vector<uint> tube_UUIDs = context.getObjectPrimitiveUUIDs(ObjID);
+        context.setPrimitiveData(tube_UUIDs, "reflectivity_SW", 0.5f);
+        context.setPrimitiveData(tube_UUIDs, "transmissivity_SW", 0.f);
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+        if (enable_smoothing) {
+            model.enableCameraFluxSmoothing();
+        }
+
+        // The source is angled towards the camera so that several facets around the visible side of the tube are lit to different degrees, and a diffuse component keeps the facets facing away from it from
+        // reading exactly zero. Without both, the camera sees one lit facet against a black background and there is no facet-to-facet step for the test to measure.
+        const uint sun = model.addCollimatedRadiationSource(make_vec3(0.7f, -0.7f, 0.f));
+        model.addRadiationBand("SW");
+        model.disableEmission("SW");
+        model.setScatteringDepth("SW", 1);
+        model.setDirectRayCount("SW", 500);
+        model.setDiffuseRayCount("SW", 500);
+        model.setSourceFlux(sun, "SW", 1000.f);
+        model.setDiffuseRadiationFlux("SW", 150.f);
+
+        CameraProperties camera_properties;
+        camera_properties.camera_resolution = make_int2(80, 80);
+        camera_properties.HFOV = 35.f;
+        camera_properties.lens_diameter = 0.f;
+        camera_properties.exposure = "manual";
+        camera_properties.white_balance = "off";
+
+        model.addRadiationCamera("facet_cam", {"SW"}, make_vec3(0, -4, 0), make_vec3(0, 0, 0), camera_properties, 1);
+        model.updateGeometry();
+        model.runBand("SW");
+
+        std::vector<float> pixels = model.getCameraPixelData("facet_cam", "SW");
+        DOCTEST_REQUIRE(pixels.size() == 80 * 80);
+        for (float pixel: pixels) {
+            DOCTEST_REQUIRE(std::isfinite(pixel));
+        }
+        return pixels;
+    };
+
+    const helios::int2 resolution = make_int2(80, 80);
+    const std::vector<float> flat_pixels = render(false);
+    const std::vector<float> smoothed_pixels = render(true);
+
+    const float flat_jump = maxAdjacentPixelJump(flat_pixels, resolution);
+    const float smoothed_jump = maxAdjacentPixelJump(smoothed_pixels, resolution);
+
+    DOCTEST_REQUIRE(flat_jump > 0.f);
+    DOCTEST_INFO("largest step between neighbouring pixels: flat " << flat_jump << ", smoothed " << smoothed_jump);
+    DOCTEST_CHECK_MESSAGE(smoothed_jump < 0.5f * flat_jump, "smoothing did not reduce the step at the facet edges");
+
+    // The image must still be an image: smoothing redistributes the flux across each facet, it does not dim or brighten the object.
+    const auto flat_max = *std::max_element(flat_pixels.begin(), flat_pixels.end());
+    const auto smoothed_max = *std::max_element(smoothed_pixels.begin(), smoothed_pixels.end());
+    DOCTEST_CHECK(smoothed_max > 0.f);
+    DOCTEST_CHECK(smoothed_max == doctest::Approx(flat_max).epsilon(0.35));
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - leaves geometry that does not take part untouched") {
+    // A patch belonging to no object has no neighbour to share a vertex with, so there is nothing to interpolate and its pixels must be identical with smoothing on and off. This is what lets smoothing be
+    // enabled on a mixed scene without disturbing the parts of it that are already correct.
+    auto render = [](bool enable_smoothing) {
+        Context context;
+        const uint patch_UUID = context.addPatch(make_vec3(0, 0, 0), make_vec2(2, 2));
+        context.setPrimitiveData(patch_UUID, "temperature", 320.f);
+        context.setPrimitiveData(patch_UUID, "emissivity_TH", 1.f);
+
+        // A box is built from genuinely flat faces, so it is excluded by design and must be left alone too.
+        const uint box_ObjID = context.addBoxObject(make_vec3(3, 0, 0), make_vec3(1, 1, 1), make_int3(2, 2, 2));
+        context.setPrimitiveData(context.getObjectPrimitiveUUIDs(box_ObjID), "temperature", 320.f);
+        context.setPrimitiveData(context.getObjectPrimitiveUUIDs(box_ObjID), "emissivity_TH", 1.f);
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+        if (enable_smoothing) {
+            model.enableCameraFluxSmoothing();
+        }
+
+        model.addRadiationBand("TH");
+        model.enableEmission("TH");
+        model.setScatteringDepth("TH", 1);
+        model.setDiffuseRayCount("TH", 100);
+
+        CameraProperties camera_properties;
+        camera_properties.camera_resolution = make_int2(48, 48);
+        camera_properties.HFOV = 45.f;
+        camera_properties.lens_diameter = 0.f;
+        camera_properties.exposure = "manual";
+        camera_properties.white_balance = "off";
+
+        model.addRadiationCamera("plain_cam", {"TH"}, make_vec3(0, 0, 6), make_vec3(0, 0, 0), camera_properties, 1);
+        model.updateGeometry();
+        model.runBand("TH");
+
+        return model.getCameraPixelData("plain_cam", "TH");
+    };
+
+    const std::vector<float> flat_pixels = render(false);
+    const std::vector<float> smoothed_pixels = render(true);
+
+    DOCTEST_REQUIRE(flat_pixels.size() == smoothed_pixels.size());
+
+    // Each camera ray is jittered within its pixel, so a pixel on the silhouette can fall on the patch in one render and on the sky in the other. Those pixels say nothing about smoothing, so the comparison
+    // is restricted to pixels both renders agree are looking at geometry.
+    float largest_difference = 0.f;
+    float largest_value = 0.f;
+    size_t compared_pixels = 0;
+    for (size_t p = 0; p < flat_pixels.size(); p++) {
+        largest_value = std::max(largest_value, flat_pixels.at(p));
+        if (flat_pixels.at(p) > 0.f && smoothed_pixels.at(p) > 0.f) {
+            largest_difference = std::max(largest_difference, std::fabs(flat_pixels.at(p) - smoothed_pixels.at(p)));
+            compared_pixels++;
+        }
+    }
+
+    DOCTEST_REQUIRE(largest_value > 0.f);
+    DOCTEST_REQUIRE(compared_pixels > 100);
+    DOCTEST_INFO("largest difference over " << compared_pixels << " shared pixels was " << largest_difference << " against a peak radiance of " << largest_value);
+    DOCTEST_CHECK(largest_difference <= 1e-4f * largest_value);
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - needs no stored vertex normals") {
+    // Smoothing interpolates a scalar, not a direction, so it must work on a mesh whose source file carried no vertex normals at all. This pins that invariant against a future change that assumes normals
+    // are available: test_complex_large.obj has no vn records, so its polymesh reports NORMAL_SOURCE_NONE.
+    Context context;
+    const std::vector<uint> mesh_UUIDs = context.loadOBJ("lib/models/test_complex_large.obj", make_vec3(0, 0, 0), 2.f, nullrotation, RGB::red, true);
+    DOCTEST_REQUIRE(!mesh_UUIDs.empty());
+
+    const uint ObjID = context.getPrimitiveParentObjectID(mesh_UUIDs.front());
+    DOCTEST_REQUIRE(ObjID != 0);
+    DOCTEST_REQUIRE(context.getObjectType(ObjID) == OBJECT_TYPE_POLYMESH);
+    DOCTEST_REQUIRE(context.getPolymeshObjectVertexNormalSource(ObjID) == NORMAL_SOURCE_NONE);
+    DOCTEST_REQUIRE(context.doesObjectHaveSharedVertexTopology(ObjID));
+
+    context.setPrimitiveData(mesh_UUIDs, "temperature", 340.f);
+    context.setPrimitiveData(mesh_UUIDs, "emissivity_TH", 1.f);
+
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+    model.enableCameraFluxSmoothing();
+
+    model.addRadiationBand("TH");
+    model.enableEmission("TH");
+    model.setScatteringDepth("TH", 1);
+    model.setDiffuseRayCount("TH", 50);
+
+    CameraProperties camera_properties;
+    camera_properties.camera_resolution = make_int2(48, 48);
+    camera_properties.HFOV = 45.f;
+    camera_properties.lens_diameter = 0.f;
+    camera_properties.exposure = "manual";
+    camera_properties.white_balance = "off";
+
+    model.addRadiationCamera("mesh_cam", {"TH"}, make_vec3(0, -6, 2), make_vec3(0, 0, 0), camera_properties, 1);
+    model.updateGeometry();
+    model.runBand("TH");
+
+    const std::vector<float> pixels = model.getCameraPixelData("mesh_cam", "TH");
+    DOCTEST_REQUIRE(pixels.size() == 48 * 48);
+
+    float max_radiance = 0.f;
+    for (float pixel: pixels) {
+        DOCTEST_REQUIRE(std::isfinite(pixel));
+        max_radiance = std::max(max_radiance, pixel);
+    }
+
+    // A blackbody at 340 K radiates sigma*T^4/pi whichever facet is seen, so the reconstruction has an analytic value to hit even on an arbitrary mesh.
+    const float sigma = 5.670374419e-8f;
+    const float expected_radiance = sigma * powf(340.f, 4) / float(M_PI);
+    DOCTEST_INFO("peak radiance " << max_radiance << ", expected " << expected_radiance);
+    DOCTEST_CHECK(max_radiance == doctest::Approx(expected_radiance).epsilon(0.05));
+}
+
+//! Build a closed cube as a welded polymesh carrying no vertex normals
+/**
+ * A cube loaded from an OBJ that supplies vertex normals is already split at its edges, because the loader keys its deduplication on the normal as well as the position, so it cannot exercise the crease
+ * test. Building the mesh here with eight shared corners and no normals gives a mesh where every edge really is welded, and where averaging across an edge would visibly bleed one face into the next.
+ */
+static uint buildWeldedCubePolymesh(helios::Context &context, float half_size) {
+    const std::vector<helios::vec3> vertices = {helios::make_vec3(-half_size, -half_size, -half_size), helios::make_vec3(half_size, -half_size, -half_size), helios::make_vec3(half_size, half_size, -half_size),
+                                                helios::make_vec3(-half_size, half_size, -half_size), helios::make_vec3(-half_size, -half_size, half_size), helios::make_vec3(half_size, -half_size, half_size),
+                                                helios::make_vec3(half_size, half_size, half_size),   helios::make_vec3(-half_size, half_size, half_size)};
+
+    // Two triangles per face, wound so that every facet normal points out of the cube.
+    const std::vector<helios::int3> faces = {helios::make_int3(0, 3, 2), helios::make_int3(0, 2, 1), // -z
+                                             helios::make_int3(4, 5, 6), helios::make_int3(4, 6, 7), // +z
+                                             helios::make_int3(0, 1, 5), helios::make_int3(0, 5, 4), // -y
+                                             helios::make_int3(2, 3, 7), helios::make_int3(2, 7, 6), // +y
+                                             helios::make_int3(0, 4, 7), helios::make_int3(0, 7, 3), // -x
+                                             helios::make_int3(1, 2, 6), helios::make_int3(1, 6, 5)}; // +x
+
+    std::vector<uint> face_UUIDs;
+    face_UUIDs.reserve(faces.size());
+    for (const helios::int3 &face: faces) {
+        face_UUIDs.push_back(context.addTriangle(vertices.at(face.x), vertices.at(face.y), vertices.at(face.z)));
+    }
+
+    const uint ObjID = context.addPolymeshObject(face_UUIDs);
+    context.setPolymeshObjectTopology(ObjID, vertices, faces, face_UUIDs, {}, {}, helios::NORMAL_SOURCE_NONE);
+    return ObjID;
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - keeps a crease sharp that the mesh actually resolved") {
+    // Smoothing exists to compensate for a tessellation that under-resolves a curve. It must not also erase detail the mesh did resolve: the edge of a cube is a real edge, and averaging the lit face into
+    // the shadowed one across it would turn a crisp cube into a smudge. The crease angle is what separates the two cases, so the test renders the same welded cube at both settings and compares the step
+    // across its edges. At the default crease angle the faces stay separate; at 180 degrees, where nothing counts as a crease, they are allowed to blend and the step must collapse.
+    auto render = [](bool enable_smoothing, float crease_angle_degrees) {
+        Context context;
+        const uint ObjID = buildWeldedCubePolymesh(context, 0.5f);
+        const std::vector<uint> cube_UUIDs = context.getObjectPrimitiveUUIDs(ObjID);
+        context.setPrimitiveData(cube_UUIDs, "reflectivity_SW", 0.5f);
+        context.setPrimitiveData(cube_UUIDs, "transmissivity_SW", 0.f);
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+        if (enable_smoothing) {
+            model.enableCameraFluxSmoothing(crease_angle_degrees);
+        }
+
+        const uint sun = model.addCollimatedRadiationSource(make_vec3(1.f, 0.f, 0.f));
+        model.addRadiationBand("SW");
+        model.disableEmission("SW");
+        model.setScatteringDepth("SW", 1);
+        model.setDirectRayCount("SW", 500);
+        model.setDiffuseRayCount("SW", 500);
+        model.setSourceFlux(sun, "SW", 1000.f);
+        // A diffuse component keeps the shadowed face from reading exactly zero, so that the step across the edge is between two lit values rather than between geometry and background.
+        model.setDiffuseRadiationFlux("SW", 150.f);
+
+        CameraProperties camera_properties;
+        camera_properties.camera_resolution = make_int2(80, 80);
+        camera_properties.HFOV = 35.f;
+        camera_properties.lens_diameter = 0.f;
+        camera_properties.exposure = "manual";
+        camera_properties.white_balance = "off";
+
+        // Looking at the cube corner where the lit +x face meets the shadowed -y face.
+        model.addRadiationCamera("crease_cam", {"SW"}, make_vec3(3.f, -3.f, 0.5f), make_vec3(0, 0, 0), camera_properties, 1);
+        model.updateGeometry();
+        model.runBand("SW");
+
+        std::vector<float> pixels = model.getCameraPixelData("crease_cam", "SW");
+        DOCTEST_REQUIRE(pixels.size() == 80 * 80);
+        for (float pixel: pixels) {
+            DOCTEST_REQUIRE(std::isfinite(pixel));
+        }
+        return pixels;
+    };
+
+    const helios::int2 resolution = make_int2(80, 80);
+
+    const float flat_jump = maxAdjacentPixelJump(render(false, 30.f), resolution);
+    const float creased_jump = maxAdjacentPixelJump(render(true, 30.f), resolution);
+    const float blended_jump = maxAdjacentPixelJump(render(true, 180.f), resolution);
+
+    DOCTEST_REQUIRE(flat_jump > 0.f);
+    DOCTEST_INFO("step across the cube edge: flat " << flat_jump << ", crease 30 degrees " << creased_jump << ", crease 180 degrees " << blended_jump);
+
+    // At the default crease angle the cube's 90-degree edges are above the threshold, so no vertex is shared across them and the edge survives essentially untouched.
+    DOCTEST_CHECK(creased_jump == doctest::Approx(flat_jump).epsilon(0.2));
+
+    // With no angle counting as a crease, the faces share their corners and the edge blurs.
+    DOCTEST_CHECK_MESSAGE(blended_jump < 0.6f * flat_jump, "a crease angle of 180 degrees should have blended the cube faces together");
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - an adaptive tile stays continuous across its refinement boundaries") {
+    // An adaptive tile refines into sub-patches of different sizes, so a coarse cell can meet two finer ones along one edge. The vertex at that T-junction is a corner of the finer cells but only the midpoint
+    // of the coarse cell's edge, which is where a reconstruction can tear. The test renders a lit adaptive tile and requires the largest step between neighbouring pixels to fall, not rise: if the refinement
+    // boundaries tore, the step there would exceed the per-sub-patch step that smoothing is removing.
+    auto render = [](bool enable_smoothing) {
+        Context context;
+        AdaptiveTileRefinement refinement;
+        refinement.target = make_vec2(0.f, 0.f);
+        refinement.subpatch_size_min = 0.2f;
+        refinement.subpatch_size_max = 1.f;
+        refinement.transition_exponent = 0.5f;
+
+        const uint ObjID = context.addAdaptiveTileObject(make_vec3(0, 0, 0), make_vec2(6, 6), nullrotation, refinement);
+        const std::vector<uint> tile_UUIDs = context.getObjectPrimitiveUUIDs(ObjID);
+        context.setPrimitiveData(tile_UUIDs, "reflectivity_SW", 0.5f);
+        context.setPrimitiveData(tile_UUIDs, "transmissivity_SW", 0.f);
+
+        RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+        model.disableMessages();
+        if (enable_smoothing) {
+            model.enableCameraFluxSmoothing();
+        }
+
+        // A small occluder above the tile casts a shadow whose edge runs across sub-patches of both sizes, so the reconstruction is exercised where the flux actually varies.
+        const uint occluder = context.addPatch(make_vec3(0.5f, 0.5f, 1.5f), make_vec2(1.2f, 1.2f));
+        context.setPrimitiveData(occluder, "reflectivity_SW", 0.f);
+        context.setPrimitiveData(occluder, "transmissivity_SW", 0.f);
+
+        const uint sun = model.addCollimatedRadiationSource(make_vec3(0.3f, 0.3f, 1.f));
+        model.addRadiationBand("SW");
+        model.disableEmission("SW");
+        model.setScatteringDepth("SW", 1);
+        model.setDirectRayCount("SW", 300);
+        model.setDiffuseRayCount("SW", 300);
+        model.setSourceFlux(sun, "SW", 1000.f);
+        model.setDiffuseRadiationFlux("SW", 100.f);
+
+        CameraProperties camera_properties;
+        camera_properties.camera_resolution = make_int2(72, 72);
+        camera_properties.HFOV = 45.f;
+        camera_properties.lens_diameter = 0.f;
+        camera_properties.exposure = "manual";
+        camera_properties.white_balance = "off";
+
+        model.addRadiationCamera("adaptive_cam", {"SW"}, make_vec3(0, 0, 7), make_vec3(0, 0, 0), camera_properties, 1);
+        model.updateGeometry();
+        model.runBand("SW");
+
+        std::vector<float> pixels = model.getCameraPixelData("adaptive_cam", "SW");
+        DOCTEST_REQUIRE(pixels.size() == 72 * 72);
+        for (float pixel: pixels) {
+            DOCTEST_REQUIRE(std::isfinite(pixel));
+        }
+        return pixels;
+    };
+
+    const helios::int2 resolution = make_int2(72, 72);
+    const std::vector<float> flat_pixels = render(false);
+    const std::vector<float> smoothed_pixels = render(true);
+
+    const float flat_jump = maxAdjacentPixelJump(flat_pixels, resolution);
+    const float smoothed_jump = maxAdjacentPixelJump(smoothed_pixels, resolution);
+
+    DOCTEST_REQUIRE(flat_jump > 0.f);
+    DOCTEST_INFO("largest step between neighbouring pixels: flat " << flat_jump << ", smoothed " << smoothed_jump);
+    DOCTEST_CHECK_MESSAGE(smoothed_jump <= flat_jump, "smoothing introduced a larger discontinuity than the one it was removing, which is what a tear at a refinement boundary would look like");
+}
+
+GPU_TEST_CASE("Camera Flux Smoothing - can be switched on and off after the geometry has been built") {
+    // The topology is normally uploaded as part of updateGeometry(), so toggling smoothing afterwards has to repeat that upload. Re-uploading the geometry releases the buffers the acceleration structure was
+    // built from, so this also covers that the structure is rebuilt rather than left pointing at freed storage - which would show up as a black frame or a crash rather than as a subtly wrong image.
+    Context context;
+    const std::vector<vec3> nodes = {make_vec3(0, 0, -1), make_vec3(0, 0, 1)};
+    const uint ObjID = context.addTubeObject(6, nodes, {0.4f, 0.4f});
+    const std::vector<uint> tube_UUIDs = context.getObjectPrimitiveUUIDs(ObjID);
+    context.setPrimitiveData(tube_UUIDs, "temperature", 350.f);
+    context.setPrimitiveData(tube_UUIDs, "emissivity_TH", 1.f);
+
+    RadiationModel model = RadiationModelTestHelper::createWithSharedDevice(&context);
+    model.disableMessages();
+
+    model.addRadiationBand("TH");
+    model.enableEmission("TH");
+    model.setScatteringDepth("TH", 1);
+    model.setDiffuseRayCount("TH", 100);
+
+    CameraProperties camera_properties;
+    camera_properties.camera_resolution = make_int2(48, 48);
+    camera_properties.HFOV = 40.f;
+    camera_properties.lens_diameter = 0.f;
+    camera_properties.exposure = "manual";
+    camera_properties.white_balance = "off";
+
+    model.addRadiationCamera("toggle_cam", {"TH"}, make_vec3(0, -5, 0), make_vec3(0, 0, 0), camera_properties, 1);
+
+    // Geometry is built first, so every toggle below happens against an already-uploaded scene.
+    model.updateGeometry();
+
+    const float sigma = 5.670374419e-8f;
+    const float expected_radiance = sigma * powf(350.f, 4) / float(M_PI);
+
+    auto renderPeak = [&]() {
+        model.runBand("TH");
+        const std::vector<float> pixels = model.getCameraPixelData("toggle_cam", "TH");
+        DOCTEST_REQUIRE(pixels.size() == 48 * 48);
+        float peak = 0.f;
+        for (float pixel: pixels) {
+            DOCTEST_REQUIRE(std::isfinite(pixel));
+            peak = std::max(peak, pixel);
+        }
+        return peak;
+    };
+
+    // A blackbody tube at one temperature radiates the same value from every facet, so the peak radiance is the analytic value in all three states.
+    const float before = renderPeak();
+
+    model.enableCameraFluxSmoothing();
+    DOCTEST_REQUIRE(model.isCameraFluxSmoothingEnabled());
+    const float during = renderPeak();
+
+    model.disableCameraFluxSmoothing();
+    DOCTEST_REQUIRE(!model.isCameraFluxSmoothingEnabled());
+    const float after = renderPeak();
+
+    DOCTEST_INFO("peak radiance before " << before << ", with smoothing " << during << ", after disabling " << after << ", expected " << expected_radiance);
+    DOCTEST_CHECK(before == doctest::Approx(expected_radiance).epsilon(0.05));
+    DOCTEST_CHECK(during == doctest::Approx(expected_radiance).epsilon(0.05));
+    DOCTEST_CHECK(after == doctest::Approx(expected_radiance).epsilon(0.05));
+}

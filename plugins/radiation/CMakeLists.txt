@@ -296,7 +296,7 @@ add_library(radiation STATIC
 	${VULKAN_BACKEND_SOURCES}
 )
 
-target_include_directories(radiation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/lib/json" )
+target_include_directories(radiation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" )
 target_include_directories(radiation PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/backends")
 
 # Add compile definitions for available backends

@@ -25,10 +25,10 @@ timeseries data. Use \ref helios::Context::loadXML() "loadXML()" and
 
 <b>Text files</b> are useful for exporting primitive data. The
 \ref helios::Context::writePrimitiveData() "writePrimitiveData()" function writes
-selected primitive data columns to a tab-delimited file.
+selected primitive data columns to a space-delimited file.
 
  ~~~~~~{.cpp}
- std::vector<std::string> cols = {"primitive_ID", "temperature"};
+ std::vector<std::string> cols = {"UUID", "temperature"};
  context.writePrimitiveData("primitive_data.txt", cols, true);
  ~~~~~~
 

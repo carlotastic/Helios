@@ -68,6 +68,8 @@ The radiation model requires at least one ray-tracing backend. Two backends are 
 
 CMake automatically detects which backends are available and enables them. On NVIDIA systems with driver ≥ 560 and CUDA 12.0+, the OptiX 8.1 backend is selected by default; on systems with driver &lt; 560 and CUDA 9.0+, the OptiX 6.5 (legacy) backend is used instead. On systems without NVIDIA hardware or when CUDA is not installed, the Vulkan backend is used. You can force the Vulkan backend by setting <tt>-DFORCE_VULKAN_BACKEND=ON</tt>, or force the OptiX 6.5 legacy backend by setting <tt>-DOPTIX_VERSION_LEGACY=ON</tt>.
 
+\note <b>Feature coverage:</b> The Vulkan backend's software BVH intersects patches, tiles and triangles only. A scene containing voxel primitives is rejected with an error rather than traced as though the voxels were absent; voxel ray tracing is available only on the OptiX backends.
+
 \note <b>Performance:</b> The OptiX backend is strongly preferred on NVIDIA systems. For direct radiation source ray traces, performance between the two backends is broadly comparable. However, for diffuse radiation or scattering ray traces, the Vulkan backend can be significantly slower. If you have an NVIDIA GPU and are running simulations with diffuse radiation or multiple scattering iterations, it is strongly recommended to install CUDA and use the OptiX backend. On systems with driver ≥ 560, the OptiX 8.1 backend will be selected automatically.
 
 For help choosing the correct CUDA toolkit version and accompanying OptiX version for your system, consult this page: \ref ChoosingCUDA
@@ -159,7 +161,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>reflectivity\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Primitive reflectivity for band * (i.e., reflectivity for band 'PAR' would be 'reflectivity_PAR').</td>
+     <td>Primitive reflectivity for band <code>*</code> (i.e., reflectivity for band 'PAR' would be 'reflectivity_PAR').</td>
      <td>N/A</td>
      <td>0</td>
    </tr>
@@ -167,7 +169,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>transmissivity\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Primitive transmissivity for band * (i.e., transmissivity for band 'PAR' would be 'transmissivity_PAR').</td>
+     <td>Primitive transmissivity for band <code>*</code> (i.e., transmissivity for band 'PAR' would be 'transmissivity_PAR').</td>
      <td>N/A</td>
      <td>0</td>
    </tr>
@@ -175,7 +177,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>glass\_n\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Refractive index of a translucent cover (glass/plastic) for band *. <b>Setting this activates the Fresnel+Bouguer angular-transmittance model for the primitive in that band</b>, overriding any constant <code>reflectivity_*</code>/<code>transmissivity_*</code>. See Sect. \ref RadGlass.</td>
+     <td>Refractive index of a translucent cover (glass/plastic) for band <code>*</code>. <b>Setting this activates the Fresnel+Bouguer angular-transmittance model for the primitive in that band</b>, overriding any constant <code>reflectivity_*</code>/<code>transmissivity_*</code>. See Sect. \ref RadGlass.</td>
      <td>N/A</td>
      <td>N/A (model off)</td>
    </tr>
@@ -183,7 +185,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>glass\_KL\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Bouguer absorption product K·L (extinction coefficient × thickness) of a translucent cover for band *. Optional; only used when <code>glass_n_*</code> is set. Default 0 = lossless (non-absorbing) sheet. See Sect. \ref RadGlass.</td>
+     <td>Bouguer absorption product K·L (extinction coefficient × thickness) of a translucent cover for band <code>*</code>. Optional; only used when <code>glass_n_*</code> is set. Default 0 = lossless (non-absorbing) sheet. See Sect. \ref RadGlass.</td>
      <td>N/A</td>
      <td>0</td>
    </tr>
@@ -191,7 +193,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>emissivity\_*</td>
      <td>unitless</td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Primitive emissivity for band * (i.e., emissivity for band 'PAR' would be 'emissivity_PAR'). <b>NOTE: Only needed if performing emission calculations.</b></td>
+     <td>Primitive emissivity for band <code>*</code> (i.e., emissivity for band 'PAR' would be 'emissivity_PAR'). <b>NOTE: Only needed if performing emission calculations.</b></td>
      <td>N/A</td>
      <td>1.0</td>
    </tr>
@@ -234,7 +236,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
      <td>radiation\_flux\_*</td>
      <td>W/m<sup>2</sup></td>
      <td>\htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly</td>
-     <td>Absorbed radiation flux for band * (i.e., the flux for band 'PAR' would be 'radiation_flux_PAR').</td>
+     <td>Absorbed radiation flux for band <code>*</code> (i.e., the flux for band 'PAR' would be 'radiation_flux_PAR').</td>
    </tr>
  </table>
 
@@ -918,6 +920,41 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  \image html specular_exponent_comparison.png
 
+ \subsubsection RadCamSmoothing Camera Flux Smoothing
+
+ A camera builds each pixel from a single outgoing flux value per primitive, so every pixel that lands on a given facet reads the same value. On a surface whose tessellation is coarse relative to the way its flux varies - a stem or trunk built as a \ref helios::Tube "Tube" object with six to ten radial divisions, a low-subdivision \ref helios::Sphere "Sphere", a mesh imported at low resolution - the image is a set of flat panels with a visible step at every facet edge, even though the surface being represented is smooth.
+
+ \ref RadiationModel::enableCameraFluxSmoothing() "enableCameraFluxSmoothing()" reconstructs the image differently. The outgoing flux is first averaged onto the vertices that neighbouring facets share, weighted by facet area,
+
+ \f[ \Phi_v = \frac{\sum_f A_f \Phi_f}{\sum_f A_f} \f]
+
+ where the sums run over the facets \f$f\f$ meeting at vertex \f$v\f$, and is then interpolated back across each facet from its own corners. The result is a continuous field over the object rather than one constant per facet, so a tessellated curve reads as a curve. The top and bottom faces are averaged separately, so a thin leaf does not render as the average of its lit and shaded sides.
+
+ ~~~~~~{.cpp}
+    RadiationModel radiation(&context);
+    radiation.enableCameraFluxSmoothing();      //!< optionally takes a crease angle in degrees; default 30
+    ...
+    radiation.runBand("SW");
+ ~~~~~~
+
+ <b>This changes what the camera reports.</b> A pixel no longer carries the outgoing flux of the primitive behind it, but a blend of that primitive's value with those of its neighbours, so pixel values no longer correspond exactly to the `radiation_flux_*` primitive data. This is a deliberate trade: the interpolated value is a better estimate of the flux leaving the smooth surface that the tessellation approximates, and a worse answer to the question "what is the flux on this particular facet". Smoothing is therefore <b>off by default</b>, and users doing sensor simulation should enable it deliberately. Nothing else is affected - the radiation solve, the `radiation_flux_*` values themselves, and the pixel label and depth images are all unchanged, and ray generation, cosine weighting and scattering all continue to use the flat per-primitive normal and flux.
+
+ Smoothing applies to the object types whose facet edges are an artifact of the tessellation:
+
+ <table>
+ <tr><th>Object type</th><th>Behavior</th></tr>
+ <tr><td>\ref helios::Tube "Tube", \ref helios::Cone "Cone"</td><td>Smoothed around the circumference. Vertices are <em>not</em> shared between segments, so variation along the length of the object - a shadow edge crossing a trunk - is left alone, since consecutive nodes resolve it.</td></tr>
+ <tr><td>\ref helios::Sphere "Sphere"</td><td>Smoothed around the azimuth. The rings bounding each zenith band are kept separate, by the same rule as a tube.</td></tr>
+ <tr><td>\ref helios::Polymesh "Polymesh"</td><td>Smoothed across the face table retained by \ref helios::Context::loadOBJ() "loadOBJ()" and \ref helios::Context::loadPLY() "loadPLY()", subject to the crease angle. A mesh assembled from loose primitives by \ref helios::Context::addPolymeshObject() "addPolymeshObject()" carries no face table and is left alone.</td></tr>
+ <tr><td>\ref helios::Tile "Tile", \ref helios::AdaptiveTile "AdaptiveTile"</td><td>Smoothed bilinearly across the sub-patch grid. Note that a tile's faces are genuinely planar, so unlike the curved types there is no faceting artifact to remove here; smoothing instead blurs real per-sub-patch variation, which is worth weighing against the reduction in per-sub-patch Monte-Carlo noise.</td></tr>
+ <tr><td>\ref helios::Box "Box", \ref helios::Disk "Disk"</td><td>Not smoothed. Their faces are flat, so the per-facet value is already correct everywhere on them.</td></tr>
+ <tr><td>Primitives with no parent object</td><td>Not smoothed. A standalone patch or triangle has no neighbour to share a vertex with. Its pixels are identical whether smoothing is on or off.</td></tr>
+ </table>
+
+ The crease angle, given in degrees to \ref RadiationModel::enableCameraFluxSmoothing() "enableCameraFluxSmoothing()", is the angle between adjacent facet normals above which a shared edge is treated as a hard edge and flux is not averaged across it. It applies to \ref helios::Polymesh "Polymesh" objects only: an imported mesh may contain an edge that is genuinely there, such as the edge of a cube, and averaging across it would bleed the lit face into the shadowed one. The curved object types are smooth by construction and are never creased - a tube of six radial divisions has sixty degrees between neighbouring facets, which is under-resolution rather than a crease, so applying a crease test to it would defeat the feature entirely.
+
+ \note Vertex normals are neither required nor used. Smoothing interpolates a scalar flux, not a direction, so a mesh reporting \ref helios::NORMAL_SOURCE_NONE is smoothed just as one carrying authored normals is. This is unrelated to the \ref Visualizer smooth shading controlled by \ref Visualizer::enableSmoothShading(), which does interpolate normals and is a pure rendering concern with no measurement semantics.
+
  \subsubsection RadCamCalibColor Radiation Camera Color Calibration
 
  By default, it is assumed that the spectral sensitivity is 100\% across all wavelengths. This is not the case for any real camera, as sensitivity of the sensor usually varies greatly with wavelength as shown in the image below. We need to set the spectral response of each camera channel. This can be done using the \ref RadiationModel::setCameraSpectralResponse() method. Three arguments must be provided: 1) the label for the camera to be set (first argument to the camera adder method), 2) the label for the camera channel (e.g., "red", "PAR", etc.), and 3) the label for global data in the Context containing spectral response data. The 3rd point is similar to how spectral data is specified for sources and radiative properties - a vector of wavelength and intensity values.
@@ -926,7 +963,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  Inputting raw measured surface spectra and camera spectral response specified by the manufacturer will typically result in simulated camera images that look quite different from those of the real camera due to errors in measurements, internal camera corrections, and lens effects. As such, a calibration is generally needed to achieve acceptable image results.
 
- Pre-calibrated camera responses are available for a few cameras and light source combinations to use when direct calibration data is not available. These are for a Nikon B500 camera with the ASTMG173 solar spectrum or CREE 6500K LED. These calibrated camera spectra can be found in the included camera spectral library ("plugins/radiation/spectral_data/camera_spectral_library.xml") and has labels "calibrated_sun_NikonB500_spectral_response_[*]" or "calibrated_CREE6500K_NikonD700_spectral_response_[*]", where [*] is one of "red", "green", or "blue". These calibrated camera spectra can be used in place of the raw camera spectral response data, as illustrated below:
+ Measured camera spectral responses are available in the included camera spectral library ("plugins/radiation/spectral_data/camera_spectral_library.xml"). Labels take the form "<camera>_[*]", where [*] is one of "red", "green", or "blue" — for example "NikonD700_spectral_response_[*]", "Nikon_D700_[*]", "Nikon_D50_[*]", "Canon_20D_[*]", "iPhone11_[*]", "iPhone12ProMAX_[*]", "GalaxyS20_[*]", "Pixel4_[*]", "LeicaM8_spectral_response_[*]", "SONY_NEX5N_[*]" and "Basler_acA2500-20gc_[*]". (The monochrome and filtered Basler entries, "Basler_acA2500-20gm_mono", "..._730nm_filt" and "..._850nm_filt", define a single channel rather than three.) These spectra are used as illustrated below:
 
  By convention, the intensity spectra all sources other than the sun are normalized to 1.0. So when using camera calibrations based on these types of sources, you should set the source fluxes for each radiative band equal to 1.0. For solar sources, set the source flux for each band equal to the total solar flux integrated over all wavelengths.
 
@@ -936,9 +973,9 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  // Assuming radiation model and camera have already been set up here //
 
- radiationmodel.setCameraSpectralResponse("visible", "red", "calibrated_ASTMG173_NikonD700_spectral_response_red");
- radiationmodel.setCameraSpectralResponse("visible", "green", "calibrated_ASTMG173_NikonD700_spectral_response_green");
- radiationmodel.setCameraSpectralResponse("visible", "blue", "calibrated_ASTMG173_NikonD700_spectral_response_blue");
+ radiationmodel.setCameraSpectralResponse("visible", "red", "NikonD700_spectral_response_red");
+ radiationmodel.setCameraSpectralResponse("visible", "green", "NikonD700_spectral_response_green");
+ radiationmodel.setCameraSpectralResponse("visible", "blue", "NikonD700_spectral_response_blue");
  ~~~~~~
 
  When using a calibrated camera spectral response, you should set the source flux equal to 1.0 for all bands. This is because the calibrated camera spectral response is calibrated based on the actual intensity of the light source.
@@ -966,7 +1003,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  3\. Set up the scene in Helios based on the geometry, radiative conditions, and camera(s) that will be present in the simulations. You must specify the spectral distribution of any radiation sources using \ref RadiationModel::setSourceSpectrum(), and specify an initial guess for the camera channel spectral distribution(s) using \ref RadiationModel::setCameraSpectralResponse().
 
- 4\. Add a simulated color calibration board to the scene. You can add the default color board (DGK Color Tools DKK Color Calibration Chart) using the method ef CameraCalibration::addDefaultColorboard(), or a custom color board ef CameraCalibration::addColorboard().
+ 4\. Add a simulated color calibration board to the scene. You can add the default color board (DGK Color Tools DKK Color Calibration Chart) using the method \ref CameraCalibration::addDefaultColorboard(), or a custom color board \ref CameraCalibration::addColorboard().
 
  \subsubsection RadCamMetadata Exporting Camera Metadata
 
@@ -983,15 +1020,17 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  \paragraph RadCamMetadataAuto Auto-populating Metadata
 
- The easiest way to populate camera metadata is to use the \ref RadiationModel::populateCameraMetadata() method, which automatically fills all fields from the camera parameters and simulation context:
+ The easiest way to populate camera metadata is to use the \ref RadiationModel::getCameraMetadata() method, which returns a CameraMetadata struct with all fields already filled in from the camera parameters and simulation context:
 
  ~~~~~~{.cpp}
  // Assume camera has already been added with label "RGB_camera"
- CameraMetadata metadata;
- radiationmodel.populateCameraMetadata("RGB_camera", metadata);
+ CameraMetadata metadata = radiationmodel.getCameraMetadata("RGB_camera");
 
  // Set the metadata for this camera
  radiationmodel.setCameraMetadata("RGB_camera", metadata);
+
+ // Metadata is only written to file for cameras where export has been enabled
+ radiationmodel.enableCameraMetadata("RGB_camera");
  ~~~~~~
 
  The auto-population calculates:
@@ -1039,7 +1078,7 @@ If you are using a PC with the OptiX backend, it is likely you will need to incr
 
  \paragraph RadCamMetadataExport Automatic JSON Export
 
- Once metadata has been set for a camera using \ref RadiationModel::setCameraMetadata(), a JSON metadata file will be automatically written whenever \ref RadiationModel::writeCameraImage() is called for that camera. The JSON file will have the same base name as the image but with a .json extension.
+ Once metadata export has been enabled for a camera using \ref RadiationModel::enableCameraMetadata(), a JSON metadata file will be automatically written whenever \ref RadiationModel::writeCameraImage() is called for that camera. The JSON file will have the same base name as the image but with a .json extension. Note that \ref RadiationModel::setCameraMetadata() only stores the metadata values; it does not by itself enable the JSON file to be written.
 
  ~~~~~~{.cpp}
  // After running simulation...
@@ -1394,20 +1433,23 @@ The above example assumes that we have already added some geometry to the Contex
 
  Both methods take the following arguments: 1) a string denoting the camera label, 2) a string denoting the primitive/object data label to use for segmentation, 3) an integer object class ID for COCO annotations, 4) a string denoting the JSON output filename (can include a relative path), 5) a string denoting the image file corresponding to these labels, 6) an optional vector of strings specifying primitive or object data labels whose mean values will be calculated for each mask and written as attributes (defaults to empty vector), and 7) an optional boolean flag to append to existing JSON files (defaults to false for new files).
 
- The segmentation masks are generated using boundary tracing algorithms that identify connected regions of pixels with the same data label values. Each unique label value becomes a separate annotation in the COCO JSON output, with precise polygon boundaries traced around the object regions.
+ The segmentation masks are generated using boundary tracing algorithms that identify connected regions of pixels with the same data label values. Each connected region becomes a separate annotation in the COCO JSON output, with precise polygon boundaries traced around it. Note that one label value can produce more than one annotation: an object partially hidden behind something closer to the camera is visible as several separate regions, and each is annotated in its own right.
 
  When the append flag is set to true, new annotations are added to existing JSON files, allowing multiple primitive/object types to be combined into a single segmentation dataset. This is useful for creating comprehensive annotations that include both foreground objects and background elements like ground surfaces.
 
  ~~~~~~{.cpp}
- // Write segmentation masks for bunny objects (primitive data approach)
- radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "bunny_masks", "./");
+ // The rendered image these annotations describe. Its name is recorded in the JSON, so it must be written first.
+ std::string image_file = radiationmodel.writeCameraImage( "visible", {"red","green","blue"}, "RGB", "./" );
 
- // Write segmentation masks for ground surfaces  
- radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "ground_masks", "./");
+ // Write segmentation masks for bunny objects (primitive data approach)
+ radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "bunny_masks.json", image_file);
+
+ // Write segmentation masks for ground surfaces
+ radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "ground_masks.json", image_file);
 
  // Append both to create combined annotations
- radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "combined_masks", "./", false);
- radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "combined_masks", "./", true);
+ radiationmodel.writeImageSegmentationMasks("visible", "ground", 0, "combined_masks.json", image_file, {}, false);
+ radiationmodel.writeImageSegmentationMasks("visible", "bunny", 1, "combined_masks.json", image_file, {}, true);
  ~~~~~~
 
  Below is example code of writing an RGB image (3 spectral bands).
@@ -1464,9 +1506,9 @@ The above example assumes that we have already added some geometry to the Contex
 
     radiationmodel.addRadiationCamera("visible", {"red","green","blue"}, camera_position, camera_lookat, properties, antialiasing_samples );
 
-    // Load and set calibrated camera spectral response for Nikon B500 camera and ASTMG173 solar spectrum
+    // Load and set the measured camera spectral response for a Nikon D700 camera
     context.loadXML("plugins/radiation/spectral_data/camera_spectral_library.xml");
-    std::string camera_spectrum_base = "calibrated_sun_NikonB500_spectral_response";
+    std::string camera_spectrum_base = "NikonD700_spectral_response";
     radiationmodel.setCameraSpectralResponse("visible", "red", camera_spectrum_base+"_red");
     radiationmodel.setCameraSpectralResponse("visible", "green", camera_spectrum_base+"_green");
     radiationmodel.setCameraSpectralResponse("visible", "blue", camera_spectrum_base+"_blue");

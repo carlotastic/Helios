@@ -23,18 +23,15 @@ We will first write a basic C++ program that uses types included as part of the 
 
 The above program does not actually perform any calculations.  Next, we will declare and instance of the Helios context, which is a C++ <a href="http://en.cppreference.com/w/cpp/language/class">class</a> that contains a number of functions and data structures.  We will declare an instance of the class, which we will give the arbitrary name of "context".
 
-Next, we will call the function within the Context class called \ref helios::Context::selfTest() "selfTest()", which performs a number of basic tests to ensure that the context is working properly.
+Next, we will call the function within the Context class called \ref helios::Context::selfTest() "selfTest()", which performs a number of basic tests to ensure that the context is working properly. It is a static function that takes the command-line arguments and returns an exit code, so it is called on the class itself rather than on a Context instance.
 
  ```
   #include "Context.h"
 
-  int main(){
-
-     //Declare and initialize the Helios context
-     helios::Context context;
+  int main( int argc, char **argv ){
 
      //Run the self-test
-     context.selfTest(); 
+     return helios::Context::selfTest( argc, argv );
 
   }
   ```
@@ -74,10 +71,12 @@ This should produce an executable file named "context_selftest" that can be run:
   ./context_selftest
   ~~~~~~
 
-which should produce the following output:
+which should produce output ending in a doctest summary similar to the following:
 
   ~~~~~~
-  Running Context self-test...passed.
+  [doctest] test cases:  123 |  123 passed | 0 failed | 0 skipped
+  [doctest] assertions: 4567 | 4567 passed | 0 failed |
+  [doctest] Status: SUCCESS!
   ~~~~~~
 
 So what determines the name of the executable file (i.e., why is it called "context_selftest")?  This was specified in the CMakeLists.txt file.  If you open up the CMakeLists.txt file, you will find several inputs on the first couple of lines:

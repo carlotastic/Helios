@@ -105,9 +105,9 @@ Adding primitive data that has length greater than one (array) requires a little
 
      UUIDs = context.addSphere( 10, center, r ); //add a sphere to the Context
      
-     float data[5] = {10, 11, 12, 13, 14};
+     std::vector<float> data = {10, 11, 12, 13, 14};
 
-     context.setPrimitiveData(UUIDs.at(0),"my_data",HELIOS_TYPE_FLOAT,5,&data); //add primitive data called my_data to only the first primitive
+     context.setPrimitiveData(UUIDs.at(0),"my_data",data); //add primitive data called my_data to only the first primitive
 
      std::vector<float> data_new;
 

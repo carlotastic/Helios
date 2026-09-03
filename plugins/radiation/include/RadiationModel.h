@@ -136,7 +136,8 @@ struct SIFCameraProperties : public CameraProperties {
     //! the contribution of reflected and transmitted light from neighboring leaves.
     uint excitation_scattering_depth = 0;
 
-    SIFCameraProperties() : CameraProperties() {}
+    SIFCameraProperties() : CameraProperties() {
+    }
 };
 
 //! Properties defining lens flare rendering parameters
@@ -264,13 +265,6 @@ struct RadiationCamera {
     //! Normalize all pixel data in the camera such that the maximum pixel value is 1.0 and the minimum is 0.0 (no clamping applied)
     void normalizePixels();
 
-    //! Apply auto-exposure scaling to image data to scale the average luminance to a target value.
-    /**
-     * Computes the image’s mean luminance and applies a single uniform gain so that the scene-average luminance becomes the specified grey_target value.
-     *
-     * \param[in] target [optional] Target average luminance value. Default is 18%.
-     */
-
     //! Apply auto-white balancing to image data based on Gray World assumption using Minkowski mean
     /**
      * \param[in] red_band_label Label for red channel band
@@ -345,12 +339,10 @@ struct RadiationCamera {
      */
     void adjustSBC(const std::string &red_band_label, const std::string &green_band_label, const std::string &blue_band_label, float saturation, float brightness, float contrast);
 
-    //! Apply the color correction matrix to image data
-    /**
-     * \param[in] red_band_label Label for red channel band
-     * \param[in] green_band_label Label for green channel band
-     * \param[in] blue_band_label Label for blue channel band
-     */
+    // Apply the color correction matrix to image data
+    //   red_band_label: Label for red channel band
+    //   green_band_label: Label for green channel band
+    //   blue_band_label: Label for blue channel band
     // void applyCCM(const std::string &red_band_label, const std::string &green_band_label, const std::string &blue_band_label);
 
     //! Apply gamma compression to image data
@@ -676,6 +668,11 @@ public:
     std::map<std::string, float> source_fluxes;
 };
 
+namespace helios {
+    //! Test-only accessor declared a friend of RadiationModel; defined in the plug-in's selfTest.cpp
+    class RadiationModelTestHelper;
+} // namespace helios
+
 //! Radiation transport model plugin
 class RadiationModel {
 public:
@@ -685,7 +682,7 @@ public:
     //! Destructor
     ~RadiationModel();
 
-    // Move constructor and assignment for test support
+    // Move operations (the unique_ptr backend member makes the model movable but not copyable)
     RadiationModel(RadiationModel &&) = default;
     RadiationModel &operator=(RadiationModel &&) = default;
 
@@ -716,18 +713,6 @@ public:
      * @return True if a GPU backend can be initialized successfully
      */
     static bool isGPUBackendAvailable();
-
-    /**
-     * @brief Create RadiationModel with custom backend (for testing)
-     *
-     * @param context Helios context
-     * @param backend Pre-initialized backend to use
-     * @return RadiationModel instance with injected backend (uses move semantics)
-     *
-     * INTERNAL TEST-ONLY: Allows test suite to inject shared VulkanDevice.
-     * Not for production use - use default constructor instead.
-     */
-    static RadiationModel createWithBackend(helios::Context *context, std::unique_ptr<helios::RayTracingBackend> backend);
 
     //! Disable/silence status messages
     /**
@@ -1162,7 +1147,7 @@ public:
 
     //! Configure automatic spectral interpolation based on primitive data values
     /**
-     * This function sets up automatic interpolation between different spectra based on the value of a primitive data field. When \ref updateRadiativeProperties() is called, for each primitive specified,
+     * This function sets up automatic interpolation between different spectra based on the value of a primitive data field. When RadiationModel::updateRadiativeProperties() is called, for each primitive specified,
      * it will query the value of the primitive data field specified by primitive_data_query_label, perform nearest-neighbor interpolation to find the closest spectrum from the spectra vector,
      * and set the primitive data field specified by primitive_data_radprop_label to the label of the selected spectrum.
      * \param[in] primitive_UUIDs Vector of primitive UUIDs to apply interpolation to
@@ -1170,14 +1155,14 @@ public:
      * \param[in] values Vector of primitive data values mapping to each spectrum. Must be the same length as spectra vector.
      * \param[in] primitive_data_query_label Name of existing primitive data field to query for interpolation (e.g., "age")
      * \param[in] primitive_data_radprop_label Name of primitive data field to set with interpolated spectrum label (e.g., "reflectivity_spectrum" or "transmissivity_spectrum")
-     * \note This function must be called before \ref updateRadiativeProperties(). The interpolation uses nearest-neighbor selection based on the absolute distance between the queried value and the provided mapping values.
+     * \note This function must be called before RadiationModel::updateRadiativeProperties(). The interpolation uses nearest-neighbor selection based on the absolute distance between the queried value and the provided mapping values.
      */
     void interpolateSpectrumFromPrimitiveData(const std::vector<uint> &primitive_UUIDs, const std::vector<std::string> &spectra, const std::vector<float> &values, const std::string &primitive_data_query_label,
                                               const std::string &primitive_data_radprop_label);
 
     //! Configure automatic spectral interpolation based on object data values
     /**
-     * This function sets up automatic interpolation between different spectra based on the value of an object data field. When \ref updateRadiativeProperties() is called, for each object specified,
+     * This function sets up automatic interpolation between different spectra based on the value of an object data field. When RadiationModel::updateRadiativeProperties() is called, for each object specified,
      * it will query the value of the object data field specified by object_data_query_label, perform nearest-neighbor interpolation to find the closest spectrum from the spectra vector,
      * and set the primitive data field specified by primitive_data_radprop_label to the label of the selected spectrum for all primitives belonging to that object.
      * \param[in] object_IDs Vector of object IDs to apply interpolation to
@@ -1185,7 +1170,7 @@ public:
      * \param[in] values Vector of object data values mapping to each spectrum. Must be the same length as spectra vector.
      * \param[in] object_data_query_label Name of existing object data field to query for interpolation (e.g., "age")
      * \param[in] primitive_data_radprop_label Name of primitive data field to set with interpolated spectrum label (e.g., "reflectivity_spectrum" or "transmissivity_spectrum")
-     * \note This function must be called before \ref updateRadiativeProperties(). The interpolation uses nearest-neighbor selection based on the absolute distance between the queried value and the provided mapping values.
+     * \note This function must be called before RadiationModel::updateRadiativeProperties(). The interpolation uses nearest-neighbor selection based on the absolute distance between the queried value and the provided mapping values.
      * \note Although this function reads object data, it sets primitive data because radiative properties are defined per-primitive. All primitives belonging to the object will have their primitive data set.
      */
     void interpolateSpectrumFromObjectData(const std::vector<uint> &object_IDs, const std::vector<std::string> &spectra, const std::vector<float> &values, const std::string &object_data_query_label, const std::string &primitive_data_radprop_label);
@@ -1252,7 +1237,7 @@ public:
      *
      * Each emission band is bound to exactly one excitation bin width — the one from the
      * first camera that flags it. Re-flagging the same band with a different bin width
-     * from a subsequent camera raises a \ref helios_runtime_error. If you need two
+     * from a subsequent camera raises a \ref helios::helios_runtime_error() "helios_runtime_error". If you need two
      * different excitation resolutions on the same scene, use disjoint emission bands
      * for each resolution.
      *
@@ -1280,8 +1265,7 @@ public:
      *            parameters and excitation_bin_width_nm.
      * \param[in] antialiasing_samples Number of ray samples per pixel (minimum 1).
      */
-    void addSIFCamera(const std::string &camera_label, const std::vector<std::string> &emission_band_labels, const helios::vec3 &position, const helios::vec3 &lookat, const SIFCameraProperties &camera_properties,
-                      uint antialiasing_samples);
+    void addSIFCamera(const std::string &camera_label, const std::vector<std::string> &emission_band_labels, const helios::vec3 &position, const helios::vec3 &lookat, const SIFCameraProperties &camera_properties, uint antialiasing_samples);
 
     //! Add a solar-induced chlorophyll fluorescence (SIF) camera sensor using a spherical viewing direction.
     /**
@@ -1293,8 +1277,8 @@ public:
      * \param[in] camera_properties SIFCameraProperties struct.
      * \param[in] antialiasing_samples Number of ray samples per pixel.
      */
-    void addSIFCamera(const std::string &camera_label, const std::vector<std::string> &emission_band_labels, const helios::vec3 &position, const helios::SphericalCoord &viewing_direction,
-                      const SIFCameraProperties &camera_properties, uint antialiasing_samples);
+    void addSIFCamera(const std::string &camera_label, const std::vector<std::string> &emission_band_labels, const helios::vec3 &position, const helios::SphericalCoord &viewing_direction, const SIFCameraProperties &camera_properties,
+                      uint antialiasing_samples);
 
     //! Check whether a camera was added via addSIFCamera (vs. addRadiationCamera).
     /**
@@ -1323,6 +1307,45 @@ public:
      * \param[in] camera_library_name Name of the camera in the standard camera spectral library (e.g., "iPhone11", "NikonD700", etc.).
      */
     void setCameraSpectralResponseFromLibrary(const std::string &camera_label, const std::string &camera_library_name);
+
+    //! Reconstruct camera images by interpolating the outgoing flux across each facet, instead of holding it constant
+    /**
+     * A camera builds each pixel from a single outgoing flux value per primitive, so every pixel landing on a facet reads the same value and a coarsely tessellated surface renders as flat panels separated
+     * by visible steps. With smoothing enabled, the flux is first averaged onto the vertices the facets share, weighted by facet area, and then interpolated across each facet from its own corners, so a
+     * tessellated curve reads as a curve.
+     *
+     * This applies to \a Tube, \a Sphere, \a Cone, \a Polymesh, \a Tile and \a AdaptiveTile objects. A \a Box or \a Disk object, and any primitive that belongs to no object, is left alone: its faces are
+     * genuinely flat, so the per-facet value is already correct everywhere on them. A \a Polymesh must carry the face table that \ref helios::Context::loadOBJ() and \ref helios::Context::loadPLY() retain;
+     * one assembled from loose primitives by \ref helios::Context::addPolymeshObject() has no topology and is left alone. Vertex normals are neither required nor used.
+     *
+     * \note This changes what the camera reports. A pixel no longer carries the outgoing flux of the primitive behind it, but a blend of that primitive's value with those of its neighbours, so pixel values
+     * no longer correspond exactly to the `radiation_flux_*` primitive data. Nothing else is affected: the radiation solve, the `radiation_flux_*` values themselves, and the pixel-label and depth images are
+     * all unchanged. Smoothing is off by default for this reason, and should be enabled deliberately.
+     *
+     * \param[in] crease_angle_degrees Angle between adjacent facet normals above which a shared edge is treated as a hard crease, so that flux is not averaged across it. Applies to \a Polymesh objects only,
+     * whose facets may meet at a genuine edge that the tessellation resolved; the curved object types are smooth by construction and are never creased. Must be between 0 and 180 degrees.
+     * \sa disableCameraFluxSmoothing(), isCameraFluxSmoothingEnabled()
+     */
+    void enableCameraFluxSmoothing(float crease_angle_degrees = 30.f);
+
+    //! Reconstruct camera images by holding the outgoing flux constant across each facet
+    /**
+     * This is the default. Each pixel reports the outgoing flux of the primitive behind it.
+     * \sa enableCameraFluxSmoothing()
+     */
+    void disableCameraFluxSmoothing();
+
+    //! Query whether camera flux smoothing is enabled
+    /**
+     * \return True if camera images are reconstructed by interpolating flux across each facet, false if the flux is held constant across it.
+     */
+    [[nodiscard]] bool isCameraFluxSmoothingEnabled() const;
+
+    //! Get the crease angle used when smoothing camera flux across a mesh
+    /**
+     * \return Crease angle in degrees, as given to \ref enableCameraFluxSmoothing().
+     */
+    [[nodiscard]] float getCameraFluxSmoothingCreaseAngle() const;
 
     //! Add a radiation camera sensor loading all properties from the camera library
     /**
@@ -1765,32 +1788,7 @@ public:
      */
     void writeNormDepthImage(const std::string &cameralabel, const std::string &imagefile_base, float max_depth, const std::string &image_path = "./", int frame = -1);
 
-    //! Write bounding boxes based on primitive data labels (Ultralytic's YOLO format). Primitive data must have type of 'uint' or 'int'.
-    /**
-     * \param[in] cameralabel Label of target camera
-     * \param[in] primitive_data_label Name of the primitive data label. Primitive data must have type of 'uint' or 'int'.
-     * \param[in] object_class_ID Object class ID to write for the labels in this group.
-     * \param[in] imagefile_base Name for base of output files (will also include the camera label and a frame number in the file name)
-     * \param[in] image_path [optional] Path to directory where images should be saved. By default, it will be placed in the current working directory.
-     * \param[in] append_label_file [optional] If true, the label file will be appended to the existing file. If false, the label file will be overwritten. By default, it is false.
-     * \param[in] frame [optional] A frame count number to be appended to the output file (e.g., camera_thermal_00001.txt). By default, the frame count will be omitted from the file name. This value must be less than or equal to 99,999.
-     */
-    [[deprecated]]
-    void writeImageBoundingBoxes(const std::string &cameralabel, const std::string &primitive_data_label, uint object_class_ID, const std::string &imagefile_base, const std::string &image_path = "./", bool append_label_file = false, int frame = -1);
 
-    //! Write bounding boxes based on object data labels (Ultralytic's YOLO format). Object data must have type of 'uint' or 'int'.
-    /**
-     * \param[in] cameralabel Label of target camera
-     * \param[in] object_data_label Name of the object data label. Object data must have type of 'uint' or 'int'.
-     * \param[in] object_class_ID Object class ID to write for the labels in this group.
-     * \param[in] imagefile_base Name for base of output files (will also include the camera label and a frame number in the file name)
-     * \param[in] image_path [optional] Path to directory where images should be saved. By default, it will be placed in the current working directory.
-     * \param[in] append_label_file [optional] If true, the label file will be appended to the existing file. If false, the label file will be overwritten. By default, it is false.
-     * \param[in] frame [optional] A frame count number to be appended to the output file (e.g., camera_thermal_00001.txt). By default, the frame count will be omitted from the file name. This value must be less than or equal to 99,999.
-     */
-    [[deprecated]]
-    void writeImageBoundingBoxes_ObjectData(const std::string &cameralabel, const std::string &object_data_label, uint object_class_ID, const std::string &imagefile_base, const std::string &image_path = "./", bool append_label_file = false,
-                                            int frame = -1);
 
     //! Write bounding boxes based on primitive data labels (Ultralytic's YOLO format). Primitive data must have type of 'uint' or 'int'.
     /**
@@ -1905,18 +1903,13 @@ public:
                                                 const std::vector<std::string> &data_attribute_labels = {}, bool append_file = false);
 
 private:
-    // Helper functions for COCO JSON handling
-    std::pair<nlohmann::json, int> initializeCOCOJsonWithImageId(const std::string &filename, bool append_file, const std::string &cameralabel, const helios::int2 &camera_resolution, const std::string &image_file);
-    nlohmann::json initializeCOCOJson(const std::string &filename, bool append_file, const std::string &cameralabel, const helios::int2 &camera_resolution, const std::string &image_file);
-    void addCategoryToCOCO(nlohmann::json &coco_json, const std::vector<uint> &object_class_ID, const std::vector<std::string> &category_name);
-    void writeCOCOJson(const nlohmann::json &coco_json, const std::string &filename);
-
-    // Helper functions for mask generation and boundary tracing
+    //! Build a binary mask per distinct value of a primitive or object data label, from the camera's per-pixel UUID buffer
+    /**
+     * This is the only part of the annotation pipeline that is specific to the radiation model: it
+     * turns camera pixel labels into plain masks. Everything downstream of it -- contour tracing,
+     * COCO assembly, YOLO writing -- is shared with other plug-ins through \ref annotation_io.h.
+     */
     std::map<int, std::vector<std::vector<bool>>> generateLabelMasks(const std::string &cameralabel, const std::string &data_label, bool use_object_data);
-    std::pair<int, int> findStartingBoundaryPixel(const std::vector<std::vector<bool>> &mask, const helios::int2 &camera_resolution);
-    std::vector<std::pair<int, int>> traceBoundaryMoore(const std::vector<std::vector<bool>> &mask, int start_x, int start_y, const helios::int2 &camera_resolution);
-    std::vector<std::pair<int, int>> traceBoundarySimple(const std::vector<std::vector<bool>> &mask, int start_x, int start_y, const helios::int2 &camera_resolution);
-    std::vector<std::map<std::string, std::vector<float>>> generateAnnotationsFromMasks(const std::map<int, std::vector<std::vector<bool>>> &label_masks, uint object_class_ID, const helios::int2 &camera_resolution, int image_id);
 
     // Helper functions for camera metadata export
     std::string detectLightingType() const;
@@ -1989,12 +1982,6 @@ public:
     std::string autoCalibrateCameraImage(const std::string &camera_label, const std::string &red_band_label, const std::string &green_band_label, const std::string &blue_band_label, const std::string &output_file_path,
                                          bool print_quality_report = false, ColorCorrectionAlgorithm algorithm = ColorCorrectionAlgorithm::MATRIX_3X3_AUTO, const std::string &ccm_export_file_path = "");
 
-    //! Helper function to export color correction matrix to XML file (public for testing)
-    void exportColorCorrectionMatrixXML(const std::string &file_path, const std::string &camera_label, const std::vector<std::vector<float>> &matrix, const std::string &source_image_path, const std::string &colorboard_type, float average_delta_e);
-
-    //! Helper function to load color correction matrix from XML file (public for testing)
-    std::vector<std::vector<float>> loadColorCorrectionMatrixXML(const std::string &file_path, std::string &camera_label_out);
-
     //! Get camera pixel data for a specific band
     std::vector<float> getCameraPixelData(const std::string &camera_label, const std::string &band_label);
 
@@ -2002,8 +1989,32 @@ public:
     void setCameraPixelData(const std::string &camera_label, const std::string &band_label, const std::vector<float> &pixel_data);
 
 private:
+    //! Test-only accessor for the private members below
+    /**
+     * Defined solely in the plug-in's selfTest.cpp, so none of the test-support entry points
+     * below are exposed to users of the library.
+     */
+    friend class helios::RadiationModelTestHelper;
+
     //! Private constructor for test infrastructure (no backend initialization)
     RadiationModel(helios::Context *context_a, bool skip_backend_init);
+
+    //! Create a RadiationModel with a caller-supplied backend
+    /**
+     * Allows the test suite to inject a shared VulkanDevice, working around an NVIDIA driver
+     * bug that fails after repeated vkCreateInstance/vkDestroyInstance cycles in one process.
+     *
+     * \param[in] context Helios context
+     * \param[in] backend Pre-initialized backend to use
+     * \return RadiationModel instance with the injected backend (uses move semantics)
+     */
+    static RadiationModel createWithBackend(helios::Context *context, std::unique_ptr<helios::RayTracingBackend> backend);
+
+    //! Helper function to export color correction matrix to XML file
+    void exportColorCorrectionMatrixXML(const std::string &file_path, const std::string &camera_label, const std::vector<std::vector<float>> &matrix, const std::string &source_image_path, const std::string &colorboard_type, float average_delta_e);
+
+    //! Helper function to load color correction matrix from XML file
+    std::vector<std::vector<float>> loadColorCorrectionMatrixXML(const std::string &file_path, std::string &camera_label_out);
 
     //! Test helper: Build geometry data and return primitive count
     size_t testBuildGeometryData();
@@ -2115,10 +2126,10 @@ protected:
     //! Per-unique excitation bin-width: auto-generated band labels + per-primitive APAR buffer.
     struct ExcitationSet {
         float bin_width_nm;
-        uint scattering_depth = 0;             //!< Max requested by any bound SIF camera
-        std::vector<std::string> band_labels;  //!< Internal labels like "_SIF_exc_10_400_410"
-        std::vector<float> band_min_nm;        //!< wavelength_min of each band
-        std::vector<float> band_max_nm;        //!< wavelength_max of each band
+        uint scattering_depth = 0; //!< Max requested by any bound SIF camera
+        std::vector<std::string> band_labels; //!< Internal labels like "_SIF_exc_10_400_410"
+        std::vector<float> band_min_nm; //!< wavelength_min of each band
+        std::vector<float> band_max_nm; //!< wavelength_max of each band
         //! Per-primitive per-band APAR (W/m²). Outer key: primitive UUID. Inner: band index.
         std::unordered_map<uint, std::vector<float>> apar_buffer;
         //! Whether the ray-trace for this set has already run in the current dispatch.
@@ -2398,6 +2409,50 @@ protected:
     helios::vec2 periodic_flag;
 
     bool radiativepropertiesneedupdate = true;
+
+    //! Whether camera images interpolate the outgoing flux across each facet rather than holding it constant
+    bool cameraflux_smoothing_enabled = false;
+
+    //! Angle between adjacent facet normals above which a mesh edge is treated as a hard crease and flux is not averaged across it
+    float cameraflux_smoothing_crease_angle = 30.f;
+
+    //! Number of distinct shared vertices the smoothing topology refers to
+    size_t smoothing_vertex_count = 0;
+
+    //! Shared vertex index for each corner of each primitive, four entries per primitive in GPU buffer order
+    /**
+     * Entry `4*p` is negative for a primitive taking no part in smoothing, and entry `4*p+3` is negative for a triangle, which has only three corners.
+     */
+    std::vector<int> smoothing_vertex_indices;
+
+    //! Total facet area meeting at each shared vertex, used to weight the average
+    std::vector<float> smoothing_vertex_area;
+
+    //! Area of each primitive, in GPU buffer order, cached so that it is not recomputed for every band
+    std::vector<float> smoothing_primitive_area;
+
+    //! Build the shared vertex topology that camera flux smoothing accumulates onto
+    /**
+     * Walks the participating objects once, assigns every shared vertex a slot in one flat buffer, and records which slots each primitive's corners belong to. Called from updateGeometry(), because the
+     * topology is only valid for the primitive ordering that build produced.
+     */
+    void buildCameraFluxSmoothingTopology();
+
+    //! Rebuild the shared vertex topology and re-upload the geometry that carries it
+    /**
+     * Used when smoothing is toggled after the geometry has already been built, which the ordinary path does not cover because the topology is normally uploaded as part of updateGeometry().
+     */
+    void uploadCameraFluxSmoothingTopology();
+
+    //! Resample the per-primitive outgoing flux onto the shared vertices
+    /**
+     * \param[in] flux_top Per-primitive outgoing radiation for the top face, indexed [primitive][band].
+     * \param[in] flux_bottom Per-primitive outgoing radiation for the bottom face, indexed [primitive][band].
+     * \param[in] band_count Number of bands in the current launch.
+     * \param[out] vertex_flux_top Area-weighted mean top-face radiation at each shared vertex, indexed [vertex][band].
+     * \param[out] vertex_flux_bottom Area-weighted mean bottom-face radiation at each shared vertex, indexed [vertex][band].
+     */
+    void accumulateCameraFluxAtVertices(const std::vector<float> &flux_top, const std::vector<float> &flux_bottom, size_t band_count, std::vector<float> &vertex_flux_top, std::vector<float> &vertex_flux_bottom) const;
 
     std::vector<bool> isbandpropertyinitialized;
 

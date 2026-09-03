@@ -1,0 +1,220 @@
+/*! \page "SyntheticAnnotationDoc" Synthetic Annotation Plugin Documentation
+
+  \tableofcontents
+
+ <p> <br><br> </p>
+
+ <table>
+ <tr><th>Dependencies <td>\ref VisualizerDoc "Visualizer" plug-in (loaded automatically)
+ <tr><th>CMakeLists.txt <td>set( PLUGINS "syntheticannotation" )
+ <tr><th>Header File <td>#include "SyntheticAnnotation.h"
+ <tr><th>Class <td>\ref SyntheticAnnotation
+ </table>
+
+ \section SAissues Known Issues
+
+ - The RGB rendering is drawn to a window, so the plug-in requires a display. It cannot be run on a headless machine. (The annotation passes themselves render offscreen and would not need one.)
+ - Object detection bounding boxes are computed from the visible (occluded) extent of each object. An object split into several disconnected visible regions by an occluder is still described by a single box spanning all of them.
+
+ \section SAIntro Introduction
+
+ Training a machine learning model for a computer vision task requires a large number of labeled images. Producing those labels by hand is slow and error-prone, and for a plant canopy it is often ambiguous where one leaf ends and the next begins.
+
+ This plug-in generates labeled images automatically. It renders a scene that already exists in the Helios context, and because it knows exactly which primitives belong to which object, it can write out the corresponding annotations without any manual work. Three annotation types are supported:
+
+ - <b>Object detection</b>: a rectangular bounding box around each object, in the normalized format used by YOLO.
+ - <b>Semantic segmentation</b>: a single image-sized mask giving the class of each pixel.
+ - <b>Instance segmentation</b>: a separate mask per object, giving the un-occluded extent of that object.
+
+ \section SAConstructor SyntheticAnnotation Class Constructor
+
+ <table>
+ <tr><th>Constructors
+ <tr><td>\ref SyntheticAnnotation::SyntheticAnnotation( helios::Context* context) "SyntheticAnnotation( helios::Context* context)"
+ </table>
+
+ The \ref SyntheticAnnotation class is initialized by passing a pointer to the Helios context.
+
+ \section SAUsage Using the Plug-in
+
+ \subsection SALabeling Labeling Primitives
+
+ Before anything can be rendered, the primitives making up each object must be assigned a label. A <b>label</b> is a class name shared by many objects (for example "leaf"), and an <b>object</b> is one instance of that class (one particular leaf). The \ref SyntheticAnnotation::labelPrimitives(const std::vector<std::vector<uint>> &UUIDs, const char *label) "labelPrimitives()" method takes the UUIDs of the primitives and the label to assign them.
+
+ The nesting of the UUID vector determines how objects are formed:
+
+ <table>
+ <tr><th>Call <th>Result
+ <tr><td><code>labelPrimitives( UUID, "leaf" )</code> <td>The single primitive becomes one object with label "leaf".
+ <tr><td><code>labelPrimitives( UUIDs, "leaf" )</code> <td>All primitives in the vector become <b>one</b> object with label "leaf".
+ <tr><td><code>labelPrimitives( UUID_groups, "leaf" )</code> <td>Each inner vector becomes a <b>separate</b> object, all with label "leaf".
+ <tr><td><code>labelPrimitives( "leaf" )</code> <td>Every primitive in the context becomes one object with label "leaf".
+ </table>
+
+ The nested form is the one normally wanted, because a plant canopy has many leaves that should be separate objects of the same class. Plug-ins that generate geometry typically return UUIDs already grouped this way.
+
+ This example additionally requires the \ref CanopyGeneratorDoc "CanopyGenerator" plug-in, so the project's CMakeLists.txt would use <code>set( PLUGINS "syntheticannotation;canopygenerator" )</code>.
+
+ \code{.cpp}
+ #include "SyntheticAnnotation.h"
+ #include "CanopyGenerator.h"
+
+ int main() {
+
+     helios::Context context;
+
+     CanopyGenerator canopygenerator(&context);
+     canopygenerator.buildCanopy( VSPGrapevineParameters() );
+
+     SyntheticAnnotation annotation(&context);
+
+     // getLeafUUIDs(PlantID) returns one inner vector per leaf, which is exactly the nesting
+     // labelPrimitives() expects, so each leaf becomes a separate object
+     annotation.labelPrimitives( canopygenerator.getLeafUUIDs(0), "leaves" );
+
+     // getFruitUUIDs(PlantID) is nested one level deeper (cluster, then fruit, then primitives),
+     // so the cluster level is flattened away to make each individual berry an object
+     std::vector<std::vector<uint>> berries;
+     for( const std::vector<std::vector<uint>> &cluster : canopygenerator.getFruitUUIDs(0) ){
+         for( const std::vector<uint> &berry : cluster ){
+             berries.push_back( berry );
+         }
+     }
+     annotation.labelPrimitives( berries, "berries" );
+
+     annotation.render( "./annotations/" );
+
+ }
+ \endcode
+
+ \ref SyntheticAnnotation::labelUnlabeledPrimitives(const char *label) "labelUnlabeledPrimitives()" assigns a label to every primitive that is not already labeled, placing each in its own object. It should be called after all other labeling calls, since it acts on whatever remains unlabeled at that moment.
+
+ Primitives that are never labeled are not ignored: they are rendered in white in the ID image, and so they occlude labeled objects behind them exactly as they should.
+
+ \subsection SACamera Setting the Camera
+
+ \ref SyntheticAnnotation::setCameraPosition(const std::vector<helios::vec3> &camera_position, const std::vector<helios::vec3> &camera_lookat) "setCameraPosition()" takes a camera position and a look-at point. Passing vectors of each instead of single values renders the scene from several viewpoints in one call, which is the usual way to generate a dataset from a single scene. The image resolution is set with \ref SyntheticAnnotation::setWindowSize(uint window_width, uint window_height) "setWindowSize()".
+
+ \code{.cpp}
+ std::vector<helios::vec3> camera_positions;
+ std::vector<helios::vec3> camera_lookats;
+ for( int i=0; i<10; i++ ){
+     camera_positions.push_back( helios::make_vec3(0.5f*float(i), -2, 1) );
+     camera_lookats.push_back( helios::make_vec3(0.5f*float(i), 0, 1) );
+ }
+ annotation.setCameraPosition( camera_positions, camera_lookats );
+ annotation.setWindowSize( 1024, 768 );
+ \endcode
+
+ These settings can also come from a loaded XML file, via the global data <code>camera_position</code> (vec3), <code>camera_lookat</code> (vec3), and <code>image_resolution</code> (int2). Values found in the XML override those set through the API. The global data <code>object_detection</code>, <code>semantic_segmentation</code>, and <code>instance_segmentation</code> take the string value <code>"enabled"</code> or <code>"disabled"</code> to control which annotation types are written; any other string value is an error. Global data of the right name but the wrong type produces a warning and is ignored, leaving the value set through the API in place.
+
+ \subsection SAOutputs Selecting Which Annotations to Write
+
+ All three annotation types are enabled by default. Each can be turned on or off independently:
+
+ <table>
+ <tr><th>Annotation Type <th>Enable <th>Disable
+ <tr><td>Object detection (bounding boxes) <td>\ref SyntheticAnnotation::enableObjectDetection() "enableObjectDetection()" <td>\ref SyntheticAnnotation::disableObjectDetection() "disableObjectDetection()"
+ <tr><td>Semantic segmentation <td>\ref SyntheticAnnotation::enableSemanticSegmentation() "enableSemanticSegmentation()" <td>\ref SyntheticAnnotation::disableSemanticSegmentation() "disableSemanticSegmentation()"
+ <tr><td>Instance segmentation <td>\ref SyntheticAnnotation::enableInstanceSegmentation() "enableInstanceSegmentation()" <td>\ref SyntheticAnnotation::disableInstanceSegmentation() "disableInstanceSegmentation()"
+ </table>
+
+ Instance segmentation renders each object separately, so its cost grows with the number of objects. Disabling it is worthwhile when only bounding boxes are needed.
+
+ \ref SyntheticAnnotation::setMinimumLabelPixels(int labelminpixels) "setMinimumLabelPixels()" sets how many pixels an object must cover to be written out at all; the default is 10. Raising it excludes objects that are almost entirely occluded and would otherwise contribute near-empty labels to the training data.
+
+ The appearance of the RGB rendering is controlled with \ref SyntheticAnnotation::setBackgroundColor(const helios::RGBcolor &color) "setBackgroundColor()" and \ref SyntheticAnnotation::addSkyDome(const char *filename) "addSkyDome()", the latter taking the path to a sky texture image.
+
+ \subsection SARender Generating the Images
+
+ \ref SyntheticAnnotation::render(const char *outputdir) "render()" performs the rendering and writes every enabled annotation. Its argument is the base output directory, which is created if it does not exist.
+
+ \code{.cpp}
+ annotation.render( "./annotations/" );
+ \endcode
+
+ \subsection SADefaults Default Settings
+
+ <table>
+ <tr><th>Setting <th>Default <th>Set with
+ <tr><td>Image resolution <td>1000 &times; 800 <td>\ref SyntheticAnnotation::setWindowSize(uint window_width, uint window_height) "setWindowSize()"
+ <tr><td>Camera position / look-at <td>(1, 0, 1) looking at (0, 0, 1) <td>\ref SyntheticAnnotation::setCameraPosition(const std::vector<helios::vec3> &camera_position, const std::vector<helios::vec3> &camera_lookat) "setCameraPosition()"
+ <tr><td>Background color <td>(0.9, 0.9, 0.9) <td>\ref SyntheticAnnotation::setBackgroundColor(const helios::RGBcolor &color) "setBackgroundColor()"
+ <tr><td>Sky dome texture <td><code>plugins/visualizer/textures/SkyDome_clouds.jpg</code> <td>\ref SyntheticAnnotation::addSkyDome(const char *filename) "addSkyDome()"
+ <tr><td>Minimum label pixels <td>10 <td>\ref SyntheticAnnotation::setMinimumLabelPixels(int labelminpixels) "setMinimumLabelPixels()"
+ <tr><td>Object detection <td>Enabled <td>\ref SyntheticAnnotation::enableObjectDetection() "enableObjectDetection()"
+ <tr><td>Semantic segmentation <td>Enabled <td>\ref SyntheticAnnotation::enableSemanticSegmentation() "enableSemanticSegmentation()"
+ <tr><td>Instance segmentation <td>Enabled <td>\ref SyntheticAnnotation::enableInstanceSegmentation() "enableInstanceSegmentation()"
+ <tr><td>Progress messages <td>Enabled <td>\ref SyntheticAnnotation::disableMessages() "disableMessages()"
+ </table>
+
+ \section SAFiles Output File Structure
+
+ Output is organized with one sub-directory per camera view:
+
+ \code
+ annotations/
+ ├── ID_mapping.txt
+ ├── view00000/
+ │   ├── RGB_rendering.jpeg
+ │   ├── RGB_rendering.txt
+ │   ├── classes.txt
+ │   ├── instances.json
+ │   ├── pixelID_combined.txt
+ │   ├── semantic_segmentation.txt
+ │   └── semantic_segmentation_ID_mapping.txt
+ └── view00001/
+     └── ...
+ \endcode
+
+ \warning Two different class numbering schemes appear in these files. <code>classes.txt</code>, <code>ID_mapping.txt</code> and the bounding-box files use <b>zero-based</b> class indices. The semantic segmentation mask instead uses <b>one-based</b> indices, described by its own <code>semantic_segmentation_ID_mapping.txt</code>. A label that is class 0 in the bounding boxes is therefore class 1 in the semantic mask.
+
+ <table>
+ <tr><th>File <th>Description
+ <tr><td><code>ID_mapping.txt</code> <td>A header line <code>object_ID label class_ID</code> followed by one row per object giving its integer object ID, its label, and its zero-based class index. This is what allows the integer IDs appearing in <code>pixelID_combined.txt</code> to be traced back to a label.
+ <tr><td><code>RGB_rendering.jpeg</code> <td>The rendered color image, which is the image the annotations describe.
+ <tr><td><code>RGB_rendering.txt</code> <td>Bounding boxes for every object visible in the view, one per line, in the YOLO annotation format: <code>class_ID x_center y_center width height</code>. The four geometric values are fractions of the image dimensions, with the origin at the top-left. The file is named after the image so that a training pipeline can pair the two automatically.
+ <tr><td><code>classes.txt</code> <td>Class names, one per line, in class-index order and with no header. It sits beside the bounding-box file because that is where a reader looks for it when no class file is named explicitly.
+ <tr><td><code>instances.json</code> <td>Instance segmentation masks in COCO format, with one annotation per visible object. Mask outlines are given in absolute pixels with the origin at the top-left.
+ <tr><td><code>pixelID_combined.txt</code> <td>Object ID of each pixel, as a whitespace-separated grid of integers with one row per image row, ordered top-down to match the rendered image. Unlabeled pixels and background carry the ID code of white, 16777215.
+ <tr><td><code>semantic_segmentation.txt</code> <td>A single multi-class mask covering all labels, ordered top-down: one integer per pixel giving the one-based class of that pixel. Background and unlabeled pixels carry 16777215.
+ <tr><td><code>semantic_segmentation_ID_mapping.txt</code> <td>A header line <code>label class_ID</code> followed by one row per label giving its name and its one-based class index in the semantic mask.
+ </table>
+
+ \section SAVisualize Viewing the Annotations
+
+ The bounding boxes and the instance masks are written in the formats the \ref VisualizerDoc "Visualizer" reads, so they can be displayed over the rendered image without any conversion:
+
+ \code{.cpp}
+ Visualizer visualizer(800, 600);
+
+ // Bounding boxes. The class names are picked up from classes.txt beside the annotation file.
+ visualizer.displayImageWithBoundingBoxes("./annotations/view00000/RGB_rendering.jpeg", "./annotations/view00000/RGB_rendering.txt");
+
+ // Instance segmentation masks.
+ visualizer.displayImageWithSegmentationMasks("./annotations/view00000/RGB_rendering.jpeg", "./annotations/view00000/instances.json");
+ \endcode
+
+ These are the same formats the \ref RadiationDoc "Radiation" plug-in writes for its cameras, so annotations from the two plug-ins can be used interchangeably.
+
+ \section SAOcclusion Occlusion
+
+ Every annotation describes what is actually <b>visible</b> in the image. All of them are computed from a single rendering of the whole scene, so a leaf half-hidden behind a stem contributes only its visible half to its bounding box, its instance mask, and the semantic mask alike.
+
+ This is the convention the COCO and YOLO formats assume, and it matches what the \ref RadiationDoc "Radiation" plug-in produces for its cameras. An object hidden entirely behind another is not annotated at all, and one reduced to a sliver too small to be useful is dropped by the minimum-pixel threshold (see \ref SyntheticAnnotation::setMinimumLabelPixels(int labelminpixels) "setMinimumLabelPixels()").
+
+ \note Earlier versions wrote instance masks giving each object's full <b>un-occluded</b> extent, by rendering every object separately. Those per-object mask files are no longer produced.
+
+ \section SAImplementation How It Works
+
+ Understanding the mechanism explains several of the plug-in's constraints.
+
+ Each object is assigned an integer ID, which is encoded as an RGB color by splitting the integer across the three color channels. Every primitive belonging to that object is temporarily recolored with that code, the scene is rendered, and the ID of each pixel is recovered by reading the rendered image back and decoding the color. The primitives' original colors are restored before \ref SyntheticAnnotation::render(const char *outputdir) "render()" returns, including if an error occurs partway through.
+
+ This means the rendered image is being used to carry data rather than to be looked at, so the ID pass is rendered with anti-aliasing disabled, with no lighting, and with the \ref VisualizerDoc "Visualizer" in exact-color mode (\ref Visualizer::enableExactColorMode()). Anti-aliasing would blend the ID colors of adjacent objects into values that decode to unrelated IDs, and any shading or brightening of the color would corrupt the encoded integer.
+
+ The RGB rendering is a completely separate pass, using its own \ref VisualizerDoc "Visualizer" configured the opposite way -- anti-aliasing enabled and Phong lighting with shadows -- because that image is meant to be looked at. That pass draws to a window, which is why the plug-in requires a display.
+
+ Every annotation is derived from that one ID rendering per view, so adding more objects to a scene does not add more rendering passes.
+
+*/

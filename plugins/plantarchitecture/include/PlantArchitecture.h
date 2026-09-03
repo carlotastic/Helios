@@ -80,6 +80,18 @@ public:
         sampled = false;
     }
 
+    //! Draw subsequent values of this parameter from a different random number generator
+    /**
+     * The distribution and its parameters are left as they are; only the source of randomness changes. Any value
+     * already drawn is discarded, so that the next call to val() samples from the new generator rather than
+     * returning a value that came from the old one.
+     * \param[in] rand_generator Pointer to the random number generator to draw from.
+     */
+    void setRandomGenerator(std::minstd_rand0 *rand_generator) {
+        generator = rand_generator;
+        sampled = false;
+    }
+
     RandomParameter_float &operator=(float a) {
         this->distribution = "constant";
         this->constval = a;
@@ -87,6 +99,11 @@ public:
         return *this;
     }
 
+    //! Sample the parameter from a uniform distribution
+    /**
+     * \param[in] minval Minimum value of the distribution.
+     * \param[in] maxval Maximum value of the distribution.
+     */
     void uniformDistribution(float minval, float maxval) {
         if (minval > maxval) {
             throw(std::runtime_error("ERROR (PlantArchitecture): RandomParameter_float::uniformDistribution() - minval must be less than or equal to maxval."));
@@ -96,18 +113,32 @@ public:
         sampled = false;
     }
 
+    //! Sample the parameter from a normal distribution
+    /**
+     * \param[in] mean Mean of the distribution.
+     * \param[in] std_dev Standard deviation of the distribution.
+     */
     void normalDistribution(float mean, float std_dev) {
         distribution = "normal";
         distribution_parameters = {mean, std_dev};
         sampled = false;
     }
 
+    //! Sample the parameter from a Weibull distribution
+    /**
+     * \param[in] shape Shape parameter of the distribution.
+     * \param[in] scale Scale parameter of the distribution.
+     */
     void weibullDistribution(float shape, float scale) {
         distribution = "weibull";
         distribution_parameters = {shape, scale};
         sampled = false;
     }
 
+    //! Get the value of the parameter, sampling from its distribution if it has not already been sampled
+    /**
+     * \return Current value of the parameter.
+     */
     float val() {
         if (!sampled) {
             constval = resample();
@@ -177,6 +208,11 @@ public:
         return *this;
     }
 
+    //! Sample the parameter from a uniform distribution
+    /**
+     * \param[in] minval Minimum value of the distribution.
+     * \param[in] maxval Maximum value of the distribution.
+     */
     void uniformDistribution(int minval, int maxval) {
         if (minval > maxval) {
             throw(std::runtime_error("ERROR (PlantArchitecture): RandomParameter_int::uniformDistribution() - minval must be less than or equal to maxval."));
@@ -186,12 +222,20 @@ public:
         sampled = false;
     }
 
+    //! Sample the parameter from a set of discrete values, each chosen with equal probability
+    /**
+     * \param[in] values Vector of discrete values that may be chosen.
+     */
     void discreteValues(const std::vector<int> &values) {
         distribution = "discretevalues";
         distribution_parameters = values;
         sampled = false;
     }
 
+    //! Get the value of the parameter, sampling from its distribution if it has not already been sampled
+    /**
+     * \return Current value of the parameter.
+     */
     int val() {
         if (!sampled) {
             constval = resample();
@@ -375,14 +419,14 @@ struct NitrogenParameters {
 
 //! Add geometry to the Context consisting of a series of Cone objects to form a tube-like shape
 /**
- * \param[in] radial_subdivisions Number of subdivisions around the circumference of each cone (must be be >= 3).
+ * \param[in] radial_subdivisions Number of subdivisions around the circumference of the tube (must be >= 3).
  * \param[in] vertices (x,y,z) Cartesian coordinates of vertices forming the centerline of the tube.
  * \param[in] radii Radius of the tube at each specified vertex.
  * \param[in] colors Color of the tube at each specified vertex.
  * \param[in] context_ptr Pointer to the Helios context.
- * \return Vector of Object IDs of the cones forming the tube.
+ * \return Object ID of the tube, or Phytomer::no_petiole_objID if the tube was too small to build.
  */
-std::vector<uint> makeTubeFromCones(uint radial_subdivisions, const std::vector<helios::vec3> &vertices, const std::vector<float> &radii, const std::vector<helios::RGBcolor> &colors, helios::Context *context_ptr);
+uint makePetioleTube(uint radial_subdivisions, const std::vector<helios::vec3> &vertices, const std::vector<float> &radii, const std::vector<helios::RGBcolor> &colors, helios::Context *context_ptr);
 
 struct VegetativeBud {
 
@@ -433,7 +477,19 @@ public:
     //! Constructor - does not set random number generator
     LeafPrototype() = default;
 
+    //! Copy constructor
+    /**
+     * Written out rather than defaulted only so that copying the deprecated buckle members does not warn: an implicitly-generated copy constructor names them at the point the structure is defined, which
+     * makes every file that merely copies a LeafPrototype report a deprecation it had nothing to do with. Copies every member, as the implicit one did.
+     */
+    LeafPrototype(const LeafPrototype &a) {
+        duplicate(a);
+    }
+
     //! Custom prototype function for creating leaf prototypes
+    /**
+     * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
+     */
     uint (*prototype_function)(helios::Context *, LeafPrototype *prototype_parameters, int compound_leaf_index) = nullptr;
 
     //! OBJ model file to load for the leaf
@@ -457,6 +513,15 @@ public:
     // Parameters for leaf curvature
     //! Leaf curvature factor along the longitudinal/length (x-direction). (+curves upward, -curved downward)
     RandomParameter_float longitudinal_curvature;
+
+    //! How the longitudinal curvature is distributed along the blade, as the exponent of a power law in distance from the leaf base
+    /**
+     * The deflection at a fraction \c x along the blade is <code>longitudinal_curvature * x^longitudinal_curvature_exponent</code>, so a larger exponent keeps the inner blade straight and concentrates
+     * the bending near the tip, while a smaller one spreads it evenly along the leaf. At the default of 4 the blade has reached only 6% of its tip deflection by its own midpoint, which suits a leaf that
+     * stays straight and then turns over at the end; a grass blade that arcs continuously along its whole length is better described by an exponent near 2.
+     * \note This changes where the curvature acts, not how much there is: the deflection at the tip is <code>longitudinal_curvature</code> whatever the exponent.
+     */
+    RandomParameter_float longitudinal_curvature_exponent;
     //! Leaf curvature factor along the lateral/width (y-direction). (+curves upward, -curved downward)
     RandomParameter_float lateral_curvature;
 
@@ -469,11 +534,62 @@ public:
     //! Amplitude of leaf waves (sets the height of leaf waves)
     RandomParameter_float wave_amplitude;
 
-    // Parameters for leaf buckling
-    //! Fraction of the leaf length where the leaf buckles under its weight
-    RandomParameter_float leaf_buckle_length;
-    //! Angle of the leaf buckle (degrees)
-    RandomParameter_float leaf_buckle_angle;
+    //! How much floppier the blade becomes over its lifetime, as a multiple of its flexibility when it first reaches full size
+    /**
+     * A blade does not stop bending when it stops growing. Once elongation ceases the leaf loses the active straightening that accompanies growth, while its tissue goes on stiffening and shrinking
+     * irreversibly, so the bend accrued during development keeps accumulating with no further change in size. Measurements on maize find self-weight accounts for only about a third of the curvature of a
+     * mature blade, so a leaf whose droop follows from its size alone stays too straight, and its oldest leaves - the ones that should be arching over hardest - stay the straightest of all.
+     *
+     * This is the timescale of the softening: the blade holds its shape for about twice this many days while its tissue matures, then softens over a window of similar length, then stops changing again. Zero disables the effect, which is the default.
+     * \note The growth is bounded so that a very old leaf cannot become arbitrarily floppy - see \ref flexibility_aging_max.
+     */
+    RandomParameter_float flexibility_aging;
+
+    //! Largest multiple of \ref flexibility that ageing can reach, however old the leaf gets
+    /**
+     * Without a ceiling a long-lived leaf would go on softening indefinitely and eventually hang straight down. Real blades stop changing shape appreciably once their tissue has finished maturing, so the
+     * accumulated compliance is capped rather than allowed to grow without limit.
+     */
+    RandomParameter_float flexibility_aging_max;
+
+    //! How much more compliant the blade is at its tip than at its base
+    /**
+     * A blade of uniform stiffness bends hardest where the bending moment is largest, which is at the clamped base, leaving the outer half of the leaf nearly straight. Real grass leaves do the reverse: they
+     * stay straight near the base and curve most steeply toward the tip, because the midrib carrying the load thins several-fold along the blade and takes the bending stiffness down with it faster than the
+     * moment decays. This is the ratio of tip compliance to base compliance; 1 leaves the blade uniform, and values of order ten give the base-straight, tip-curved shape of a grass leaf.
+     */
+    RandomParameter_float flexibility_taper;
+
+    //! Compliance of the leaf blade in bending, which makes the leaf droop under its own weight as it grows
+    /**
+     * The blade is treated as a cantilever clamped at its base and loaded by its own weight, so a leaf points along its growing direction when it is small and bends over as it expands, with no separate age
+     * term. Larger values give a floppier leaf; zero gives a perfectly rigid one that keeps its prototype shape exactly, which is the behaviour of every species that does not droop.
+     * \note Deflection grows with the fifth power of leaf length, so this interacts strongly with <code>leaf_aspect_ratio</code> and with the leaf scale set through \ref PhytomerParameters.
+     */
+    RandomParameter_float flexibility;
+
+    //! \deprecated Superseded by \ref LeafPrototype::flexibility.
+    /**
+     * Formerly the fraction along the leaf at which it was bent by a fixed angle, standing in for the leaf drooping under its own weight. The leaf now bends continuously along its whole length, so there is
+     * no single station at which it kinks. Retained so that existing code continues to compile: if \ref LeafPrototype::flexibility is left at zero and a buckle angle was set, the pair is converted to the
+     * flexibility reproducing the same tip droop on the fully-grown leaf. The mature leaf therefore looks much as it did, but now reaches that shape gradually as it expands rather than being born with it.
+     */
+    [[deprecated("LeafPrototype::leaf_buckle_length is superseded by LeafPrototype::flexibility, which bends the leaf continuously under its own weight as it grows rather than kinking it at a fixed station. "
+                 "The value is converted to an equivalent flexibility for now; set flexibility directly instead.")]] RandomParameter_float leaf_buckle_length;
+
+    //! \deprecated Superseded by \ref LeafPrototype::flexibility.
+    /**
+     * Formerly the angle, in degrees, through which the leaf was bent at \ref LeafPrototype::leaf_buckle_length. See that parameter for how the value is now interpreted.
+     */
+    [[deprecated("LeafPrototype::leaf_buckle_angle is superseded by LeafPrototype::flexibility, which bends the leaf continuously under its own weight as it grows rather than kinking it at a fixed station. "
+                 "The value is converted to an equivalent flexibility for now; set flexibility directly instead.")]] RandomParameter_float leaf_buckle_angle;
+
+    //! Resolve the bending stiffness to build a leaf with, honouring a deprecated buckle setting when the flexibility was never set
+    /**
+     * An explicitly-set \ref LeafPrototype::flexibility always wins, so code that has already migrated is unaffected by a stale buckle value left beside it.
+     * \return Flexibility to build the leaf with.
+     */
+    [[nodiscard]] float resolveFlexibility();
 
     //! Amount to shift the leaf
     helios::vec3 leaf_offset;
@@ -495,12 +611,19 @@ public:
         this->leaf_aspect_ratio = a.leaf_aspect_ratio;
         this->midrib_fold_fraction = a.midrib_fold_fraction;
         this->longitudinal_curvature = a.longitudinal_curvature;
+        this->longitudinal_curvature_exponent = a.longitudinal_curvature_exponent;
         this->lateral_curvature = a.lateral_curvature;
         this->petiole_roll = a.petiole_roll;
         this->wave_period = a.wave_period;
         this->wave_amplitude = a.wave_amplitude;
+        this->flexibility = a.flexibility;
+        this->flexibility_taper = a.flexibility_taper;
+        this->flexibility_aging = a.flexibility_aging;
+        this->flexibility_aging_max = a.flexibility_aging_max;
+        HELIOS_PUSH_IGNORE_DEPRECATED
         this->leaf_buckle_length = a.leaf_buckle_length;
         this->leaf_buckle_angle = a.leaf_buckle_angle;
+        HELIOS_POP_IGNORE_DEPRECATED
         this->leaf_offset = a.leaf_offset;
         this->subdivisions = a.subdivisions;
         this->unique_prototypes = a.unique_prototypes;
@@ -522,6 +645,9 @@ public:
             if (a.midrib_fold_fraction.distribution != "constant")
                 this->midrib_fold_fraction.resample();
             this->longitudinal_curvature = a.longitudinal_curvature;
+            this->longitudinal_curvature_exponent = a.longitudinal_curvature_exponent;
+            if (a.longitudinal_curvature_exponent.distribution != "constant")
+                this->longitudinal_curvature_exponent.resample();
             if (a.longitudinal_curvature.distribution != "constant")
                 this->longitudinal_curvature.resample();
             this->lateral_curvature = a.lateral_curvature;
@@ -536,12 +662,26 @@ public:
             this->wave_amplitude = a.wave_amplitude;
             if (a.wave_amplitude.distribution != "constant")
                 this->wave_amplitude.resample();
+            this->flexibility = a.flexibility;
+            if (a.flexibility.distribution != "constant")
+                this->flexibility.resample();
+            this->flexibility_taper = a.flexibility_taper;
+            if (a.flexibility_taper.distribution != "constant")
+                this->flexibility_taper.resample();
+            this->flexibility_aging = a.flexibility_aging;
+            if (a.flexibility_aging.distribution != "constant")
+                this->flexibility_aging.resample();
+            this->flexibility_aging_max = a.flexibility_aging_max;
+            if (a.flexibility_aging_max.distribution != "constant")
+                this->flexibility_aging_max.resample();
+            HELIOS_PUSH_IGNORE_DEPRECATED
             this->leaf_buckle_length = a.leaf_buckle_length;
             if (a.leaf_buckle_length.distribution != "constant")
                 this->leaf_buckle_length.resample();
             this->leaf_buckle_angle = a.leaf_buckle_angle;
             if (a.leaf_buckle_angle.distribution != "constant")
                 this->leaf_buckle_angle.resample();
+            HELIOS_POP_IGNORE_DEPRECATED
             this->leaf_offset = a.leaf_offset;
             this->subdivisions = a.subdivisions;
             this->unique_prototypes = a.unique_prototypes;
@@ -560,6 +700,25 @@ public:
         assert(generator != nullptr);
         std::uniform_int_distribution<uint> unif_distribution;
         this->unique_prototype_identifier = unif_distribution(*generator);
+    }
+
+    //! Draw the shape of subsequently-built blades from a different random number generator
+    /**
+     * Redirects every random shape parameter of the prototype, and the prototype itself, at the given generator.
+     * Used to build a species' set of unique blade shapes from a private stream keyed on
+     * LeafPrototype::unique_prototype_identifier, so that the set does not depend on how much randomness has
+     * already been drawn from the Context when the set happens to be built.
+     * \param[in] rand_generator Pointer to the random number generator to draw from.
+     * \return Generator that was in use before the call, so that a caller can restore it.
+     */
+    std::minstd_rand0 *setRandomGenerator(std::minstd_rand0 *rand_generator);
+
+    //! Get the random number generator that this prototype draws its shape from
+    /**
+     * \return Pointer to the random number generator in use, which is null if the prototype was default-constructed.
+     */
+    [[nodiscard]] std::minstd_rand0 *getRandomGenerator() const {
+        return generator;
     }
 
 private:
@@ -765,10 +924,16 @@ private:
         //! Uniform scale factor applied to the flower prototype geometry
         RandomParameter_float flower_prototype_scale;
         //! Pointer to user-supplied function that returns a flower prototype mesh ID (Context*, subdivisions, flower_is_open)
+        /**
+         * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
+         */
         uint (*flower_prototype_function)(helios::Context *, uint subdivisions, bool flower_is_open) = nullptr;
         //! Uniform scale factor applied to the fruit prototype geometry
         RandomParameter_float fruit_prototype_scale;
         //! Pointer to user-supplied function that returns a fruit prototype mesh ID (Context*, subdivisions)
+        /**
+         * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
+         */
         uint (*fruit_prototype_function)(helios::Context *, uint subdivisions) = nullptr;
         //! Fraction (0‒1) of gravitational influence used to bend peduncles under fruit load
         RandomParameter_float fruit_gravity_factor_fraction;
@@ -851,12 +1016,14 @@ public:
      * \param[in] parent_shoot_node_index Node index of the current shoot along it's parent shoot
      * \param[in] shoot_max_nodes Maximum number of phytomers in the shoot
      * \param[in] plant_age Age of the plant in days
+     * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
      */
     void (*phytomer_creation_function)(std::shared_ptr<Phytomer> phytomer_ptr, uint shoot_node_index, uint parent_shoot_node_index, uint shoot_max_nodes, float plant_age) = nullptr;
 
     // Custom user-defined function that is called for each phytomer on every time step
     /**
      * \param[in] phytomer_ptr Pointer to the phytomer to which the function will be applied
+     * \note This is a function pointer, so it is not carried by a ShootParameters reconstructed from values alone. See \ref ShootParameters::inheritCustomFunctionsFrom().
      */
     void (*phytomer_callback_function)(std::shared_ptr<Phytomer> phytomer_ptr) = nullptr;
 
@@ -951,57 +1118,83 @@ struct ShootParameters {
      * \param[in] child_shoot_type_probabilities Vector of probabilities for each child shoot type. Probabilities must sum to 1.
      *
      * \note The sizes of the input vectors must match, and neither input vector can be empty.
+     * \note The values set here can be read back with \ref getChildShootTypeLabels() and \ref getChildShootTypeProbabilities().
      */
     void defineChildShootTypes(const std::vector<std::string> &child_shoot_type_labels, const std::vector<float> &child_shoot_type_probabilities);
 
+    //! Get the labels of the child shoot types that may be generated by this shoot type
+    /**
+     * Returns the labels currently stored in this ShootParameters, which are set by \ref defineChildShootTypes(). An empty vector is a meaningful state rather than an error: a shoot type with no child
+     * shoot types defined generates child shoots of its own type.
+     *
+     * \return Vector of child shoot type labels, parallel to \ref getChildShootTypeProbabilities().
+     * \note Once the ShootParameters has been registered with \ref PlantArchitecture::defineShootType() and a plant is built, labels that do not correspond to a defined shoot type are dropped from the
+     * stored parameters, so the returned labels are not necessarily those originally passed to \ref defineChildShootTypes().
+     */
+    [[nodiscard]] std::vector<std::string> getChildShootTypeLabels() const;
+
+    //! Get the probabilities of the child shoot types that may be generated by this shoot type
+    /**
+     * Returns the probabilities currently stored in this ShootParameters, which are set by \ref defineChildShootTypes(). An empty vector is a meaningful state rather than an error: a shoot type with no
+     * child shoot types defined generates child shoots of its own type.
+     *
+     * \return Vector of child shoot type probabilities, parallel to \ref getChildShootTypeLabels().
+     * \note \ref defineChildShootTypes() requires that the probabilities sum to 1, but entries dropped for referring to an undefined shoot type are removed without renormalizing the remainder, so the
+     * returned probabilities do not necessarily sum to 1.
+     */
+    [[nodiscard]] std::vector<float> getChildShootTypeProbabilities() const;
+
+    //! Copy the user-defined callback and prototype function pointers from another ShootParameters
+    /**
+     * Copies all five function pointers held in the phytomer parameters -- the phytomer creation and callback hooks, and the leaf, flower, and fruit prototype functions -- from \a source into this
+     * ShootParameters. All other parameter values are left unchanged, and no random parameters are resampled.
+     *
+     * This is intended for callers that reconstruct a ShootParameters from plain values, such as a scripting-language binding that flattens the structure to a dictionary, applies user edits, and
+     * rebuilds it. Such a reconstruction cannot carry function pointers, so they must be re-attached from the original structure before it is passed to \ref PlantArchitecture::defineShootType() or
+     * \ref PlantArchitecture::updateCurrentShootParameters(), both of which replace the stored shoot type entry in its entirety.
+     *
+     * \param[in] source ShootParameters to copy the function pointers from, typically the structure originally returned by \ref PlantArchitecture::getCurrentShootParameters().
+     * \note Pointers that are null in \a source are copied as null, overwriting any existing value. The operation is an unconditional assignment rather than a merge, so repeated calls are idempotent
+     * and a deliberately cleared hook stays cleared.
+     */
+    void inheritCustomFunctionsFrom(const ShootParameters &source);
+
     ShootParameters &operator=(const ShootParameters &a) {
+        // Shoot-level parameters are copied by value and are NOT resampled here. Per-shoot variation
+        // is produced by the explicit resample() calls in the growth engine at the points where a new
+        // shoot is created (see PlantArchitecture.cpp, e.g. base_yaw/insertion_angle_tip when a
+        // vegetative bud breaks). Resampling here as well made committing a shoot type through
+        // defineShootType()/updateCurrentShootParameters() silently perturb parameters the caller
+        // never edited, so an identity round-trip was not a no-op.
+        //
+        // Note this does NOT apply to the nested PhytomerParameters assignment below: Phytomer's
+        // constructor relies on that assignment to re-randomize per-phytomer parameters, so the
+        // sub-structure operator= implementations resample deliberately.
         this->phytomer_parameters = a.phytomer_parameters;
         this->max_nodes = a.max_nodes;
-        this->max_nodes.resample();
         this->max_nodes_per_season = a.max_nodes_per_season;
-        this->max_nodes_per_season.resample();
         this->phyllochron_min = a.phyllochron_min;
-        this->phyllochron_min.resample();
+        this->elongation_rate_max = a.elongation_rate_max;
         this->girth_area_factor = a.girth_area_factor;
-        this->girth_area_factor.resample();
         this->vegetative_bud_break_probability_min = a.vegetative_bud_break_probability_min;
-        this->vegetative_bud_break_probability_min.resample();
         this->vegetative_bud_break_probability_max = a.vegetative_bud_break_probability_max;
-        this->vegetative_bud_break_probability_max.resample();
         this->flower_bud_break_probability = a.flower_bud_break_probability;
-        this->flower_bud_break_probability.resample();
         this->fruit_set_probability = a.fruit_set_probability;
-        this->fruit_set_probability.resample();
         this->gravitropic_curvature = a.gravitropic_curvature;
-        this->gravitropic_curvature.resample();
         this->tortuosity = a.tortuosity;
-        this->tortuosity.resample();
         this->vegetative_bud_break_probability_min = a.vegetative_bud_break_probability_min;
-        this->vegetative_bud_break_probability_min.resample();
         this->vegetative_bud_break_probability_decay_rate = a.vegetative_bud_break_probability_decay_rate;
-        this->vegetative_bud_break_probability_decay_rate.resample();
         this->max_terminal_floral_buds = a.max_terminal_floral_buds;
-        this->max_terminal_floral_buds.resample();
         this->flower_bud_break_probability = a.flower_bud_break_probability;
-        this->flower_bud_break_probability.resample();
         this->fruit_set_probability = a.fruit_set_probability;
-        this->fruit_set_probability.resample();
         this->vegetative_bud_break_time = a.vegetative_bud_break_time;
-        this->vegetative_bud_break_time.resample();
         this->insertion_angle_tip = a.insertion_angle_tip;
-        this->insertion_angle_tip.resample();
         this->insertion_angle_decay_rate = a.insertion_angle_decay_rate;
-        this->insertion_angle_decay_rate.resample();
         this->internode_length_max = a.internode_length_max;
-        this->internode_length_max.resample();
         this->internode_length_min = a.internode_length_min;
-        this->internode_length_min.resample();
         this->internode_length_decay_rate = a.internode_length_decay_rate;
-        this->internode_length_decay_rate.resample();
         this->base_roll = a.base_roll;
-        this->base_roll.resample();
         this->base_yaw = a.base_yaw;
-        this->base_yaw.resample();
         this->flowers_require_dormancy = a.flowers_require_dormancy;
         this->growth_requires_dormancy = a.growth_requires_dormancy;
         this->child_shoot_type_labels = a.child_shoot_type_labels;
@@ -1121,6 +1314,14 @@ public:
      * \return Total leaf area as a float value.
      */
     [[nodiscard]] float getLeafArea() const;
+
+    //! Total one-sided surface area of all flowers/fruit borne on this phytomer
+    /**
+     * Reported at full size, in the same way as \ref getLeafArea(): an inflorescence part-way through its growth reports the area it is expanding toward rather than its present area.
+     *
+     * \return Surface area (m^2) of the phytomer's inflorescences
+     */
+    [[nodiscard]] float getInflorescenceArea() const;
 
     /**
      * \brief Retrieves the position of the base of a leaf within the phytomer.
@@ -1413,6 +1614,7 @@ public:
     std::vector<std::vector<float>> peduncle_radius; // actual sampled radius for each peduncle - first index is petiole, second is bud
     std::vector<std::vector<float>> peduncle_pitch; // actual sampled pitch for each peduncle - first index is petiole, second is bud
     std::vector<std::vector<float>> peduncle_curvature; // actual sampled curvature for each peduncle - first index is petiole, second is bud
+    std::vector<std::vector<float>> peduncle_roll; // actual sampled roll for each peduncle - first index is petiole, second is bud
     float internode_pitch, internode_phyllotactic_angle;
 
     std::vector<std::vector<float>> petiole_radii; // first index is petiole within internode, second index is segment within petiole tube
@@ -1423,13 +1625,81 @@ public:
     std::vector<helios::vec3> petiole_axis_initial; // initial petiole axis (before curvature) for each petiole
     std::vector<helios::vec3> petiole_rotation_axis; // rotation axis for curvature application for each petiole
     std::vector<std::vector<float>> leaf_size_max; // first index is petiole within internode, second index is leaf within petiole
-    std::vector<std::vector<AxisRotation>> leaf_rotation; // first index is petiole within internode, second index is leaf within petiole
+    std::vector<std::vector<AxisRotation>> leaf_rotation; //!< Roll, pitch and yaw applied to each leaf, as angles rather than as the rotations built from them. First index is petiole within internode, second index is leaf within petiole.
 
     std::vector<helios::RGBcolor> internode_colors; // index is segment within internode tube
     std::vector<helios::RGBcolor> petiole_colors; // index is segment within petiole tube
 
-    std::vector<std::vector<uint>> petiole_objIDs; // first index is petiole within internode, second index is segment within petiole tube
+    //! Object ID of the tube making up each petiole. Index is petiole within internode.
+    //! Equal to no_petiole_objID where the petiole has no geometry (suppressed, or too small to build).
+    std::vector<uint> petiole_objIDs;
+
+    //! Sentinel marking a petiole that has no Context geometry. Zero is a valid object ID, so
+    //! absence cannot be signalled with it.
+    static constexpr uint no_petiole_objID = 4294967294;
+
+    //! Object IDs of all petioles on this phytomer that currently have geometry in the Context.
+    /**
+     * Petioles whose geometry was suppressed, was never built, or has since been deleted are
+     * omitted, so the result can be passed directly to Context methods that require every object
+     * to exist.
+     * \return Object IDs of the existing petiole tubes.
+     */
+    [[nodiscard]] std::vector<uint> getExistingPetioleObjIDs() const;
+
+    //! Re-deflect one leaf under its own weight for its current size
+    /**
+     * Deflects the leaf from its prototype's undeformed rest shape rather than from its current geometry, so repeated growth steps cannot accumulate and creep the leaf downward. Does nothing for a species
+     * whose leaves are rigid, for a leaf with no cached rest shape, or for a leaf that has not measurably grown since it was last deflected.
+     * \param[in] petiole_index Index of the petiole within the internode.
+     * \param[in] leaf_index Index of the leaf within the petiole.
+     */
+    void deformLeafUnderSelfWeight(uint petiole_index, uint leaf_index);
+
+    //! Apply the full rotation chain that orients one leaf on its petiole
+    /**
+     * Rolls, pitches and yaws the leaf, turns it to the azimuth of the petiole it hangs from, and applies the curvature-aware blade-up correction, then records the three angles in \ref leaf_rotation. Called
+     * both when a phytomer is first built and when one is rebuilt by PlantArchitecture::readPlantStructureXML(), so that a restored leaf is oriented identically to a grown one; the two used to carry separate
+     * copies of this chain that had drifted apart. Samples nothing, so the caller owns the random draws and their order.
+     * \param[in] objID_leaf Object ID of the leaf to orient. It must already be scaled and still be at the origin.
+     * \param[in] petiole_index Index of the petiole within the internode.
+     * \param[in] leaf_index Index of the leaf within the petiole.
+     * \param[in] leaves_per_petiole Number of leaves on this petiole. One selects the unifoliate roll, more than one the compound roll.
+     * \param[in] ind_from_tip Signed offset of this leaf from the middle of the petiole; zero for the tip leaf of a compound leaf and for a unifoliate leaf.
+     * \param[in] compound_rotation Rotation about the petiole that separates the leaflets of a compound leaf; zero for a unifoliate leaf.
+     * \param[in] petiole_tip_axis Direction of the petiole at its tip, in world coordinates.
+     * \param[in] leaf_roll_angle Leaf roll angle (radians), as stored in \ref leaf_rotation rather than as applied.
+     * \param[in] leaf_pitch_angle Leaf pitch angle (radians), as stored in \ref leaf_rotation rather than as applied.
+     * \param[in] leaf_yaw_angle Leaf yaw angle (radians), already carrying the sign for this leaflet's side of the petiole. Ignored when ind_from_tip is zero.
+     */
+    void orientLeaf(uint objID_leaf, uint petiole_index, uint leaf_index, int leaves_per_petiole, float ind_from_tip, float compound_rotation, const helios::vec3 &petiole_tip_axis, float leaf_roll_angle, float leaf_pitch_angle, float leaf_yaw_angle);
+
+    //! Rotation about the petiole that separates one leaflet of a compound leaf from the others
+    /**
+     * Leaflets held away from the petiole tip (a non-zero leaflet offset) are placed on alternating sides of the petiole, while leaflets all attached at the tip are fanned evenly around it. Shared by the
+     * Phytomer constructor and PlantArchitecture::readPlantStructureXML() so that a restored compound leaf is arranged like a grown one.
+     * \param[in] leaves_per_petiole Number of leaves on the petiole. One returns zero, since a unifoliate leaf is not rotated about its petiole.
+     * \param[in] leaf_index Index of the leaf within the petiole.
+     * \param[in] leaflet_offset_val Leaflet offset along the petiole, already clamped by clampOffset().
+     * \return Rotation about the petiole, in radians.
+     */
+    static float compoundLeafRotation(int leaves_per_petiole, int leaf_index, float leaflet_offset_val);
+
+
     std::vector<std::vector<uint>> leaf_objIDs; // first index is petiole within internode, second index is leaf within petiole tube
+
+    //! Which cached prototype each leaf was copied from, so its undeformed rest shape can be found again. Indexed as <code>leaf_objIDs</code>; -1 for a leaf that does not droop.
+    std::vector<std::vector<int>> leaf_prototype_index;
+
+    //! Leaf scale at which each leaf was last deflected, used to skip redeforming a leaf that has not measurably grown. Indexed as <code>leaf_objIDs</code>.
+    std::vector<std::vector<float>> leaf_last_deformed_scale;
+
+    //! Bending flexibility this phytomer's leaves were built with
+    /**
+     * Resolved once when the phytomer is created and held, rather than being read from the prototype on each timestep. The prototype's value is a random parameter that resamples when it is read, so
+     * consulting it every timestep would give one leaf a different stiffness at every step and make it flap rather than settle.
+     */
+    float leaf_flexibility = 0.f;
 
     PhytomerParameters phytomer_parameters;
 
@@ -1473,6 +1743,31 @@ protected:
     PlantArchitecture *plantarchitecture_ptr;
 
     void updateInflorescence(FloralBud &fbud);
+
+    //! Radius to build the peduncle with, matched to the culm tip it attaches to
+    /**
+     * The peduncle joins the culm at a single point, so a peduncle radius that disagrees with the internode radius there renders as an abrupt step. This returns a radius that continues the stem's taper
+     * across the junction, falling back to the configured \ref PeduncleParameters::radius when the phytomer has no internode geometry to match.
+     *
+     * \return Radius (meters) of the peduncle at its base
+     */
+    [[nodiscard]] float getReconciledPeduncleRadius();
+
+    //! Whether this phytomer's peduncle should take its radius from the culm rather than from its own parameter
+    /**
+     * True for a terminal inflorescence on a herbaceous stem -- a grass panicle or tassel, which continues the stem's own axis and must match it across the junction. False for a lateral peduncle or one on a
+     * woody stem, whose configured radius describes a genuinely slender flower stalk that should not be widened to match the branch bearing it.
+     *
+     * \return True if the peduncle radius should be derived from the culm-tip radius
+     */
+    [[nodiscard]] bool peduncleShouldMatchCulm() const;
+
+    //! Re-match this phytomer's peduncle geometry to the current culm-tip radius
+    /**
+     * Peduncle geometry is built once, when the floral bud appears and the culm is at its thinnest, but the culm keeps thickening afterward. This re-applies \ref getReconciledPeduncleRadius() so the
+     * junction stays continuous as the plant grows.
+     */
+    void updatePeduncleRadii();
 
     /**
      * \brief Create and position a single flower or fruit with specified rotation parameters.
@@ -1612,20 +1907,41 @@ struct Shoot {
      */
     [[nodiscard]] helios::vec3 getShootAxisVector(float shoot_fraction) const;
 
+    //! Reports whether this shoot has been pruned away entirely
+    /**
+     * A shoot pruned at node 0 keeps its slot in the plant's shoot tree so that shoot IDs remain
+     * stable, but it has no phytomers, no internode geometry, and is no longer listed as a child of
+     * its parent. Such a shoot contributes nothing to the plant and cannot be queried for geometry.
+     * \return True if the shoot has no phytomers because it was pruned.
+     * \sa PlantArchitecture::isShootPruned(), PlantArchitecture::pruneBranch()
+     */
+    [[nodiscard]] bool isPruned() const {
+        return phytomers.empty();
+    }
+
     /**
      * \brief Calculates the total leaf area of a shoot starting from a given node index.
      *
      * \param[in] start_node_index [optional] The index of the starting node in the shoot.
      * \return Total leaf area of the shoot and its child shoots starting from the given node.
-     * \note Throws an error if the start_node_index is out of range.
+     * \note Returns zero for a pruned shoot. Throws an error if start_node_index is out of range on a shoot that still has phytomers.
      */
     [[nodiscard]] float sumShootLeafArea(uint start_node_index = 0) const;
+
+    //! Sum the inflorescence area borne at or above a given node, including on child shoots
+    /**
+     * Computed on demand rather than accumulated like \ref Phytomer::downstream_leaf_area, because an inflorescence keeps expanding after it is created and a value banked once would go stale.
+     *
+     * \param[in] start_node_index Node index to sum from
+     * \return Surface area (m^2) of inflorescences supported at that node
+     */
+    [[nodiscard]] float sumDownstreamInflorescenceArea(uint start_node_index) const;
 
     /**
      * \brief Calculates the total volume of all child shoots starting from a specified node index.
      * \param[in] start_node_index The starting index of the node from which to sum child volumes.
      * \return The total volume of all child shoots starting from the given node index.
-     * \note Throws an error if start_node_index is out of range.
+     * \note Returns zero for a pruned shoot. Throws an error if start_node_index is out of range on a shoot that still has phytomers.
      */
     [[nodiscard]] float sumChildVolume(uint start_node_index = 0) const;
 
@@ -1738,13 +2054,29 @@ struct PlantInstance {
     std::string plant_name;
     std::pair<std::string, float> epicormic_shoot_probability_perlength_per_day; //.first is the epicormic shoot label string, .second is the probability
 
-    // Phenological thresholds
-    float dd_to_dormancy_break = 0;
-    float dd_to_flower_initiation = 0;
-    float dd_to_flower_opening = 0;
-    float dd_to_fruit_set = 0;
-    float dd_to_fruit_maturity = 0;
-    float dd_to_dormancy = 0;
+    // Phenological thresholds.
+    //
+    // These defaults encode "no phenology scheduled", mirroring disablePlantPhenology(). They are what
+    // advanceTime() sees for any plant that never has setPlantPhenologicalThresholds() called on it --
+    // i.e. a plant built through the manual API (addPlantInstance + addBaseStemShoot/appendShoot/
+    // addChildShoot), or one restored from an XML file predating the phenology tags. All library
+    // builders set every field explicitly, so they are unaffected by these values.
+    //
+    // A zero dd_to_dormancy made the dormancy predicate in advanceTime() true on the very first step
+    // and, because time_since_dormancy is reset there, on every step thereafter -- repeatedly calling
+    // Shoot::makeDormant(), which strips every leaf and marks all non-dormant buds BUD_DEAD. Since
+    // breakDormancy() only revives buds that are not BUD_DEAD, the plant was permanently defoliated
+    // and sterilized instead of growing.
+    float dd_to_dormancy_break = 0; //!< 0 = no chilling requirement; a dormant shoot may break immediately
+    float dd_to_flower_initiation = -1; //!< -1 = stage disabled (advanceTime() gates these on >= 0)
+    float dd_to_flower_opening = -1; //!< -1 = stage disabled
+    float dd_to_fruit_set = -1; //!< -1 = stage disabled
+    //! Deliberately 1e6 rather than -1: unlike the stages above, this field is used as a divisor in the
+    //! fruit-growth block of advanceTime(), and appendPhytomerToShoot() can set a bud BUD_FRUITING based
+    //! purely on shoot structure without consulting dd_to_fruit_set. A negative value would then produce
+    //! a negative scale factor and trip the assert in Phytomer::setInflorescenceScaleFraction().
+    float dd_to_fruit_maturity = 1e6;
+    float dd_to_dormancy = 1e6; //!< effectively "never", keeping the dormancy predicate false
     float max_leaf_lifespan = 1e6;
     bool is_evergreen = false;
 
@@ -1980,14 +2312,15 @@ public:
     /**
      * \param[in] shoot_type_label User-defined label for the shoot type to be updated.
      * \param[in] params Updated parameters structure for the shoot type.
-     * \note This will overwrite any existing shoot parameter definitions.
+     * \note This will overwrite any existing shoot parameter definitions in their entirety rather than merging into them. The stored parameters are the values passed in: shoot-level random parameters
+     * are not resampled, so reading a shoot type and writing it straight back is a no-op.
      */
     void updateCurrentShootParameters(const std::string &shoot_type_label, const ShootParameters &params);
 
     //! Update the parameters of all shoot types in the current plant model
     /**
      * \param[in] params Updated parameters structure for the shoot type.
-     * \note This will overwrite any existing shoot parameter definitions.
+     * \note This replaces the full set of shoot types, so any shoot type not present in \a params is removed. Shoot-level random parameters are not resampled.
      */
     void updateCurrentShootParameters(const std::map<std::string, ShootParameters> &params);
 
@@ -2003,6 +2336,13 @@ public:
 
     //! Duplicate an existing plant instance and specify its base position and age
     /**
+     * The copy is an independent plant instance carrying the source's configuration: its name, shoot parameters, phenological thresholds,
+     * maximum age, epicormic shoot probability, carbohydrate and nitrogen parameters, and dormancy state. Per-plant attraction points are
+     * translated onto the new base position, since they are absolute world coordinates.
+     *
+     * The carbohydrate and nitrogen pools are not copied, as they are simulation state rather than configuration; the copy starts with the
+     * pools of a newly created plant of the given age.
+     *
      * \param[in] plantID ID of the existing plant instance to be duplicated.
      * \param[in] base_position Cartesian coordinates of the base of the new plant copy.
      * \param[in] base_rotation Rotation of the new plant copy.
@@ -2123,6 +2463,8 @@ public:
     /**
      * \param[in] shoot_type_label User-defined label for the new shoot type. This string is used later to reference this type of shoot.
      * \param[in] shoot_params Parameters structure for the new shoot type.
+     * \note If a shoot type with this label already exists, its definition is replaced in its entirety rather than merged into. The stored parameters are the values passed in: shoot-level random
+     * parameters are not resampled, so reading a shoot type and writing it straight back is a no-op.
      */
     void defineShootType(const std::string &shoot_type_label, const ShootParameters &shoot_params);
 
@@ -2525,8 +2867,19 @@ public:
      */
     void setPlantLeafAngleDistribution(const std::vector<uint> &plantIDs, float Beta_mu_inclination, float Beta_nu_inclination, float eccentricity, float ellipse_rotation_degrees) const;
 
-    //! Don't use this
-    void setPlantAge(uint plantID, float current_age);
+    /**
+     * \brief Sets the maximum age of a plant, beyond which it stops growing.
+     *
+     * Once a plant's age reaches this value, PlantArchitecture::advanceTime() stops advancing it and its geometry becomes static.
+     * The default is 999 days. Every plant model in the library sets its own value as part of its builder (an apple tree, for example, uses 1460 days),
+     * but a plant assembled manually with PlantArchitecture::addPlantInstance() keeps the default, and so silently stops growing after 999 days.
+     *
+     * Setting a maximum age below the plant's current age is permitted, and freezes the plant at its current form.
+     *
+     * \param[in] plantID ID of the plant instance.
+     * \param[in] max_age Maximum age of the plant in days. Must be greater than or equal to zero.
+     */
+    void setPlantMaxAge(uint plantID, float max_age);
 
     /**
      * \brief Harvests a plant by removing all leaves and fruit.
@@ -2580,12 +2933,26 @@ public:
      */
     void breakPlantDormancy(uint plantID);
 
+    //! Prunes a branch from a specific plant at a designated node index
     /**
-     * \brief Prunes a branch from a specific plant at a designated node index.
+     * The node at node_index and every node above it are removed, along with their leaves,
+     * inflorescences and internode geometry, and the same is done recursively to every shoot
+     * descending from those nodes. Pruning at node_index 0 therefore removes the shoot entirely.
+     *
+     * A shoot removed entirely keeps its slot in the plant's shoot tree so that shoot IDs are not
+     * renumbered, but it becomes inert: it has zero nodes, contributes no leaf area or volume, and
+     * is unlinked from its parent so that traversals of the plant structure no longer reach it. Use
+     * isShootPruned() to detect such shoots when iterating over getAllShootIDs().
+     *
+     * Pruning is idempotent -- calling this on a shoot that has already been pruned away does
+     * nothing. This is what allows a whole branch system to be pruned by looping over shoot IDs,
+     * since removing a shoot also empties its descendants.
      *
      * \param[in] plantID Unique identifier of the plant to prune.
      * \param[in] shootID Identifier of the shoot to prune from within the plant.
      * \param[in] node_index Index of the node on the shoot where the branch will be pruned.
+     * \note Throws an error if node_index is out of range for a shoot that still has nodes.
+     * \sa isShootPruned()
      */
     void pruneBranch(uint plantID, uint shootID, uint node_index);
 
@@ -2608,6 +2975,14 @@ public:
     [[nodiscard]] float getPlantAge(uint plantID) const;
 
     /**
+     * \brief Retrieves the maximum age of a specific plant, beyond which it stops growing.
+     *
+     * \param[in] plantID Unique identifier of the plant.
+     * \return The maximum age of the plant in days. See PlantArchitecture::setPlantMaxAge().
+     */
+    [[nodiscard]] float getPlantMaxAge(uint plantID) const;
+
+    /**
      * \brief Retrieves the number of nodes in a specific shoot of a specific plant.
      *
      * \param[in] plantID The unique identifier of the plant.
@@ -2615,6 +2990,21 @@ public:
      * \return The current number of nodes in the specified shoot.
      */
     [[nodiscard]] uint getShootNodeCount(uint plantID, uint shootID) const;
+
+    //! Reports whether a shoot of a plant has been pruned away entirely
+    /**
+     * PlantArchitecture::pruneBranch() called with a node index of 0 removes all of a shoot's
+     * phytomers and geometry, but keeps the shoot in the plant's shoot tree so that shoot IDs stay
+     * stable across a prune. The shoot ID therefore remains valid and is still returned by
+     * getAllShootIDs(), but the shoot itself is inert: it has zero nodes, contributes no leaf area
+     * or volume, is no longer listed as a child of its parent, and cannot be queried for geometry
+     * (getShootTaper() throws for it). Use this to skip such shoots when walking getAllShootIDs().
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant (see getAllShootIDs()).
+     * \return True if the shoot was pruned away and no longer forms part of the plant.
+     */
+    [[nodiscard]] bool isShootPruned(uint plantID, uint shootID) const;
 
     /**
      * \brief Retrieves the IDs of all shoots belonging to a specific plant.
@@ -2626,6 +3016,103 @@ public:
      * \return Vector of shoot IDs for all shoots in the plant.
      */
     [[nodiscard]] std::vector<uint> getAllShootIDs(uint plantID) const;
+
+    //! Retrieves the parent shoot of a shoot
+    /**
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return ID of the shoot this shoot grew from, or -1 if it is the base stem shoot.
+     * \note A pruned shoot still reports the parent it grew from, even though it is no longer listed among that parent's children. Its parent is always a live shoot, since pruning a shoot also prunes everything descending from it.
+     */
+    [[nodiscard]] int getParentShootID(uint plantID, uint shootID) const;
+
+    //! Retrieves the branching rank of a shoot
+    /**
+     * Rank is the botanical branching order: the base stem shoot is rank 0, a branch off it is rank 1,
+     * a branch off that is rank 2, and so on. A shoot created by appendShoot() continues its parent's
+     * axis rather than branching from it, so it keeps the parent's rank. Rank is therefore not the same
+     * as the number of steps to the base shoot -- see getShootDepth() for that.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return Branching rank of the shoot.
+     */
+    [[nodiscard]] uint getShootRank(uint plantID, uint shootID) const;
+
+    //! Retrieves the number of shoots between a shoot and the base stem shoot
+    /**
+     * The base stem shoot has depth 0, its children depth 1, and so on. Unlike getShootRank() this
+     * counts every step in the shoot tree, including axis continuations created by appendShoot().
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return Number of steps from this shoot to the base stem shoot.
+     */
+    [[nodiscard]] uint getShootDepth(uint plantID, uint shootID) const;
+
+    //! Retrieves the chain of shoots connecting a shoot to the base stem shoot
+    /**
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return Shoot IDs ordered from the given shoot to the base stem shoot, including both. For the base stem shoot this is a single element.
+     */
+    [[nodiscard]] std::vector<uint> getPathToRoot(uint plantID, uint shootID) const;
+
+    //! Retrieves the shoots that grew directly out of a given shoot
+    /**
+     * Ordered by the node they attach to. This includes shoots created by appendShoot(), which continue
+     * the parent's axis rather than branching from it; compare their getShootRank() with the parent's to
+     * tell the two apart. Shoots that have been pruned away are not included.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return IDs of the direct children of the shoot, empty if it has none.
+     */
+    [[nodiscard]] std::vector<uint> getChildShootIDs(uint plantID, uint shootID) const;
+
+    //! Retrieves every shoot descending from a given shoot
+    /**
+     * Collected depth-first, so a shoot is always listed before its own descendants. The shoot itself is
+     * not included. Shoots that have been pruned away are not included.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \param[in] shootID The index of the shoot within the plant.
+     * \return IDs of all descendants of the shoot, empty if it has none.
+     */
+    [[nodiscard]] std::vector<uint> getAllDescendantShootIDs(uint plantID, uint shootID) const;
+
+    //! Retrieves the shoots of a plant grouped by branching rank
+    /**
+     * The index into the outer vector is the rank, so element 0 holds the base stem shoot and element 2
+     * holds every second-order branch. A rank with no live shoots is an empty entry rather than being
+     * skipped, so the index always equals the rank. Shoots that have been pruned away are not included.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \return Shoot IDs grouped by rank, indexed by rank.
+     */
+    [[nodiscard]] std::vector<std::vector<uint>> getShootIDsByRank(uint plantID) const;
+
+    //! Retrieves the parent-to-children structure of a plant
+    /**
+     * Only shoots that actually have children appear as keys. Shoots that have been pruned away appear
+     * neither as keys nor among the children.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \return Map of shoot ID to the IDs of its direct children.
+     */
+    [[nodiscard]] std::map<uint, std::vector<uint>> getShootHierarchyMap(uint plantID) const;
+
+    //! Retrieves the shoots of a plant that have no children
+    /**
+     * These are the tips of the shoot tree. Note that this is a topological test rather than a botanical
+     * one: a shoot whose axis is continued by appendShoot() has that continuation as a child and so is
+     * not terminal. Shoots that have been pruned away are not included -- an empty pruned shell has no
+     * children but is not a tip of the plant.
+     *
+     * \param[in] plantID The unique identifier of the plant.
+     * \return IDs of all shoots with no children.
+     */
+    [[nodiscard]] std::vector<uint> getTerminalShootIDs(uint plantID) const;
 
     /**
      * \brief Retrieves a read-only handle to a specific shoot of a specific plant.
@@ -2645,6 +3132,7 @@ public:
      * \param[in] plantID The unique identifier of the plant.
      * \param[in] shootID The unique identifier of the shoot within the specified plant.
      * \return The taper of the shoot as a float value, constrained between 0 and 1.
+     * \note Throws an error if the shoot has no internodes because it was pruned away. Check isShootPruned() first when iterating over getAllShootIDs().
      */
     [[nodiscard]] float getShootTaper(uint plantID, uint shootID) const;
 
@@ -3034,6 +3522,11 @@ public:
      * \param[in] filename Path to the XML file where the plant structure will be saved.
      * \note The function checks if the plant instance exists and if the output file path
      * is valid and writable. Errors related to invalid plant ID or file issues will throw exceptions.
+     * \note In addition to the shoot structure, the plant's phenological thresholds are written
+     * (dd_to_dormancy_break, dd_to_flower_initiation, dd_to_flower_opening, dd_to_fruit_set,
+     * dd_to_fruit_maturity, dd_to_dormancy, max_leaf_lifespan, is_evergreen). These are not derivable
+     * from the shoot structure, so without them a restored plant would fall back to the default
+     * thresholds rather than the ones it was built with.
      */
     void writePlantStructureXML(uint plantID, const std::string &filename) const;
 
@@ -3115,6 +3608,9 @@ public:
      * \param[in] quiet [optional] If true, suppresses console output of status messages.
      * \return A vector of unsigned integers representing the plant IDs parsed from the XML file.
      * \note Throws an exception if the file cannot be parsed or is missing required tags.
+     * \note The phenological threshold tags written by writePlantStructureXML() are optional on read,
+     * so files written before those tags existed still load. When they are absent, the restored plant
+     * keeps the default thresholds, which schedule no phenology.
      */
     std::vector<uint> readPlantStructureXML(const std::string &filename, bool quiet = false);
 
@@ -3147,6 +3643,13 @@ public:
 
     friend struct Phytomer;
     friend struct Shoot;
+
+    //! Grants the plug-in's self-tests access to private per-plant state.
+    /**
+     * Defined solely in the plug-in's selfTest.cpp, so nothing test-related is exposed to users
+     * of the library.
+     */
+    friend class PlantArchitectureTestHelper;
 
 private:
     //! Get a validated parameter value from the build parameters map
@@ -3224,6 +3727,31 @@ protected:
     // std::map<uint(*)(helios::Context* context_ptr, LeafPrototype* prototype_parameters, int compound_leaf_index),std::vector<std::vector<uint>> > unique_leaf_prototype_objIDs;
     std::map<uint, std::vector<std::vector<uint>>> unique_leaf_prototype_objIDs;
 
+    //! Undeformed blade geometry of each cached leaf prototype, parallel to \ref unique_leaf_prototype_objIDs
+    /**
+     * A drooping leaf is re-deflected from its rest shape every time it grows rather than bent further from its current shape, so that the deflection cannot accumulate and creep the leaf downward. The rest
+     * shape is therefore kept once per prototype - not once per leaf - which is what lets thousands of leaves share it without giving up the memory savings of the prototype cache. Empty for species whose
+     * leaves do not droop.
+     */
+    struct LeafRestGeometry {
+        std::vector<helios::vec3> vertices;
+        uint subdivisions_x = 0;
+        uint subdivisions_y = 0;
+    };
+    std::map<uint, std::vector<std::vector<LeafRestGeometry>>> unique_leaf_prototype_rest_geometry;
+
+    //! Record the undeformed geometry of one leaf prototype, so leaves copied from it can be deflected from their rest shape
+    /**
+     * Appends one entry to \ref unique_leaf_prototype_rest_geometry for the given prototype, capturing the blade lattice in the prototype's own local frame. A rigid species, or a mesh that is not the plain
+     * lattice the deflection understands, records an empty entry and its leaves stay rigid. Called both when a phytomer first builds its prototypes and when readPlantStructureXML() rebuilds them, so that a
+     * reloaded plant droops like a grown one.
+     * \param[in] prototype_params Leaf prototype parameters the prototype was built from.
+     * \param[in] prototype_index Index of this prototype among the species' unique prototypes.
+     * \param[in] objID_leaf Object ID of the prototype leaf.
+     * \param[in] leaf_flexibility Resolved flexibility of the phytomer the prototype is being built for. Zero records an empty entry.
+     */
+    void recordLeafPrototypeRestGeometry(const LeafPrototype &prototype_params, int prototype_index, uint objID_leaf, float leaf_flexibility);
+
     // Key is the prototype function pointer; value index is the unique flower prototype
     std::map<uint (*)(helios::Context *context_ptr, uint subdivisions, bool flower_is_open), std::vector<uint>> unique_open_flower_prototype_objIDs;
     // Key is the prototype function pointer; value index is the unique flower prototype
@@ -3272,6 +3800,15 @@ protected:
     [[nodiscard]] bool detectGroundCollision(uint objID);
 
     [[nodiscard]] bool detectGroundCollision(const std::vector<uint> &objID) const;
+
+    //! Throws if the given plant does not exist or the shoot ID is out of range for it
+    /**
+     * Shared by the shoot topology accessors so that they all report a bad ID the same way.
+     * \param[in] plantID Plant to validate.
+     * \param[in] shootID Shoot to validate within that plant.
+     * \param[in] function_name Name of the calling function, used in the error message.
+     */
+    void validateShootID(uint plantID, uint shootID, const std::string &function_name) const;
 
     void setPlantLeafAngleDistribution_private(const std::vector<uint> &plantIDs, float Beta_mu_inclination, float Beta_nu_inclination, float eccentricity_azimuth, float ellipse_rotation_azimuth_degrees, bool set_elevation, bool set_azimuth) const;
 

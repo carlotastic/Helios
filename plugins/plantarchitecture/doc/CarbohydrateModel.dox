@@ -45,36 +45,37 @@ Parameters in the \ref CarbohydrateParameters structure are organized into sever
 | Category | Parameter | Default Value | Units | Description |
 | ------| ------ | ------ | ------ | ------ |
 | **Stem/Wood Properties** |||||
-|| stem_density | 540000 | g/m³ | Density of mature internode wood tissue. |
-|| stem_carbon_percentage | 0.4559 | - | Fraction of stem dry weight that is carbon. |
-|| initial_density_ratio | 0.2 | - | Ratio of initial internode carbon density to mature density (0-1). |
-|| maturity_age | 180 | days | Age at which internode reaches full mature density. |
-|| shoot_root_ratio | 4.5 | - | Ratio of shoot biomass to root biomass. Used to partition carbon for belowground growth. |
+|| stem_density | 675000 | g/m³ | Density of mature internode wood tissue. |
+|| stem_carbon_percentage | 0.457 | - | Fraction of stem dry weight that is carbon. |
+|| initial_density_ratio | 0.25 | - | Ratio of initial internode carbon density to mature density (0-1). |
+|| maturity_age | 120 | days | Age at which internode reaches full mature density. |
+|| shoot_root_ratio | 3 | - | Ratio of shoot biomass to root biomass. Used to partition carbon for belowground growth. |
 | **Leaf Properties** |||||
-|| SLA | 0.025 | m²/g | Specific leaf area (leaf area per unit dry mass). |
-|| leaf_carbon_percentage | 0.4444 | - | Fraction of leaf dry weight that is carbon. |
+|| SLA | 0.0244 | m²/g | Specific leaf area (leaf area per unit dry mass). |
+|| leaf_carbon_percentage | 0.453 | - | Fraction of leaf dry weight that is carbon. |
 | **Flower Properties** |||||
 || total_flower_cost | 8.33e-4 | mol C | Carbon cost to construct a single flower. |
 | **Fruit Properties** |||||
 || fruit_density | 525000 | g/m³ | Density of fruit tissue. |
-|| fruit_carbon_percentage | 0.4786 | - | Fraction of fruit dry weight that is carbon. |
+|| fruit_carbon_percentage | 0.475 | - | Fraction of fruit dry weight that is carbon. |
 | **Respiration Rates** |||||
-|| stem_maintenance_respiration_rate | 3.5024e-5 | mol C/mol C/day | Daily maintenance respiration rate for stem tissue as fraction of stem carbon content. |
-|| root_maintenance_respiration_rate | 3.5024e-5 | mol C/mol C/day | Daily maintenance respiration rate for root tissue as fraction of root carbon content. |
-|| growth_respiration_fraction | 0.28 | - | Fraction of total carbon used during growth that goes toward respiration rather than structure. |
+|| r_m_w_20 | 5.25164e-05 | mol C/mol C/day | Daily maintenance respiration rate for stem (woody) tissue at 20 degC, as a fraction of stem carbon content. |
+|| r_m_r_20 | 5.25164e-03 | mol C/mol C/day | Daily maintenance respiration rate for root tissue at 20 degC, as a fraction of root carbon content. Note this is 100x the stem rate. |
+|| growth_respiration_fraction | 0.211 | - | Fraction of total carbon used during growth that goes toward respiration rather than structure. |
 | **Organ Abortion Thresholds** |||||
 || carbohydrate_abortion_threshold | 0.1 | g C/g DW | Carbon concentration threshold below which fruits/flowers may be aborted. |
-|| carbohydrate_pruning_threshold | 0.01 | g C/g DW | Carbon concentration threshold below which entire shoots may be pruned. |
+|| carbohydrate_pruning_threshold | 0.025 | g C/g DW | Carbon concentration threshold below which entire shoots may be pruned. |
 || bud_death_threshold_days | 2 | days | Duration of time below abortion threshold before fruits/flowers are aborted. |
 || branch_death_threshold_days | 5 | days | Duration of time below pruning threshold before shoots are removed. |
 | **Growth Modulation Thresholds** |||||
 || carbohydrate_phyllochron_threshold | 0.05 | g C/g DW | Carbon concentration below which phyllochron (leaf emergence rate) is slowed. |
-|| carbohydrate_vegetative_break_threshold | 0.15 | g C/g DW | Carbon concentration below which vegetative bud break probability is reduced. |
-|| carbohydrate_growth_threshold | 0.1 | g C/g DW | Carbon concentration below which radial growth rate is reduced. |
+|| carbohydrate_vegetative_break_threshold | 0.05 | g C/g DW | Carbon concentration below which vegetative bud break probability is reduced. |
+|| carbohydrate_growth_threshold | 0.2 | g C/g DW | Carbon concentration below which radial growth rate is reduced. |
 | **Carbon Transfer** |||||
-|| carbohydrate_transfer_threshold | 0.05 | g C/g DW | Minimum carbon concentration required for a shoot to export carbon to other shoots. |
-|| carbon_conductance_down | 0.9 | - | Conductance coefficient for carbon transfer from child shoots to parent shoots (0-1). Typically larger than upward conductance. |
-|| carbon_conductance_up | 0.18 | - | Conductance coefficient for carbon transfer from parent shoots to child shoots (0-1). Typically smaller than downward conductance. |
+|| carbohydrate_transfer_threshold_down | 0.025 | g C/g DW | Minimum carbon concentration required for a shoot to export carbon downward to parent shoots. |
+|| carbohydrate_transfer_threshold_up | 0.04 | g C/g DW | Minimum carbon concentration required for a shoot to export carbon upward to child shoots. |
+|| carbon_conductance_down | 0.95 | - | Conductance coefficient for carbon transfer from child shoots to parent shoots (0-1). Typically larger than upward conductance. |
+|| carbon_conductance_up | 0.475 | - | Conductance coefficient for carbon transfer from parent shoots to child shoots (0-1). Typically smaller than downward conductance. |
 
 \subsection CarbParamSet Setting Parameters
 
@@ -141,6 +142,8 @@ where \f$C_{\text{conc}}\f$ is the specified concentration (mol C/m³) and \f$V_
 - The initial concentration should be high enough to support at least a few days of growth and maintenance respiration
 - Typical initial concentrations range from 1000-2000 mol C/m³, but this is species-dependent
 - If pools are not initialized, they default to zero and plants may immediately experience carbon stress
+
+\warning The pool required to keep a seedling alive can be considerably larger than the range above. The pool is sized as concentration × internode volume, so a plant built at age 0 gives its base stem a pool proportional to that stem's very small volume, while the base stem must fund the construction of its first child shoot -- which for a bean seedling is an order of magnitude larger in volume than the stem itself. Starting a bean at 1500 mol C/m³ leaves the base stem unable to pay for that first shoot, so its pool goes negative and the whole plant is pruned by the instant-death check on the first day. Raising the initial concentration resolves this. If a plant dies immediately after \ref PlantArchitecture::advanceTime() is first called, check the initial pool size before looking elsewhere.
 
 \section CarbMechanisms Model Mechanisms
 
@@ -210,17 +213,17 @@ Growth respiration represents the carbon cost of synthesizing new tissue. It is 
 
 **Leaf Construction:**
 \f[
-C_{\text{leaf}} = \frac{f_{\text{leaf,C}}}{M_C \times \text{SLA}} \times A_{\text{leaf}}
+C_{\text{leaf}} = \frac{0.1\,f_{\text{leaf,C}}}{M_C \times \text{SLA}} \times A_{\text{leaf}}
 \f]
 
 where \f$f_{\text{leaf,C}}\f$ is the leaf carbon percentage, \f$M_C\f$ is the molecular weight of carbon (12 g/mol), and \f$A_{\text{leaf}}\f$ is leaf area (m²).
 
 **Stem Construction:**
 \f[
-C_{\text{stem}} = \frac{\rho_{\text{stem}} \times f_{\text{stem,C}}}{M_C} \times \Delta V_{\text{stem}}
+C_{\text{stem}} = \frac{\rho_{\text{stem}} \times f_{\text{stem,struct,C}}}{M_C} \times \Delta V_{\text{stem}}
 \f]
 
-where \f$\rho_{\text{stem}}\f$ is stem density (g/m³), \f$f_{\text{stem,C}}\f$ is stem carbon percentage, and \f$\Delta V_{\text{stem}}\f$ is the change in stem volume (m³).
+where \f$\rho_{\text{stem}}\f$ is stem density (g/m³), \f$f_{\text{stem,struct,C}}\f$ is the stem <i>structural</i> carbon percentage (<code>stem_structural_carbon_percentage</code> = <code>stem_carbon_percentage</code> - <code>stem_carbohydrate_percentage</code> \f$\approx\f$ 0.334, not the full <code>stem_carbon_percentage</code> of 0.457), and \f$\Delta V_{\text{stem}}\f$ is the change in stem volume (m³).
 
 **Flower Construction:**
 \f[
@@ -251,7 +254,7 @@ This shoot-to-shoot transfer mechanism represents vascular transport of mobile c
 
 \subsubsection CarbTransferUp Upward Transfer (Parent to Child)
 
-Parent shoots can export carbon to their child shoots when the parent's carbon concentration exceeds the \htmlonly<span style="font-family: Courier, monospace; color: blue;">carbohydrate_transfer_threshold</span>\endhtmlonly. This transfer represents the flow of photosynthate from established shoots to developing distal branches. The amount of carbon transferred depends on:
+Parent shoots can export carbon to their child shoots when the parent's carbon concentration exceeds the \htmlonly<span style="font-family: Courier, monospace; color: blue;">carbohydrate_transfer_threshold_up</span>\endhtmlonly. This transfer represents the flow of photosynthate from established shoots to developing distal branches. The amount of carbon transferred depends on:
 
 1. The concentration gradient between parent and child
 2. The volume of the receiving child shoot
@@ -285,7 +288,7 @@ Key features of upward transfer:
 
 \subsubsection CarbTransferDown Downward Transfer (Child to Parent)
 
-Child shoots can export carbon to their parent shoot when the child's concentration exceeds both the \htmlonly<span style="font-family: Courier, monospace; color: blue;">carbohydrate_transfer_threshold</span>\endhtmlonly and the parent's concentration. This transfer represents the mobilization of carbohydrates from productive distal branches back to the main stem, which is characteristic of mature branches with high photosynthetic capacity.
+Child shoots can export carbon to their parent shoot when the child's concentration exceeds both the \htmlonly<span style="font-family: Courier, monospace; color: blue;">carbohydrate_transfer_threshold_down</span>\endhtmlonly and the parent's concentration. This transfer represents the mobilization of carbohydrates from productive distal branches back to the main stem, which is characteristic of mature branches with high photosynthetic capacity.
 
 The downward transfer is simpler than upward transfer, with each child shoot transferring independently to its parent:
 
@@ -407,7 +410,7 @@ These conditions indicate that the shoot has become a pure carbon sink with no p
 When the carbohydrate model is enabled, an optional output data field can be activated to visualize carbon concentrations:
 
 ~~~~~~
-plantarchitecture.optionalOutputData("carbohydrate_concentration");
+plantarchitecture.optionalOutputObjectData("carbohydrate_concentration");
 ~~~~~~
 
 This creates object data labeled "carbohydrate_concentration" with type \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly on internode tube objects. The value represents the carbon concentration in units of mol C/m³:

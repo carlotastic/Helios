@@ -50,7 +50,7 @@ __device__ float evaluateEnergyBalance(float T, float R, float Qother, float eps
         gM = 1.08f * gH * gS * (stomatal_sidedness / (1.08f * gH + gS * stomatal_sidedness) + (1.f - stomatal_sidedness) / (1.08f * gH + gS * (1.f - stomatal_sidedness)));
     }
 
-    float QL = gM * lambda_mol * (es - ea * surfacehumidity) / pressure;
+    float QL = gM * lambda_mol * (es * surfacehumidity - ea) / pressure;
 
     // Storage heat flux
     float storage = 0.f;
@@ -482,7 +482,7 @@ void EnergyBalanceModel::evaluateSurfaceEnergyBalance_GPU(const std::vector<uint
         if (gH[u] != 0.f && gS[u] != 0.f) {
             gM = 1.08f * gH[u] * gS[u] * (stomatal_sidedness[u] / (1.08f * gH[u] + gS[u] * stomatal_sidedness[u]) + (1.f - stomatal_sidedness[u]) / (1.08f * gH[u] + gS[u] * (1.f - stomatal_sidedness[u])));
         }
-        float QL = lambda_mol * gM * (es - ea[u]) / pressure[u];
+        float QL = lambda_mol * gM * (es * surfacehumidity[u] - ea[u]) / pressure[u];
         context->setPrimitiveData(UUID, "latent_flux", QL);
 
         for (const auto &data_label: output_prim_data) {

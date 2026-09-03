@@ -25,6 +25,8 @@ extern "C" {
 
 #include "Visualizer.h"
 
+#include "json.hpp"
+
 using namespace helios;
 
 // Reference counter for GLFW initialization
@@ -265,6 +267,270 @@ Visualizer::Visualizer(uint Wdisplay) : colormap_current(), colormap_hot(), colo
 
 Visualizer::Visualizer(uint Wdisplay, uint Hdisplay) : colormap_current(), colormap_hot(), colormap_cool(), colormap_lava(), colormap_rainbow(), colormap_parula(), colormap_gray(), colormap_lines() {
     initialize(Wdisplay, Hdisplay, 16, true, false);
+}
+
+//! Whether a token is safe to pass to helios::parse_int as a class ID
+/**
+ * helios::parse_int() catches std::invalid_argument but not std::out_of_range, so a token of many digits escapes it as a bare std::out_of_range rather than a Helios error. Nine digits cannot overflow an
+ * int, so rejecting anything longer keeps the out-of-range case out of parse_int() entirely.
+ */
+static bool isPlausibleClassIDToken(const std::string &token) {
+    if (token.empty() || token.length() > 9) {
+        return false;
+    }
+    return std::all_of(token.begin(), token.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+std::vector<Visualizer::BoundingBox> Visualizer::readBoundingBoxFile(const std::string &bbox_file) {
+
+    std::ifstream file(bbox_file);
+    if (!file.is_open()) {
+        helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Could not open bounding box annotation file '" + bbox_file + "'. Check that the file exists and that you have permission to read it.");
+    }
+
+    std::vector<BoundingBox> bounding_boxes;
+    std::string line;
+    uint line_number = 0;
+
+    while (std::getline(file, line)) {
+        line_number++;
+
+        // Every line written by RadiationModel::writeImageBoundingBoxes() is terminated with a newline, so a well-formed file always ends in a blank line.
+        if (helios::trim_whitespace(line).empty()) {
+            continue;
+        }
+
+        std::vector<std::string> fields;
+        std::istringstream line_stream(line);
+        std::string field;
+        while (line_stream >> field) {
+            fields.push_back(field);
+        }
+
+        const std::string location = "line " + std::to_string(line_number) + " of '" + bbox_file + "'";
+
+        if (fields.size() != 5) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Expected 5 whitespace-separated fields on " + location + " but found " + std::to_string(fields.size()) +
+                                 ". Each line must be of the form 'class_ID x_center y_center width height'. The line was: '" + line + "'.");
+        }
+
+        BoundingBox box;
+
+        int class_ID;
+        if (!isPlausibleClassIDToken(fields.at(0)) || !helios::parse_int(fields.at(0), class_ID)) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Could not read '" + fields.at(0) + "' on " + location + " as a class ID. The class ID must be a non-negative integer.");
+        }
+        box.class_ID = static_cast<uint>(class_ID);
+
+        // Geometry fields are read in the order they are written: center first, then size.
+        const std::vector<std::string> field_names{"x_center", "y_center", "width", "height"};
+        float values[4];
+        for (int i = 0; i < 4; i++) {
+            if (!helios::parse_float(fields.at(i + 1), values[i])) {
+                helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): Could not read '" + fields.at(i + 1) + "' on " + location + " as the " + field_names.at(i) + " of the box.");
+            }
+            if (values[i] < 0.f || values[i] > 1.f) {
+                helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): The " + field_names.at(i) + " on " + location + " was " + std::to_string(values[i]) +
+                                     ", which is outside the range [0,1]. Bounding box fields are normalized by the image dimensions.");
+            }
+        }
+
+        if (values[2] <= 0.f || values[3] <= 0.f) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxFile): The box on " + location + " has a width of " + std::to_string(values[2]) + " and a height of " + std::to_string(values[3]) +
+                                 ". Both must be greater than zero.");
+        }
+
+        box.center = helios::make_vec2(values[0], values[1]);
+        box.size = helios::make_vec2(values[2], values[3]);
+
+        bounding_boxes.push_back(box);
+    }
+
+    return bounding_boxes;
+}
+
+std::map<uint, std::string> Visualizer::readBoundingBoxClassNames(const std::string &classes_file) {
+
+    std::ifstream file(classes_file);
+    if (!file.is_open()) {
+        helios_runtime_error("ERROR (Visualizer::readBoundingBoxClassNames): Could not open class name file '" + classes_file + "'. Check that the file exists and that you have permission to read it.");
+    }
+
+    std::map<uint, std::string> class_names;
+    std::string line;
+    uint line_number = 0;
+    uint implicit_class_ID = 0;
+
+    while (std::getline(file, line)) {
+        line_number++;
+
+        const std::string trimmed_line = helios::trim_whitespace(line);
+        if (trimmed_line.empty()) {
+            continue;
+        }
+
+        // Detect the format line by line. A leading non-negative integer followed by at least one more token is the 'class_ID class_name' form written by RadiationModel::writeImageBoundingBoxes();
+        // anything else is the Ultralytics form, in which the whole line is the name and the class ID is the position of the line in the file.
+        const size_t first_token_end = trimmed_line.find_first_of(" \t");
+        const std::string first_token = trimmed_line.substr(0, first_token_end);
+
+        uint class_ID;
+        std::string class_name;
+
+        int parsed_class_ID;
+        if (first_token_end != std::string::npos && isPlausibleClassIDToken(first_token) && helios::parse_int(first_token, parsed_class_ID)) {
+            class_ID = static_cast<uint>(parsed_class_ID);
+            // The name is the remainder of the line rather than the second token, so that names may contain spaces.
+            class_name = helios::trim_whitespace(trimmed_line.substr(first_token_end));
+        } else {
+            class_ID = implicit_class_ID;
+            class_name = trimmed_line;
+        }
+        implicit_class_ID++;
+
+        if (class_names.find(class_ID) != class_names.end() && class_names.at(class_ID) != class_name) {
+            helios_runtime_error("ERROR (Visualizer::readBoundingBoxClassNames): Class ID " + std::to_string(class_ID) + " is given two different names in '" + classes_file + "': '" + class_names.at(class_ID) +
+                                 "' and '" + class_name + "' on line " + std::to_string(line_number) + ".");
+        }
+
+        class_names[class_ID] = class_name;
+    }
+
+    if (class_names.empty()) {
+        helios_runtime_error("ERROR (Visualizer::readBoundingBoxClassNames): The class name file '" + classes_file + "' contains no class names.");
+    }
+
+    return class_names;
+}
+
+std::vector<Visualizer::SegmentationMask> Visualizer::readSegmentationMaskFile(const std::string &mask_file, const std::string &image_file) {
+
+    std::ifstream file(mask_file);
+    if (!file.is_open()) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): Could not open segmentation mask file '" + mask_file + "'. Check that the file exists and that you have permission to read it.");
+    }
+
+    nlohmann::json coco_json;
+    try {
+        file >> coco_json;
+    } catch (const nlohmann::json::parse_error &e) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): Could not parse '" + mask_file + "' as JSON: " + e.what());
+    }
+
+    for (const char *field: {"images", "annotations", "categories"}) {
+        if (!coco_json.contains(field) || !coco_json[field].is_array()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The file '" + mask_file + "' does not contain a '" + field +
+                                 "' array, so it is not a COCO segmentation file. This file should be one written by RadiationModel::writeImageSegmentationMasks().");
+        }
+    }
+
+    // Select the image whose annotations are wanted. Only the file name is compared, because the path recorded in the file is relative to wherever the writer ran, which is generally not where we are now.
+    const nlohmann::json *selected_image = nullptr;
+    if (image_file.empty()) {
+        if (coco_json["images"].size() != 1) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The file '" + mask_file + "' describes " + std::to_string(coco_json["images"].size()) +
+                                 " images, so the image whose masks should be read is ambiguous. Pass the image file explicitly.");
+        }
+        selected_image = &coco_json["images"].front();
+    } else {
+        const std::string image_filename = std::filesystem::path(image_file).filename().string();
+        for (const auto &image: coco_json["images"]) {
+            if (image.contains("file_name") && image["file_name"].is_string() && std::filesystem::path(image["file_name"].get<std::string>()).filename().string() == image_filename) {
+                selected_image = &image;
+                break;
+            }
+        }
+        if (selected_image == nullptr) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): No image named '" + image_filename + "' appears in the segmentation mask file '" + mask_file +
+                                 "'. The mask file and the image do not correspond to each other.");
+        }
+    }
+
+    if (!selected_image->contains("id") || !selected_image->contains("width") || !selected_image->contains("height")) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The selected 'images' entry of '" + mask_file + "' is missing one of the required 'id', 'width' or 'height' fields.");
+    }
+    const int selected_image_id = (*selected_image)["id"].get<int>();
+    const vec2 image_size = make_vec2((*selected_image)["width"].get<float>(), (*selected_image)["height"].get<float>());
+    if (image_size.x <= 0 || image_size.y <= 0) {
+        helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The selected 'images' entry of '" + mask_file + "' has a width of " + std::to_string(image_size.x) + " and a height of " +
+                             std::to_string(image_size.y) + ". Both must be positive.");
+    }
+
+    std::map<uint, std::string> category_names;
+    for (const auto &category: coco_json["categories"]) {
+        if (category.contains("id") && category.contains("name") && category["name"].is_string()) {
+            category_names[category["id"].get<uint>()] = category["name"].get<std::string>();
+        }
+    }
+
+    std::vector<SegmentationMask> masks;
+
+    for (const auto &annotation: coco_json["annotations"]) {
+
+        if (!annotation.contains("image_id") || annotation["image_id"].get<int>() != selected_image_id) {
+            continue;
+        }
+
+        const std::string location = "annotation " + (annotation.contains("id") ? std::to_string(annotation["id"].get<int>()) : std::string("(no id)")) + " of '" + mask_file + "'";
+
+        if (!annotation.contains("category_id")) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): " + location + " has no 'category_id' field.");
+        }
+
+        SegmentationMask mask;
+        mask.class_ID = annotation["category_id"].get<uint>();
+        mask.image_size = image_size;
+        if (category_names.find(mask.class_ID) != category_names.end()) {
+            mask.class_name = category_names.at(mask.class_ID);
+        } else if (!category_names.empty()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): " + location + " has class ID " + std::to_string(mask.class_ID) +
+                                 ", which is not defined in the 'categories' array of the same file. The annotations and the categories do not correspond to each other.");
+        }
+
+        if (!annotation.contains("segmentation")) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): " + location + " has no 'segmentation' field.");
+        }
+        const auto &segmentation = annotation["segmentation"];
+
+        // The run-length encoded form of a COCO segmentation is an object holding "counts", rather than an array of polygons.
+        if (segmentation.is_object()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The 'segmentation' field of " + location +
+                                 " is run-length encoded, which is not supported. Only polygon segmentations are supported, which is what RadiationModel::writeImageSegmentationMasks() writes.");
+        }
+        if (!segmentation.is_array()) {
+            helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The 'segmentation' field of " + location + " is not an array of polygons.");
+        }
+
+        for (const auto &polygon: segmentation) {
+            if (!polygon.is_array()) {
+                helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): The 'segmentation' field of " + location +
+                                     " is a flat list of coordinates rather than a list of polygons. Each polygon must be given as its own array.");
+            }
+            if (polygon.size() % 2 != 0) {
+                helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): A polygon of " + location + " has " + std::to_string(polygon.size()) +
+                                     " coordinates, which is an odd number. Coordinates must come in x,y pairs.");
+            }
+            if (polygon.size() < 6) {
+                helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): A polygon of " + location + " has " + std::to_string(polygon.size() / 2) + " vertices. A polygon must have at least 3.");
+            }
+
+            std::vector<vec2> vertices;
+            vertices.reserve(polygon.size() / 2);
+            for (size_t i = 0; i < polygon.size(); i += 2) {
+                if (!polygon.at(i).is_number() || !polygon.at(i + 1).is_number()) {
+                    helios_runtime_error("ERROR (Visualizer::readSegmentationMaskFile): A polygon of " + location + " contains a coordinate that is not a number.");
+                }
+                vertices.push_back(make_vec2(polygon.at(i).get<float>(), polygon.at(i + 1).get<float>()));
+            }
+            mask.polygons.push_back(std::move(vertices));
+        }
+
+        if (!mask.polygons.empty()) {
+            masks.push_back(std::move(mask));
+        }
+    }
+
+    return masks;
 }
 
 Visualizer::Visualizer(uint Wdisplay, uint Hdisplay, int aliasing_samples) : colormap_current(), colormap_hot(), colormap_cool(), colormap_lava(), colormap_rainbow(), colormap_parula(), colormap_gray(), colormap_lines() {
@@ -670,6 +936,51 @@ void Visualizer::setupOffscreenFramebuffer() {
         helios_runtime_error(error_message);
     }
 
+    // Multisampled attachments, which headless rendering draws into and which are blit-resolved into
+    // the single-sampled color texture above before readback. Without this, headless renders are
+    // fully aliased on every edge while windowed renders are not, because the window's own default
+    // framebuffer is multisampled and this one is not.
+    if (antialiasing_sample_count > 1) {
+
+        // A driver may support fewer samples than requested; asking for more than GL_MAX_SAMPLES is
+        // an error rather than a silent clamp, so the request is clamped here.
+        GLint max_samples = 0;
+        glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+        const GLsizei samples = static_cast<GLsizei>(std::min(antialiasing_sample_count, std::max(1, int(max_samples))));
+
+        if (samples > 1) {
+
+            glGenFramebuffers(1, &offscreenMultisampleFramebufferID);
+            glBindFramebuffer(GL_FRAMEBUFFER, offscreenMultisampleFramebufferID);
+
+            glGenRenderbuffers(1, &offscreenMultisampleColorBuffer);
+            glBindRenderbuffer(GL_RENDERBUFFER, offscreenMultisampleColorBuffer);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, static_cast<GLsizei>(Wframebuffer), static_cast<GLsizei>(Hframebuffer));
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, offscreenMultisampleColorBuffer);
+
+            glGenRenderbuffers(1, &offscreenMultisampleDepthBuffer);
+            glBindRenderbuffer(GL_RENDERBUFFER, offscreenMultisampleDepthBuffer);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, static_cast<GLsizei>(Wframebuffer), static_cast<GLsizei>(Hframebuffer));
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, offscreenMultisampleDepthBuffer);
+
+            glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+            // Multisampled attachments are an optimization, not a requirement: if the driver cannot
+            // provide them, fall back to the single-sampled framebuffer rather than failing the
+            // render outright. The image is aliased, which is exactly the previous behavior.
+            const GLenum multisample_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (multisample_status != GL_FRAMEBUFFER_COMPLETE || glGetError() != GL_NO_ERROR) {
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glDeleteRenderbuffers(1, &offscreenMultisampleColorBuffer);
+                glDeleteRenderbuffers(1, &offscreenMultisampleDepthBuffer);
+                glDeleteFramebuffers(1, &offscreenMultisampleFramebufferID);
+                offscreenMultisampleColorBuffer = 0;
+                offscreenMultisampleDepthBuffer = 0;
+                offscreenMultisampleFramebufferID = 0;
+            }
+        }
+    }
+
     // Restore default framebuffer
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -678,6 +989,24 @@ void Visualizer::setupOffscreenFramebuffer() {
         cleanupOffscreenFramebuffer();
         helios_runtime_error("ERROR (Visualizer::setupOffscreenFramebuffer): OpenGL errors occurred during offscreen framebuffer setup completion.");
     }
+}
+
+bool Visualizer::isHeadlessMultisamplingActive() const {
+    return offscreenMultisampleFramebufferID != 0;
+}
+
+void Visualizer::resolveOffscreenMultisampleFramebuffer() const {
+
+    if (offscreenMultisampleFramebufferID == 0 || offscreenFramebufferID == 0) {
+        return;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, offscreenMultisampleFramebufferID);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, offscreenFramebufferID);
+    glBlitFramebuffer(0, 0, static_cast<GLint>(Wframebuffer), static_cast<GLint>(Hframebuffer), 0, 0, static_cast<GLint>(Wframebuffer), static_cast<GLint>(Hframebuffer), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    // Leave the single-sampled framebuffer bound: callers read pixels from it immediately after.
+    glBindFramebuffer(GL_FRAMEBUFFER, offscreenFramebufferID);
 }
 
 void Visualizer::cleanupOffscreenFramebuffer() {
@@ -692,6 +1021,18 @@ void Visualizer::cleanupOffscreenFramebuffer() {
             glDeleteTextures(1, &offscreenColorTexture);
             offscreenColorTexture = 0;
         }
+        if (offscreenMultisampleFramebufferID != 0) {
+            glDeleteFramebuffers(1, &offscreenMultisampleFramebufferID);
+            offscreenMultisampleFramebufferID = 0;
+        }
+        if (offscreenMultisampleColorBuffer != 0) {
+            glDeleteRenderbuffers(1, &offscreenMultisampleColorBuffer);
+            offscreenMultisampleColorBuffer = 0;
+        }
+        if (offscreenMultisampleDepthBuffer != 0) {
+            glDeleteRenderbuffers(1, &offscreenMultisampleDepthBuffer);
+            offscreenMultisampleDepthBuffer = 0;
+        }
         if (offscreenDepthTexture != 0) {
             glDeleteTextures(1, &offscreenDepthTexture);
             offscreenDepthTexture = 0;
@@ -700,6 +1041,11 @@ void Visualizer::cleanupOffscreenFramebuffer() {
 }
 
 std::vector<helios::RGBcolor> Visualizer::readOffscreenPixels() const {
+
+    // Headless rendering draws into a multisampled framebuffer; resolve it into the single-sampled
+    // color texture before reading, or the read returns the unrendered single-sampled attachment.
+    resolveOffscreenMultisampleFramebuffer();
+
     // Read pixels from the offscreen framebuffer for printWindow functionality
 
     if (offscreenFramebufferID == 0) {
@@ -781,6 +1127,11 @@ std::vector<helios::RGBcolor> Visualizer::readOffscreenPixels() const {
 }
 
 std::vector<helios::RGBAcolor> Visualizer::readOffscreenPixelsRGBA(bool read_alpha) const {
+
+    // Headless rendering draws into a multisampled framebuffer; resolve it into the single-sampled
+    // color texture before reading, or the read returns the unrendered single-sampled attachment.
+    resolveOffscreenMultisampleFramebuffer();
+
     // Read pixels from the offscreen framebuffer for PNG output with optional transparency
 
     if (offscreenFramebufferID == 0) {
@@ -923,6 +1274,7 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
 
     texArray = 0;
     texture_array_layers = 0;
+    texture_array_layer_size = make_uint2(0, 0);
     textures_dirty = false;
 
     // Initialize offscreen rendering variables
@@ -961,6 +1313,7 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
 
     colorbar_min = 0.f;
     colorbar_max = 0.f;
+    colorbar_range_set = false;
     colorbar_integer_data = false;
 
     colorbar_title = "";
@@ -992,6 +1345,16 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
     // GLFW should be initialized once and kept alive to avoid macOS-specific issues
     // with rapid init/terminate cycles (pixel format caching, autorelease pool issues)
     if (glfw_reference_count == 0) {
+#ifdef __APPLE__
+        // GLFW's Cocoa backend changes the process working directory to the host bundle's
+        // Contents/Resources during glfwInit() when this hint is left at its default of GLFW_TRUE.
+        // It only does so when the host process has an application bundle, so a bare Helios binary
+        // is unaffected, but anything .app-packaged -- notably a macOS framework-build Python
+        // interpreter, whose real executable lives inside Python.app -- would have the working
+        // directory moved out from under it. Helios resolves assets relative to the working
+        // directory, so it must be left exactly as the caller set it.
+        glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
+#endif
         if (!glfwInit()) {
             helios_runtime_error("ERROR (Visualizer::initialize): Failed to initialize GLFW");
         }
@@ -1106,9 +1469,18 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
     glDepthFunc(GL_LEQUAL); // Accept fragment if it closer to or equal to the camera than the former one (required for sky rendering)
     // glEnable(GL_DEPTH_CLAMP);
 
+    antialiasing_sample_count = aliasing_samples;
+
     if (aliasing_samples <= 0) {
         glDisable(GL_MULTISAMPLE);
         glDisable(GL_MULTISAMPLE_ARB);
+    } else {
+        // Must be enabled explicitly. In windowed mode the GLFW window's default framebuffer is
+        // multisampled and the driver rasterizes accordingly, but the headless offscreen framebuffer
+        // is one this code creates itself, and without GL_MULTISAMPLE enabled the driver resolves
+        // every sample of a pixel to the same value -- the multisampled attachments allocate their
+        // samples correctly and the resolved image still comes out with hard, aliased edges.
+        glEnable(GL_MULTISAMPLE);
     }
 
     if (aliasing_samples <= 1) {
@@ -1159,6 +1531,7 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
         face_index_buffer.resize(Ntypes);
         vertex_buffer.resize(Ntypes);
         uv_buffer.resize(Ntypes);
+        vertex_normal_buffer.resize(Ntypes);
 
         // Generate per-vertex buffers with immediate error checking
         glGenBuffers((GLsizei) face_index_buffer.size(), face_index_buffer.data());
@@ -1179,6 +1552,12 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
             helios_runtime_error("ERROR (Visualizer::initialize): Failed to generate UV buffers. OpenGL error: " + std::to_string(error));
         }
 
+        glGenBuffers((GLsizei) vertex_normal_buffer.size(), vertex_normal_buffer.data());
+        error = glGetError();
+        if (error != GL_NO_ERROR) {
+            helios_runtime_error("ERROR (Visualizer::initialize): Failed to generate vertex normal buffers. OpenGL error: " + std::to_string(error));
+        }
+
         // per-primitive data with error checking after each allocation
         color_buffer.resize(Ntypes);
         color_texture_object.resize(Ntypes);
@@ -1186,6 +1565,8 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
         normal_texture_object.resize(Ntypes);
         texture_flag_buffer.resize(Ntypes);
         texture_flag_texture_object.resize(Ntypes);
+        material_index_buffer.resize(Ntypes);
+        material_index_texture_object.resize(Ntypes);
         texture_ID_buffer.resize(Ntypes);
         texture_ID_texture_object.resize(Ntypes);
         coordinate_flag_buffer.resize(Ntypes);
@@ -1230,6 +1611,18 @@ void Visualizer::initialize(uint window_width_pixels, uint window_height_pixels,
         error = glGetError();
         if (error != GL_NO_ERROR) {
             helios_runtime_error("ERROR (Visualizer::initialize): Failed to generate texture flag texture objects. OpenGL error: " + std::to_string(error));
+        }
+
+        glGenBuffers((GLsizei) material_index_buffer.size(), material_index_buffer.data());
+        error = glGetError();
+        if (error != GL_NO_ERROR) {
+            helios_runtime_error("ERROR (Visualizer::initialize): Failed to generate material index buffers. OpenGL error: " + std::to_string(error));
+        }
+
+        glGenTextures((GLsizei) material_index_texture_object.size(), material_index_texture_object.data());
+        error = glGetError();
+        if (error != GL_NO_ERROR) {
+            helios_runtime_error("ERROR (Visualizer::initialize): Failed to generate material index texture objects. OpenGL error: " + std::to_string(error));
         }
 
         glGenBuffers((GLsizei) texture_ID_buffer.size(), texture_ID_buffer.data());
@@ -1465,6 +1858,17 @@ Visualizer::~Visualizer() {
         glDeleteBuffers((GLsizei) face_index_buffer.size(), face_index_buffer.data());
         glDeleteBuffers((GLsizei) vertex_buffer.size(), vertex_buffer.data());
         glDeleteBuffers((GLsizei) uv_buffer.size(), uv_buffer.data());
+        glDeleteBuffers((GLsizei) vertex_normal_buffer.size(), vertex_normal_buffer.data());
+        glDeleteBuffers((GLsizei) material_index_buffer.size(), material_index_buffer.data());
+        glDeleteTextures((GLsizei) material_index_texture_object.size(), material_index_texture_object.data());
+        if (phong_material_table_buffer != 0) {
+            glDeleteBuffers(1, &phong_material_table_buffer);
+            phong_material_table_buffer = 0;
+        }
+        if (phong_material_table_texture != 0) {
+            glDeleteTextures(1, &phong_material_table_texture);
+            phong_material_table_texture = 0;
+        }
 
         glDeleteBuffers((GLsizei) color_buffer.size(), color_buffer.data());
         glDeleteTextures((GLsizei) color_texture_object.size(), color_texture_object.data());
@@ -1484,6 +1888,14 @@ Visualizer::~Visualizer() {
         // Clean up texture array and UV rescaling resources
         if (texArray != 0) {
             glDeleteTextures(1, &texArray);
+        }
+        if (glyph_sampler != 0) {
+            glDeleteSamplers(1, &glyph_sampler);
+            glyph_sampler = 0;
+        }
+        if (image_sampler != 0) {
+            glDeleteSamplers(1, &image_sampler);
+            image_sampler = 0;
         }
         glDeleteBuffers(1, &uv_rescale_buffer);
         glDeleteTextures(1, &uv_rescale_texture_object);
@@ -1559,6 +1971,164 @@ void Visualizer::setLightIntensityFactor(float lightintensityfactor) {
     lightintensity = lightintensityfactor;
 }
 
+void Visualizer::enableExactColorMode() {
+    colorboost = 1.f;
+    // Tone mapping and sRGB encoding are non-linear transformations of the color channels, so they
+    // would corrupt any data (e.g. object ID codes) carried through the framebuffer.
+    linear_pipeline_enabled = false;
+}
+
+void Visualizer::disableExactColorMode() {
+    colorboost = 1.5f;
+    // enableExactColorMode() turns the linear pipeline off; restore it so that the two calls are a
+    // true round trip rather than silently leaving the renderer in a non-default state.
+    linear_pipeline_enabled = true;
+}
+
+void Visualizer::enableLinearPipeline() {
+    linear_pipeline_enabled = true;
+}
+
+void Visualizer::disableLinearPipeline() {
+    linear_pipeline_enabled = false;
+}
+
+void Visualizer::setExposure(float a_exposure) {
+    if (a_exposure <= 0.f) {
+        helios_runtime_error("ERROR (Visualizer::setExposure): Exposure must be positive, but a value of " + std::to_string(a_exposure) +
+                             " was given. Exposure is a linear multiplier applied to radiance before tone mapping; use a value greater than 1 to brighten the image and less than 1 to darken it.");
+    }
+    exposure = a_exposure;
+}
+
+float Visualizer::getExposure() const {
+    return exposure;
+}
+
+bool Visualizer::isLinearPipelineEnabled() const {
+    return linear_pipeline_enabled;
+}
+
+void Visualizer::setPhongMaterial(const PhongMaterial &material) {
+    if (material.ambient < 0.f || material.diffuse < 0.f || material.specular < 0.f) {
+        helios_runtime_error("ERROR (Visualizer::setPhongMaterial): Reflectance weights must be non-negative, but ambient=" + std::to_string(material.ambient) + ", diffuse=" + std::to_string(material.diffuse) + ", specular=" + std::to_string(material.specular) +
+                             " was given. A negative weight would subtract light from the scene.");
+    }
+    if (material.shininess <= 0.f) {
+        helios_runtime_error("ERROR (Visualizer::setPhongMaterial): Specular exponent (shininess) must be positive, but a value of " + std::to_string(material.shininess) +
+                             " was given. Larger values give a tighter highlight; typical values range from 4 for a matte sheen to 128 for a near-mirror finish. To remove the highlight entirely, set specular to zero instead.");
+    }
+
+    phong_material = material;
+}
+
+Visualizer::PhongMaterial Visualizer::getPhongMaterial() const {
+    return phong_material;
+}
+
+void Visualizer::setAmbientColors(const helios::RGBcolor &sky_color, const helios::RGBcolor &ground_color) {
+    // No range validation is needed here: helios::RGBcolor clamps its components to [0,1] in its
+    // own constructor, so an out-of-range ambient color cannot reach this function.
+    ambient_sky_color = sky_color;
+    ambient_ground_color = ground_color;
+}
+
+helios::RGBcolor Visualizer::getAmbientSkyColor() const {
+    return ambient_sky_color;
+}
+
+helios::RGBcolor Visualizer::getAmbientGroundColor() const {
+    return ambient_ground_color;
+}
+
+void Visualizer::enableSmoothShading() {
+    smooth_shading_enabled = true;
+}
+
+void Visualizer::disableSmoothShading() {
+    smooth_shading_enabled = false;
+}
+
+bool Visualizer::isSmoothShadingEnabled() const {
+    return smooth_shading_enabled;
+}
+
+std::unordered_map<uint, int> Visualizer::buildPhongMaterialTable(const helios::Context *context, const std::set<uint> &referenced_material_IDs) {
+
+    // Resolving Phong parameters is deliberately done here, once per distinct material, rather than
+    // inside the per-primitive geometry loop. Context material data is keyed by std::string inside a
+    // std::map, so each lookup is a tree walk with string comparisons; doing four of those per
+    // primitive would add tens of millions of string comparisons to a multi-million-primitive scene
+    // rebuild. Materials number in the tens, so the same work here is negligible.
+
+    std::unordered_map<uint, int> material_ID_to_index;
+    std::vector<GLfloat> table;
+
+    for (uint materialID: referenced_material_IDs) {
+
+        const helios::Material &material = context->getMaterial(materialID);
+
+        // A material that specifies none of the four parameters is left out of the table entirely,
+        // so its primitives keep an index of -1 and fall back to the global Phong material.
+        const bool has_any = material.doesMaterialDataExist("phong_ambient") || material.doesMaterialDataExist("phong_diffuse") || material.doesMaterialDataExist("phong_specular") || material.doesMaterialDataExist("phong_shininess");
+        if (!has_any) {
+            continue;
+        }
+
+        // Parameters the material does not specify individually inherit the global value, so a
+        // material can override only the specular lobe without having to restate the rest.
+        PhongMaterial resolved = phong_material;
+        if (material.doesMaterialDataExist("phong_ambient")) {
+            material.getMaterialData("phong_ambient", resolved.ambient);
+        }
+        if (material.doesMaterialDataExist("phong_diffuse")) {
+            material.getMaterialData("phong_diffuse", resolved.diffuse);
+        }
+        if (material.doesMaterialDataExist("phong_specular")) {
+            material.getMaterialData("phong_specular", resolved.specular);
+        }
+        if (material.doesMaterialDataExist("phong_shininess")) {
+            material.getMaterialData("phong_shininess", resolved.shininess);
+        }
+
+        if (resolved.ambient < 0.f || resolved.diffuse < 0.f || resolved.specular < 0.f) {
+            helios_runtime_error("ERROR (Visualizer::buildPhongMaterialTable): Material '" + material.label + "' specifies a negative Phong reflectance weight (ambient=" + std::to_string(resolved.ambient) + ", diffuse=" + std::to_string(resolved.diffuse) +
+                                 ", specular=" + std::to_string(resolved.specular) + "). A negative weight would subtract light from the scene.");
+        }
+        if (resolved.shininess <= 0.f) {
+            helios_runtime_error("ERROR (Visualizer::buildPhongMaterialTable): Material '" + material.label + "' specifies a non-positive Phong shininess of " + std::to_string(resolved.shininess) +
+                                 ". Larger values give a tighter highlight; typical values range from 4 for a matte sheen to 128 for a near-mirror finish. To remove the highlight entirely, set phong_specular to zero instead.");
+        }
+
+        material_ID_to_index[materialID] = static_cast<int>(table.size() / 4);
+        table.push_back(resolved.ambient);
+        table.push_back(resolved.diffuse);
+        table.push_back(resolved.specular);
+        table.push_back(resolved.shininess);
+    }
+
+    phong_material_table_size = static_cast<GLint>(table.size() / 4);
+
+    // The table is tiny (four floats per material), so it is uploaded whole rather than diffed.
+    if (phong_material_table_buffer == 0) {
+        glGenBuffers(1, &phong_material_table_buffer);
+        glGenTextures(1, &phong_material_table_texture);
+    }
+    glBindBuffer(GL_TEXTURE_BUFFER, phong_material_table_buffer);
+    // A zero-size buffer is not a valid texture buffer source, so an empty table is padded to one
+    // unused entry. No primitive indexes into it: they all carry -1 and use the global material.
+    if (table.empty()) {
+        table.assign(4, 0.f);
+    }
+    glBufferData(GL_TEXTURE_BUFFER, GLsizeiptr(table.size() * sizeof(GLfloat)), table.data(), GL_STATIC_DRAW);
+    glBindTexture(GL_TEXTURE_BUFFER, phong_material_table_texture);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, phong_material_table_buffer);
+    glBindBuffer(GL_TEXTURE_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
+
+    return material_ID_to_index;
+}
+
 void Visualizer::removeBackgroundRectangle() {
     // Remove background rectangle if it exists
     if (background_rectangle_ID != 0) {
@@ -1611,7 +2181,8 @@ void Visualizer::setBackgroundGradient() {
     };
 
     // Add the textured rectangle as background
-    background_rectangle_ID = addRectangleByVertices(vertices, "plugins/visualizer/textures/gradient_background.jpg", uvs, COORDINATES_WINDOW_NORMALIZED);
+    std::string texture_path = resolvePluginAsset("visualizer", "textures/gradient_background.jpg").string();
+    background_rectangle_ID = addRectangleByVertices(vertices, texture_path.c_str(), uvs, COORDINATES_WINDOW_NORMALIZED);
 }
 
 void Visualizer::setBackgroundTransparent() {
@@ -1645,7 +2216,8 @@ void Visualizer::setBackgroundTransparent() {
     }
 
     // Add the textured rectangle as background
-    background_rectangle_ID = addRectangleByVertices(vertices, "plugins/visualizer/textures/transparent.jpg", uvs, COORDINATES_WINDOW_NORMALIZED);
+    std::string texture_path = resolvePluginAsset("visualizer", "textures/transparent.jpg").string();
+    background_rectangle_ID = addRectangleByVertices(vertices, texture_path.c_str(), uvs, COORDINATES_WINDOW_NORMALIZED);
 }
 
 void Visualizer::setBackgroundImage(const char *texture_file) {
@@ -1997,12 +2569,17 @@ void Visualizer::setColorbarSize(vec2 size) {
 }
 
 void Visualizer::setColorbarRange(float cmin, float cmax) {
-    if (message_flag && cmin > cmax) {
-        std::cerr << "WARNING (Visualizer::setColorbarRange): Maximum colorbar value must be greater than minimum value...Ignoring command." << std::endl;
+    // The validation must not depend on message_flag: gating it there meant an inverted range was
+    // silently accepted whenever messages were disabled, and then fed into tick generation.
+    if (cmin > cmax) {
+        if (message_flag) {
+            std::cerr << "WARNING (Visualizer::setColorbarRange): Maximum colorbar value must be greater than minimum value...Ignoring command." << std::endl;
+        }
         return;
     }
     colorbar_min = cmin;
     colorbar_max = cmax;
+    colorbar_range_set = true;
 }
 
 void Visualizer::setColorbarTicks(const std::vector<float> &ticks) {
@@ -2012,22 +2589,26 @@ void Visualizer::setColorbarTicks(const std::vector<float> &ticks) {
     }
 
     // Check that ticks are monotonically increasing
-    for (int i = 1; i < ticks.size(); i++) {
+    for (size_t i = 1; i < ticks.size(); i++) {
         if (ticks.at(i) <= ticks.at(i - 1)) {
             helios_runtime_error("ERROR (Visualizer::setColorbarTicks): Colorbar ticks must be monotonically increasing.");
         }
     }
 
-    // Check that ticks are within the range of colorbar values
-    for (int i = ticks.size() - 1; i >= 0; i--) {
-        if (ticks.at(i) < colorbar_min) {
-            colorbar_min = ticks.at(i);
-        }
-    }
-    for (float tick: ticks) {
-        if (tick > colorbar_max) {
-            colorbar_max = tick;
-        }
+    // Expand the colorbar range to encompass any ticks that fall outside it, as documented. This
+    // also moves the colormap limits, so it changes the colors the colorbar shows and not just its
+    // labels - warn rather than doing it silently. Call setColorbarRange() afterwards to restore an
+    // explicit range.
+    const float lowest_tick = *std::min_element(ticks.begin(), ticks.end());
+    const float highest_tick = *std::max_element(ticks.begin(), ticks.end());
+    const bool range_expanded = (lowest_tick < colorbar_min) || (highest_tick > colorbar_max);
+
+    colorbar_min = std::min(colorbar_min, lowest_tick);
+    colorbar_max = std::max(colorbar_max, highest_tick);
+    colorbar_range_set = true;
+
+    if (range_expanded && message_flag) {
+        std::cerr << "WARNING (Visualizer::setColorbarTicks): One or more tick values fall outside the colorbar range. The range was expanded to [" << colorbar_min << ", " << colorbar_max << "] to fit them, which also changes the colors shown. Call setColorbarRange() after setColorbarTicks() to keep an explicit range." << std::endl;
     }
 
     colorbar_ticks = ticks;
@@ -2097,20 +2678,28 @@ std::string Visualizer::formatTickLabel(double value, double spacing, bool isInt
     // Use scientific notation for large values (>=10000) or very small values
     bool useScientific = (std::fabs(value) >= 1e4 || (std::fabs(value) < 1e-3 && value != 0.0));
 
+    // Decimal places needed to resolve the tick spacing. A non-finite or non-positive spacing has
+    // no logarithm, so fall back to whatever the value itself needs.
+    int decimalPlaces = 0;
+    if (std::isfinite(spacing) && spacing > 0.0) {
+        decimalPlaces = std::max(0, static_cast<int>(-std::floor(std::log10(std::fabs(spacing)))));
+        decimalPlaces = std::min(decimalPlaces, 6);
+    }
+
     if (useScientific) {
-        // Use scientific notation
-        int decimalPlaces = std::max(0, static_cast<int>(-std::floor(std::log10(std::fabs(spacing)))));
-        decimalPlaces = std::min(decimalPlaces, 6); // Cap at 6 decimal places
         oss << std::scientific << std::setprecision(decimalPlaces) << value;
     } else {
-        // Use fixed-point notation
-        // Calculate decimal places based on spacing
-        int decimalPlaces;
-        if (spacing >= 1.0) {
-            decimalPlaces = 0;
-        } else {
-            decimalPlaces = std::max(0, static_cast<int>(-std::floor(std::log10(spacing))));
-            decimalPlaces = std::min(decimalPlaces, 6); // Cap at 6 decimal places
+        // The spacing sets the baseline, but the value itself may carry more precision than that:
+        // a tick of 2.5 with spacing 1.0 would otherwise print as "2", stating a different number
+        // than the tick actually represents. Add places until the label round-trips, so labels are
+        // rounded but never wrong.
+        constexpr int max_decimal_places = 6;
+        while (decimalPlaces < max_decimal_places) {
+            const double rounding_scale = std::pow(10.0, decimalPlaces);
+            if (std::fabs(std::round(value * rounding_scale) / rounding_scale - value) < 1e-9 * std::max(1.0, std::fabs(value))) {
+                break;
+            }
+            decimalPlaces++;
         }
 
         oss << std::fixed << std::setprecision(decimalPlaces) << value;
@@ -2181,6 +2770,146 @@ std::vector<float> Visualizer::generateNiceTicks(float dataMin, float dataMax, b
     }
 
     return ticks;
+}
+
+//! Step a "nice" spacing (1, 2, or 5 times a power of ten) down to the next finer one
+/**
+ * The progression is 5 -> 2 -> 1 -> 0.5, each step reducing the spacing by a factor of at least
+ * two. Returns 0 for input that is not a usable positive spacing.
+ */
+static double nextFinerNiceSpacing(double spacing) {
+    if (!(spacing > 0.0) || !std::isfinite(spacing)) {
+        return 0.0;
+    }
+
+    // Decompose into mantissa (nominally 1, 2 or 5) and decade. The small offset keeps values that
+    // are exactly a power of ten from landing on the wrong side of the floor.
+    double decade = std::pow(10.0, std::floor(std::log10(spacing) + 1e-12));
+    long mantissa = std::lround(spacing / decade);
+    if (mantissa >= 10) { // guard against a log10 result that rounded the wrong way
+        mantissa = 1;
+        decade *= 10.0;
+    }
+
+    if (mantissa > 2) { // 5 -> 2
+        return 2.0 * decade;
+    } else if (mantissa > 1) { // 2 -> 1
+        return 1.0 * decade;
+    }
+    return 0.5 * decade; // 1 -> 0.5
+}
+
+std::vector<float> Visualizer::generateColorbarTicks(float cmin, float cmax, bool isIntegerData, int targetTicks, double *tick_spacing_out) {
+    // Bounds the refinement loop below. One step is always enough in practice (see the comment on
+    // the loop); this only exists so that pathological input cannot spin.
+    constexpr int max_refinement_iterations = 60;
+
+    auto emit = [tick_spacing_out](std::vector<float> ticks, double spacing) {
+        if (tick_spacing_out != nullptr) {
+            *tick_spacing_out = spacing;
+        }
+        return ticks;
+    };
+
+    // Degenerate limits. This is called from the rendering path on every colorbar update, so it
+    // degrades to a single tick rather than throwing, and never returns an empty vector - that
+    // would leave the colorbar with no labels at all. A positive spacing is always reported
+    // because formatTickLabel() takes its logarithm.
+    if (!std::isfinite(cmin) || !std::isfinite(cmax)) {
+        return emit({std::isfinite(cmin) ? cmin : 0.f}, 1.0);
+    }
+
+    const double range_min = cmin;
+    const double range_max = cmax;
+    const double range_width = range_max - range_min;
+    if (!(range_width > 1e-10)) { // covers cmax <= cmin as well as a vanishingly narrow range
+        return emit({cmin}, 1.0);
+    }
+
+    // Matches the tolerance addColorbarByCenter() uses to decide whether a tick sits on the bar.
+    const double range_epsilon = 1e-4 * std::max(std::fabs(range_width), 1.0);
+    const int tick_target = std::max(2, targetTicks);
+
+    double spacing = niceNumber(range_width / double(tick_target - 1), true);
+    if (!(spacing > 0.0) || !std::isfinite(spacing)) {
+        spacing = range_width / double(tick_target - 1);
+    }
+    if (isIntegerData) {
+        spacing = std::max(1.0, std::round(spacing));
+    }
+
+    // Walk to finer nice spacings until at least two multiples fall inside the range.
+    //
+    // The number of multiples of `spacing` within a range of width w is either floor(w/spacing) or
+    // floor(w/spacing)+1, so two or more are guaranteed once spacing <= w/2. niceNumber() can
+    // round its argument up by as much as ~1.43x, which puts the initial spacing as high as ~0.75w
+    // - inside the band where only a single multiple may land, and precisely the case that made an
+    // auto-ranged colorbar show one tick. Each refinement step divides the spacing by at least
+    // two, taking it below w/2 and making the count unconditional, so this loop runs at most once
+    // for any well-formed range.
+    std::vector<float> ticks;
+    for (int iteration = 0; iteration < max_refinement_iterations; iteration++) {
+        const double first_multiple = std::ceil((range_min - range_epsilon) / spacing);
+        const double last_multiple = std::floor((range_max + range_epsilon) / spacing);
+
+        // The count guard keeps a denormal spacing from producing an unbounded loop below.
+        if (last_multiple >= first_multiple && (last_multiple - first_multiple) < 1e6) {
+            ticks.clear();
+            ticks.reserve(size_t(last_multiple - first_multiple) + 1);
+            for (double multiple = first_multiple; multiple <= last_multiple; multiple += 1.0) {
+                // Accumulate in double and narrow once: at large magnitudes two adjacent multiples
+                // can round to the same float, which would break strict monotonicity.
+                const float tick_value = float(multiple * spacing);
+                if (ticks.empty() || tick_value > ticks.back()) {
+                    ticks.push_back(tick_value);
+                }
+            }
+            if (ticks.size() >= 2) {
+                return emit(ticks, spacing);
+            }
+        }
+
+        if (isIntegerData && spacing <= 1.0) {
+            break; // integer ticks cannot be spaced more finely than 1
+        }
+        double finer_spacing = nextFinerNiceSpacing(spacing);
+        if (isIntegerData) {
+            finer_spacing = std::max(1.0, std::floor(finer_spacing));
+        }
+        if (!(finer_spacing > 0.0) || !(finer_spacing < spacing) || !std::isfinite(finer_spacing)) {
+            break; // must strictly decrease, otherwise this would not terminate
+        }
+        spacing = finer_spacing;
+    }
+
+    // No nice grid fits inside the range.
+    if (isIntegerData) {
+        // The range spans less than two integers. Returning the one integer it contains (or the
+        // nearest one) is the honest answer - fractional ticks would contradict integer data.
+        const double lowest_integer = std::ceil(range_min - range_epsilon);
+        const double highest_integer = std::floor(range_max + range_epsilon);
+        if (highest_integer >= lowest_integer) {
+            return emit({float(lowest_integer)}, 1.0);
+        }
+        return emit({float(std::round(0.5 * (range_min + range_max)))}, 1.0);
+    }
+
+    // Fall back to the range endpoints. The reported spacing describes the gap between the values
+    // actually returned, so labels are formatted with enough precision to tell them apart.
+    const float low_tick = cmin;
+    const float high_tick = cmax;
+    if (high_tick > low_tick) {
+        if (tick_target >= 3) {
+            const float mid_tick = float(0.5 * (range_min + range_max));
+            if (mid_tick > low_tick && high_tick > mid_tick) {
+                return emit({low_tick, mid_tick, high_tick}, 0.5 * range_width);
+            }
+        }
+        return emit({low_tick, high_tick}, range_width);
+    }
+
+    // cmin and cmax are not distinguishable as float, so no two-tick vector can be monotonic.
+    return emit({low_tick}, std::max(range_width, 1e-10));
 }
 
 void Visualizer::setColorbarTitle(const char *title) {
@@ -2335,13 +3064,18 @@ Visualizer::Texture::Texture(const Glyph *glyph_ptr, uint textureID, const helio
 
     glyph = *glyph_ptr;
 
-    texture_resolution = glyph_ptr->size;
+    // The glyph occupies only a sub-rectangle of its texture array layer, and the surrounding
+    // texels of that layer are never written. A one-texel fully transparent border is added so
+    // that linear filtering at the glyph boundary interpolates toward transparency rather than
+    // toward whatever those unwritten texels happen to contain.
+    constexpr uint border = 1;
+    texture_resolution = make_uint2(glyph_ptr->size.x + 2 * border, glyph_ptr->size.y + 2 * border);
 
     // Texture only has 1 channel, and contains transparency data
-    texture_data.resize(texture_resolution.x * texture_resolution.y);
-    for (int j = 0; j < texture_resolution.y; j++) {
-        for (int i = 0; i < texture_resolution.x; i++) {
-            texture_data[i + j * texture_resolution.x] = glyph_ptr->data.at(j).at(i);
+    texture_data.assign(texture_resolution.x * texture_resolution.y, 0);
+    for (int j = 0; j < glyph_ptr->size.y; j++) {
+        for (int i = 0; i < glyph_ptr->size.x; i++) {
+            texture_data[(i + border) + (j + border) * texture_resolution.x] = glyph_ptr->data.at(j).at(i);
         }
     }
 
@@ -2480,6 +3214,7 @@ uint Visualizer::registerTextureGlyph(const Glyph *glyph) {
 
 helios::uint2 Visualizer::getTextureResolution(uint textureID) const {
     if (texture_manager.find(textureID) == texture_manager.end()) {
+        helios_runtime_error("ERROR (Visualizer::getTextureResolution): Texture ID " + std::to_string(textureID) + " does not exist.");
     }
     return texture_manager.at(textureID).texture_resolution;
 }
@@ -2521,6 +3256,17 @@ std::vector<uint> Visualizer::getFrameBufferSize() const {
 void Visualizer::setFrameBufferSize(int width, int height) {
     Wframebuffer = width;
     Hframebuffer = height;
+}
+
+float Visualizer::getDPIScale() const {
+    // A minimized window reports zero dimensions. Nothing is rendered in that state, so the
+    // identity scale is the correct answer rather than a division by zero.
+    if (Wdisplay == 0 || Hdisplay == 0 || Wframebuffer == 0 || Hframebuffer == 0) {
+        return 1.f;
+    }
+    // The scale can in principle differ between axes. Glyph rasterization takes a single size, so
+    // the larger of the two is used: over-sampling one axis is harmless, under-sampling is not.
+    return std::max(float(Wframebuffer) / float(Wdisplay), float(Hframebuffer) / float(Hdisplay));
 }
 
 helios::RGBcolor Visualizer::getBackgroundColor() const {

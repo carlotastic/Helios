@@ -13,11 +13,60 @@
 */
 
 #include "SyntheticAnnotation.h"
+#include "annotation_io.h"
 #include <iomanip>
 #include "Visualizer.h"
 
 using namespace std;
 using namespace helios;
+
+namespace {
+
+    //! Restores the primitive appearance that render() overwrites, whatever path leaves the function
+    /**
+     * render() recolors every primitive with its label's ID code so that the IDs can be read back
+     * out of the rendered image. Those colors are not the user's, so they must be put back before
+     * returning -- including when a helios_runtime_error is thrown partway through, which would
+     * otherwise leave the caller's entire scene painted in ID codes.
+     */
+    struct PrimitiveAppearanceGuard {
+        PrimitiveAppearanceGuard(helios::Context *a_context, std::vector<uint> a_UUIDs) : context(a_context), UUIDs(std::move(a_UUIDs)) {
+            colors.reserve(UUIDs.size());
+            texture_overridden.reserve(UUIDs.size());
+            for (uint UUID: UUIDs) {
+                colors.push_back(context->getPrimitiveColorRGBA(UUID));
+                texture_overridden.push_back(context->isPrimitiveTextureColorOverridden(UUID));
+            }
+        }
+
+        ~PrimitiveAppearanceGuard() {
+            for (size_t p = 0; p < UUIDs.size(); p++) {
+                if (!context->doesPrimitiveExist(UUIDs.at(p))) {
+                    continue;
+                }
+                context->setPrimitiveColor(UUIDs.at(p), colors.at(p));
+                if (!texture_overridden.at(p)) {
+                    context->usePrimitiveTextureColor(UUIDs.at(p));
+                }
+                // "object_label" is set by labelPrimitives() purely to drive this rendering pass.
+                // Leaving it behind would let a later render() -- or any user code inspecting
+                // primitive data -- see labels from a previous run.
+                if (context->doesPrimitiveDataExist(UUIDs.at(p), "object_label")) {
+                    context->clearPrimitiveData(UUIDs.at(p), "object_label");
+                }
+            }
+        }
+
+        PrimitiveAppearanceGuard(const PrimitiveAppearanceGuard &) = delete;
+        PrimitiveAppearanceGuard &operator=(const PrimitiveAppearanceGuard &) = delete;
+
+        helios::Context *context;
+        std::vector<uint> UUIDs;
+        std::vector<helios::RGBAcolor> colors;
+        std::vector<bool> texture_overridden;
+    };
+
+} // namespace
 
 SyntheticAnnotation::SyntheticAnnotation(helios::Context *__context) {
     context = __context;
@@ -27,6 +76,8 @@ SyntheticAnnotation::SyntheticAnnotation(helios::Context *__context) {
     currentLabelID = 1;
     printmessages = true;
     background_color = make_RGBcolor(0.9, 0.9, 0.9);
+    skydome_texture_file = "plugins/visualizer/textures/SkyDome_clouds.jpg";
+    labelminpixels = 10;
     window_width = 1000;
     window_height = 800;
     camera_position.push_back(make_vec3(1, 0, 1));
@@ -42,13 +93,13 @@ void SyntheticAnnotation::labelPrimitives(const uint UUIDs, const char *label) {
     labelPrimitives(UUID_vect, label);
 }
 
-void SyntheticAnnotation::labelPrimitives(const std::vector<uint> UUIDs, const char *label) {
+void SyntheticAnnotation::labelPrimitives(const std::vector<uint> &UUIDs, const char *label) {
     std::vector<std::vector<uint>> UUIDs_vect;
     UUIDs_vect.push_back(UUIDs);
     labelPrimitives(UUIDs_vect, label);
 }
 
-void SyntheticAnnotation::labelPrimitives(const std::vector<std::vector<uint>> UUIDs, const char *label) {
+void SyntheticAnnotation::labelPrimitives(const std::vector<std::vector<uint>> &UUIDs, const char *label) {
 
     if (UUIDs.size() == 0) {
         return;
@@ -82,9 +133,20 @@ void SyntheticAnnotation::labelPrimitives(const std::vector<std::vector<uint>> U
 
 void SyntheticAnnotation::labelUnlabeledPrimitives(const char *label) {
 
-    std::vector<uint> UUIDs_all = context->getAllUUIDs();
-    for (uint p = 0; p < UUIDs_all.size(); p++) {
+    // Each remaining primitive becomes its own object group, matching how labelPrimitives()
+    // interprets the outer index of a vector of UUID groups.
+    std::vector<std::vector<uint>> unlabeled_groups;
+    for (uint UUID: context->getAllUUIDs()) {
+        if (!context->doesPrimitiveDataExist(UUID, "object_label")) {
+            unlabeled_groups.push_back({UUID});
+        }
     }
+
+    if (unlabeled_groups.empty()) {
+        return;
+    }
+
+    labelPrimitives(unlabeled_groups, label);
 }
 
 void SyntheticAnnotation::setBackgroundColor(const helios::RGBcolor &color) {
@@ -92,11 +154,39 @@ void SyntheticAnnotation::setBackgroundColor(const helios::RGBcolor &color) {
 }
 
 void SyntheticAnnotation::addSkyDome(const char *filename) {
+    // An empty filename removes the sky dome, leaving the background colour showing. The existence check is skipped for it because there is no file to find, not because a missing file is being tolerated.
+    if (std::string(filename).empty()) {
+        skydome_texture_file.clear();
+        return;
+    }
+    if (!std::filesystem::exists(filename)) {
+        helios_runtime_error("ERROR (SyntheticAnnotation::addSkyDome): Sky dome texture file " + std::string(filename) + " does not exist.");
+    }
+    skydome_texture_file = filename;
 }
 
 void SyntheticAnnotation::setWindowSize(const uint __window_width, const uint __window_height) {
     window_width = __window_width;
     window_height = __window_height;
+}
+
+void SyntheticAnnotation::setMinimumLabelPixels(int a_labelminpixels) {
+    // An outline needs at least three points to be a polygon, so an object covering fewer than
+    // three pixels cannot be written to the segmentation masks at all. Allowing a threshold below
+    // that would let such objects through the filter only to be dropped later with no diagnostic.
+    if (a_labelminpixels < 3) {
+        helios_runtime_error("ERROR (SyntheticAnnotation::setMinimumLabelPixels): Minimum label pixel count must be at least 3, but " + std::to_string(a_labelminpixels) +
+                             " was given. An object covering fewer than three pixels has no traceable outline and cannot be written to the segmentation masks.");
+    }
+    labelminpixels = a_labelminpixels;
+}
+
+void SyntheticAnnotation::disableMessages() {
+    printmessages = false;
+}
+
+void SyntheticAnnotation::enableMessages() {
+    printmessages = true;
 }
 
 void SyntheticAnnotation::setCameraPosition(const helios::vec3 &a_camera_position, const helios::vec3 &a_camera_lookat) {
@@ -139,9 +229,6 @@ void SyntheticAnnotation::setCameraPosition(const std::vector<helios::vec3> &a_c
 }
 
 void SyntheticAnnotation::render(const char *outputdir) {
-
-    // todo: need to implement method for setting this
-    int labelminpixels = 10;
 
     if (labelIDs.empty()) {
         std::cerr << "WARNING (SyntheticAnnotation::render): No primitives have been labeled. You must call labelPrimitives() before generating rendered images. Exiting..." << std::endl;
@@ -187,10 +274,12 @@ void SyntheticAnnotation::render(const char *outputdir) {
         if (context->getGlobalDataType("object_detection") == helios::HELIOS_TYPE_STRING) {
             std::string objectdetection;
             context->getGlobalData("object_detection", objectdetection);
-            if (objectdetection.compare("enabled")) {
+            if (objectdetection == "enabled") {
                 objectdetection_enabled = true;
-            } else if (objectdetection.compare("disabled")) {
+            } else if (objectdetection == "disabled") {
                 objectdetection_enabled = false;
+            } else {
+                helios_runtime_error("ERROR (SyntheticAnnotation::render): Object detection flag specified in XML file has unrecognized value '" + objectdetection + "'. Valid values are 'enabled' or 'disabled'.");
             }
         } else {
             std::cerr << "WARNING (SyntheticAnnotation::render): Object detection flag was specified in XML file, but does not have type string. Ignoring..." << std::endl;
@@ -200,10 +289,12 @@ void SyntheticAnnotation::render(const char *outputdir) {
         if (context->getGlobalDataType("semantic_segmentation") == helios::HELIOS_TYPE_STRING) {
             std::string semanticsegmentation;
             context->getGlobalData("semantic_segmentation", semanticsegmentation);
-            if (semanticsegmentation.compare("enabled")) {
+            if (semanticsegmentation == "enabled") {
                 semanticsegmentation_enabled = true;
-            } else if (semanticsegmentation.compare("disabled")) {
+            } else if (semanticsegmentation == "disabled") {
                 semanticsegmentation_enabled = false;
+            } else {
+                helios_runtime_error("ERROR (SyntheticAnnotation::render): Semantic segmentation flag specified in XML file has unrecognized value '" + semanticsegmentation + "'. Valid values are 'enabled' or 'disabled'.");
             }
         } else {
             std::cerr << "WARNING (SyntheticAnnotation::render): Semantic segmentation flag was specified in XML file, but does not have type string. Ignoring..." << std::endl;
@@ -213,10 +304,12 @@ void SyntheticAnnotation::render(const char *outputdir) {
         if (context->getGlobalDataType("instance_segmentation") == helios::HELIOS_TYPE_STRING) {
             std::string instancesegmentation;
             context->getGlobalData("instance_segmentation", instancesegmentation);
-            if (instancesegmentation.compare("enabled")) {
+            if (instancesegmentation == "enabled") {
                 instancesegmentation_enabled = true;
-            } else if (instancesegmentation.compare("disabled")) {
+            } else if (instancesegmentation == "disabled") {
                 instancesegmentation_enabled = false;
+            } else {
+                helios_runtime_error("ERROR (SyntheticAnnotation::render): Instance segmentation flag specified in XML file has unrecognized value '" + instancesegmentation + "'. Valid values are 'enabled' or 'disabled'.");
             }
         } else {
             std::cerr << "WARNING (SyntheticAnnotation::render): Instance segmentation flag was specified in XML file, but does not have type string. Ignoring..." << std::endl;
@@ -265,20 +358,19 @@ void SyntheticAnnotation::render(const char *outputdir) {
     vis_RGB.buildContextGeometry(context);
     vis_RGB.hideWatermark();
     vis_RGB.setBackgroundColor(background_color);
-    vis_RGB.setBackgroundSkyTexture("plugins/visualizer/textures/SkyDome_clouds.jpg", 30);
+    // The sky dome is drawn over the background colour, so a caller that has set a flat colour would otherwise never see it. Clearing the sky texture is how that caller asks for the plain colour instead,
+    // which is what matching a photographed backdrop needs.
+    if (!skydome_texture_file.empty()) {
+        vis_RGB.setBackgroundSkyTexture(skydome_texture_file.c_str(), 30);
+    }
     vis_RGB.setLightDirection(sphere2cart(make_SphericalCoord(30 * M_PI / 180.f, 205 * M_PI / 180.f)));
     vis_RGB.setLightingModel(Visualizer::LIGHTING_PHONG_SHADOWED);
-
-    // todo: need to add option to tell which sky dome image file to use
-    // vis_RGB.addSkyDomeByCenter( 50, make_vec3(0,0,0), 30, "plugins/visualizer/textures/SkyDome_clouds.jpg" );
 
     for (int view = 0; view < camera_position.size(); view++) {
 
         vis_RGB.setCameraPosition(camera_position.at(view), camera_lookat.at(view));
 
         vis_RGB.plotUpdate(true);
-
-        helios::wait(5);
 
         outfile.clear();
         outfile.str("");
@@ -293,17 +385,9 @@ void SyntheticAnnotation::render(const char *outputdir) {
         std::cout << "done." << std::endl;
     }
 
-    // keep track of the original color and texture override flag for each primitive so we can change it back at the end
-    std::vector<RGBAcolor> color_original;
-    std::vector<bool> textureoverride_original;
-    color_original.resize(UUIDs_all.size());
-    textureoverride_original.resize(UUIDs_all.size());
-
-    // set color of all primitives based on label RGB color code
-    for (int p = 0; p < UUIDs_all.size(); p++) {
-        color_original.at(p) = context->getPrimitiveColorRGBA(UUIDs_all.at(p));
-        textureoverride_original.at(p) = context->isPrimitiveTextureColorOverridden(UUIDs_all.at(p));
-    }
+    // Record the original color and texture-override flag of every primitive, and restore them --
+    // along with clearing the "object_label" data -- when this function returns by any path.
+    PrimitiveAppearanceGuard appearance_guard(context, UUIDs_all);
 
     //------ Combined image labeled by RGB color code --------//
 
@@ -311,22 +395,55 @@ void SyntheticAnnotation::render(const char *outputdir) {
         std::cout << "Generating labeled image containing " << labelIDs.size() << " label groups..." << std::endl;
     }
 
-    Visualizer vis(window_width, window_height, 0, false, false);
+    // The ID pass encodes label IDs as RGB colors and decodes them back out of the rendered
+    // pixels, so the framebuffer must reproduce primitive colors exactly: no color boost (see
+    // Visualizer::enableExactColorMode()), no lighting, and no anti-aliasing (0 samples below,
+    // since blended edge pixels decode to meaningless IDs).
+    //
+    // It is also rendered headless, which draws to an offscreen framebuffer that is read back
+    // directly. The windowed path instead guesses whether the front or back buffer holds the
+    // current frame by sampling nine pixels and taking whichever has more non-black content;
+    // against the white background used here both buffers score identically, the tie is broken
+    // toward the back buffer, and the result is that getWindowPixelsRGB() returns the *previous*
+    // frame. That makes every object's mask a copy of the object rendered before it.
+    Visualizer vis(window_width, window_height, 0, false, true);
     vis.disableMessages();
+    vis.enableExactColorMode();
+    vis.setLightingModel(Visualizer::LIGHTING_NONE);
 
     vis.getFramebufferSize(framebufferW, framebufferH);
 
+    // Map each object's ID code to the label it belongs to, so that the integer IDs appearing in
+    // pixelID_combined.txt and the instance masks can be interpreted. Also assign each label a
+    // zero-based class index, which is the class written into the bounding-box annotations.
     outfile.clear();
     outfile.str("");
-    outfile << odir << "/ID_mapping.txt";
-    // std::snprintf(outfile, odir.size()+24, "%s/ID_mapping.txt", odir.c_str());
+    outfile << odir << "ID_mapping.txt";
     std::ofstream mapping_file(outfile.str());
+    mapping_file << "object_ID label class_ID" << std::endl;
+
+    std::map<std::string, int> label_class_IDs;
+    //! Class index of each object ID, used to label that object's mask in the COCO output
+    std::map<int, uint> object_class_of_ID;
+    int next_class_ID = 0;
+    for (auto g = labelIDs.begin(); g != labelIDs.end(); ++g) {
+        label_class_IDs[g->first] = next_class_ID;
+        next_class_ID++;
+    }
+
+    // A class name file in the standard one-name-per-line order, indexed by class ID.
+    outfile.clear();
+    outfile.str("");
+    outfile << odir << "classes.txt";
+    std::ofstream classes_file(outfile.str());
+    for (auto g = labelIDs.begin(); g != labelIDs.end(); ++g) {
+        classes_file << g->first << std::endl;
+    }
+    classes_file.close();
 
     int gID = 0;
     for (auto g = labelIDs.begin(); g != labelIDs.end(); ++g) { // looping over labels
 
-        // todo I think some additional modifications will be needed to make this work again
-        //        mapping_file << g->first << " " << g->second << std::endl;
         std::vector<uint> label_group_IDs = g->second;
 
         std::string label = g->first;
@@ -336,17 +453,22 @@ void SyntheticAnnotation::render(const char *outputdir) {
         for (size_t group = 0; group < label_group_IDs.size(); group++) { // looping over objects within each label
 
             gID = label_group_IDs.at(group);
+            mapping_file << gID << " " << label << " " << label_class_IDs.at(label) << std::endl;
+            object_class_of_ID[int(gID)] = uint(label_class_IDs.at(label));
             RGBcolor code = int2rgb(gID);
             std::vector<uint> UUIDs_group = labelUUIDs.at(label).at(group);
             for (int p = 0; p < UUIDs_group.size(); p++) { // looping over primitives in group
 
-                if (context->doesPrimitiveDataExist(UUIDs_group.at(p), "object_label")) { // primitive has been labeled
-
-                    context->setPrimitiveColor(UUIDs_group.at(p), code);
-
-                } else { // primitive was not labeled, assign default color of white
-                    context->setPrimitiveColor(UUIDs_group.at(p), make_RGBcolor(1, 1, 1));
+                // labelUUIDs only ever contains primitives that were labeled, so every UUID
+                // reaching here belongs to this group and gets the group's ID color code. The
+                // "object_label" data is re-established here rather than assumed to still be
+                // present: it is cleared when render() returns, so that a second render() call
+                // does not see labels left behind by the first.
+                if (!context->doesPrimitiveExist(UUIDs_group.at(p))) {
+                    continue;
                 }
+                context->setPrimitiveData(UUIDs_group.at(p), "object_label", uint(gID));
+                context->setPrimitiveColor(UUIDs_group.at(p), code);
                 context->overridePrimitiveTextureColor(UUIDs_group.at(p));
             }
         }
@@ -385,19 +507,19 @@ void SyntheticAnnotation::render(const char *outputdir) {
         outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/pixelID_combined.txt";
         // std::snprintf(outfile, odir.size()+48, "%sview%05d/pixelID_combined.txt", odir.c_str(), view);
         std::ofstream file(outfile.str());
-        int t = 0;
-        for (int j = framebufferH; j > 0; j--) {
+        // Rows are emitted top-down to match RGB_rendering.jpeg and the segmentation masks.
+        // getWindowPixelsRGB() returns the framebuffer bottom-up, so source row
+        // (framebufferH-1-j) supplies output row j.
+        for (int j = 0; j < framebufferH; j++) {
             for (int i = 0; i < framebufferW; i++) {
 
-                uint ID = rgb2int(make_RGBcolor(pixels[t] / 255.f, pixels[t + 1] / 255.f, pixels[t + 2] / 255.f));
-                file << ID << " " << std::flush;
-
-                t += 3;
+                int t_row = 3 * ((framebufferH - 1 - j) * framebufferW + i);
+                uint ID = rgb2int(make_RGBcolor(pixels[t_row] / 255.f, pixels[t_row + 1] / 255.f, pixels[t_row + 2] / 255.f));
+                file << ID << " ";
             }
             file << std::endl;
         }
         file.close();
-        int t_max = t;
         //------ Generate labels for objects with occlusion --------//
 
         if (objectdetection_enabled) {
@@ -408,12 +530,13 @@ void SyntheticAnnotation::render(const char *outputdir) {
 
             int4 bbox;
 
+            // All of the view's boxes go into a single file named after the image, which is the
+            // layout the YOLO format expects and what Visualizer::displayImageWithBoundingBoxes()
+            // looks for. The class of each box is carried in its first column rather than by being
+            // in a per-label file.
+            std::vector<annotation::YOLOBox> yolo_boxes;
+
             for (auto g = labelIDs.begin(); g != labelIDs.end(); ++g) { // looping over labels
-                outfile.clear();
-                outfile.str("");
-                outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/rectangular_labels_" << g->first.c_str() << ".txt";
-                // std::snprintf(outfile, outputdir.size()+48, "%s/view%05d/rectangular_labels_%s.txt", outputdir,view,g->first.c_str());
-                std::ofstream labelfile_rectoccluded(outfile.str());
                 for (size_t group = 0; group < g->second.size(); group++) { // looping over objects within each label
 
                     gID = g->second.at(group);
@@ -421,14 +544,30 @@ void SyntheticAnnotation::render(const char *outputdir) {
                     uint pixelcount = getGroupRectangularBBox(gID, pixels, framebufferW, framebufferH, bbox);
 
                     if (pixelcount >= labelminpixels) {
-
-                        // todo: This doesn't actually take into account different label groups. Need to write in different format.
-                        labelfile_rectoccluded << 0 << " " << (bbox.x + 0.5 * (bbox.y - bbox.x)) / float(framebufferW) << " " << (bbox.z + 0.5 * (bbox.w - bbox.z)) / float(framebufferH) << " " << std::setprecision(6) << std::fixed
-                                               << (bbox.y - bbox.x) / float(framebufferW) << " " << (bbox.w - bbox.z) / float(framebufferH) << std::endl;
+                        annotation::YOLOBox yolo_box;
+                        yolo_box.class_ID = label_class_IDs.at(g->first);
+                        yolo_box.center = make_vec2((bbox.x + 0.5f * (bbox.y - bbox.x)) / float(framebufferW), (bbox.z + 0.5f * (bbox.w - bbox.z)) / float(framebufferH));
+                        yolo_box.size = make_vec2((bbox.y - bbox.x) / float(framebufferW), (bbox.w - bbox.z) / float(framebufferH));
+                        yolo_boxes.push_back(yolo_box);
                     }
                 }
-                labelfile_rectoccluded.close();
             }
+
+            outfile.clear();
+            outfile.str("");
+            outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/RGB_rendering.txt";
+            annotation::writeYOLOBoxes(yolo_boxes, outfile.str());
+
+            // The class name file has to sit beside the annotation file: that is where the
+            // visualizer looks for it when no class file is named explicitly.
+            std::map<uint, std::string> class_names;
+            for (const auto &label_class: label_class_IDs) {
+                class_names[uint(label_class.second)] = label_class.first;
+            }
+            outfile.clear();
+            outfile.str("");
+            outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/classes.txt";
+            annotation::writeYOLOClassNames(class_names, outfile.str());
 
 
             if (printmessages) {
@@ -439,76 +578,140 @@ void SyntheticAnnotation::render(const char *outputdir) {
         if (semanticsegmentation_enabled) {
 
             if (printmessages) {
-                std::cout << "Performing semantic segmentation for view " << view << "... and element: " << std::flush << endl;
+                std::cout << "Performing semantic segmentation for view " << view << "..." << std::flush;
             }
 
-            int cont = 1;
-            int new_label = 0;
-            std::vector<int> ID2;
-            std::vector<uint> groupIDall;
-            int element_position;
-            // Extract masks and write to file for each Label group
+            // The semantic mask is a single multi-class image: one pixel per framebuffer pixel,
+            // holding the class index of whichever label occupies it. Each label contributes its
+            // own class index to the same mask, so the mask is accumulated across all labels here
+            // and written out once after the loop. The class index for each label name is
+            // recorded in semantic_segmentation_ID_mapping.txt.
+            //
+            // Unlabeled pixels carry the ID code of white, which is what an unlabeled primitive
+            // and the background are both colored with in the ID pass above.
+            const size_t mask_size = size_t(framebufferW) * size_t(framebufferH);
+            std::vector<int> semantic_mask(mask_size, rgb2int(make_RGBcolor(1, 1, 1))); // background/unlabeled
+
             outfile.clear();
             outfile.str("");
             outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/semantic_segmentation_ID_mapping.txt";
-            // std::snprintf(outfile, odir.size()+48, "%sview%05d/semantic_segmentation_ID_mapping.txt", odir.c_str(), view);
             std::ofstream SemanticSegmentationID(outfile.str());
-            SemanticSegmentationID << "Element" << " " << "Label" << std::endl;
+            SemanticSegmentationID << "label" << " " << "class_ID" << std::endl;
+
+            int new_label = 0;
             for (auto g = labelIDs.begin(); g != labelIDs.end(); ++g) { // looping over labels
                 new_label += 1;
-                cout << g->first << endl;
                 SemanticSegmentationID << g->first << " " << new_label << std::endl;
-                outfile.clear();
-                outfile.str("");
-                outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/semantic_segmentation.txt";
-                // std::snprintf(outfile, odir.size()+48, "%sview%05d/semantic_segmentation.txt", odir.c_str(), view);
-                std::ofstream SemanticSegmentation(outfile.str());
+
+                // Collect the object ID codes belonging to this label
                 std::vector<uint> groupID;
+                groupID.reserve(g->second.size());
                 for (size_t group = 0; group < g->second.size(); group++) { // looping over objects within each label
-                    gID = g->second.at(group);
-                    groupID.push_back(gID);
-                }
-                groupIDall.insert(end(groupIDall), begin(groupID), end(groupID));
-
-                if (cont == 1) {
-                    t = t_max;
-                } else if (cont == 0) {
-                    t = 0;
+                    groupID.push_back(g->second.at(group));
                 }
 
-                // Create blank image
-                if (new_label == 1) {
-                    for (int j = 0; j < framebufferH; j++) {
-                        for (int i = 0; i < framebufferW; i++) {
-
-                            ID2.push_back(rgb2int(make_RGBcolor(1, 1, 1)));
-                        }
-                    }
-                }
-                element_position = 0;
-                // Add labels of objects to image
-                for (int j = framebufferH; j > 0; j--) {
+                // Stamp this label's class index into every pixel occupied by one of its objects.
+                // Rows are emitted top-down, but getWindowPixelsRGB() returns the framebuffer
+                // bottom-up, so source row (framebufferH-1-j) supplies output row j.
+                size_t element_position = 0;
+                for (int j = 0; j < framebufferH; j++) {
                     for (int i = 0; i < framebufferW; i++) {
 
-
-                        t = 3 * ((framebufferW - 1) * j + i + j);
-                        if (std::count(groupID.begin(), groupID.end(), rgb2int(make_RGBcolor(pixels[t] / 255.f, pixels[t + 1] / 255.f, pixels[t + 2] / 255.f)))) {
-                            ID2.at(element_position) = new_label;
+                        const int t_row = 3 * ((framebufferH - 1 - j) * framebufferW + i);
+                        if (std::count(groupID.begin(), groupID.end(), rgb2int(make_RGBcolor(pixels[t_row] / 255.f, pixels[t_row + 1] / 255.f, pixels[t_row + 2] / 255.f)))) {
+                            semantic_mask.at(element_position) = new_label;
                         }
 
-                        SemanticSegmentation << ID2.at(element_position) << " " << std::flush;
-
-                        element_position += 1;
+                        element_position++;
                     }
-                    // labelfile_semanticsegmentation << std::endl; //Use this line if you want separete files for the Semantic Segmentation
-                    SemanticSegmentation << std::endl;
                 }
-                SemanticSegmentation.close();
             }
             SemanticSegmentationID.close();
 
+            // Write the completed multi-class mask
+            outfile.clear();
+            outfile.str("");
+            outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/semantic_segmentation.txt";
+            std::ofstream SemanticSegmentation(outfile.str());
+            for (int j = 0; j < framebufferH; j++) {
+                for (int i = 0; i < framebufferW; i++) {
+                    SemanticSegmentation << semantic_mask.at(size_t(j) * size_t(framebufferW) + size_t(i)) << " ";
+                }
+                SemanticSegmentation << std::endl;
+            }
+            SemanticSegmentation.close();
+
             if (printmessages) {
                 std::cout << "Semantic segmentation ... done." << std::endl;
+            }
+        }
+
+        //------ Instance segmentation masks in COCO format --------//
+
+        if (instancesegmentation_enabled) {
+
+            if (printmessages) {
+                std::cout << "Performing instance segmentation for view " << view << "..." << std::flush;
+            }
+
+            // The masks come from the whole-scene rendering, so they describe each object as it
+            // actually appears: parts hidden behind other objects are not included. This is the
+            // convention the COCO format and the radiation plug-in's camera annotations both use.
+            const std::map<int, std::vector<std::vector<bool>>> object_masks = buildObjectMasks(pixels, framebufferW, framebufferH);
+
+            std::stringstream imagefile;
+            imagefile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/RGB_rendering.jpeg";
+            outfile.clear();
+            outfile.str("");
+            outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/instances.json";
+
+            const int2 image_resolution = make_int2(int(framebufferW), int(framebufferH));
+            auto coco = annotation::initializeCOCOJson(outfile.str(), false, image_resolution, imagefile.str());
+            nlohmann::json coco_json = coco.first;
+            const int image_id = coco.second;
+
+            // Declare every label as a category, so that a viewer can name each mask.
+            std::vector<uint> category_IDs;
+            std::vector<std::string> category_names;
+            for (const auto &label_class: label_class_IDs) {
+                category_IDs.push_back(uint(label_class.second));
+                category_names.push_back(label_class.first);
+            }
+            annotation::addCOCOCategory(coco_json, category_IDs, category_names);
+
+            // Each object is traced on its own, so that two objects of the same class stay
+            // separate annotations rather than merging into one region.
+            int annotation_id = 0;
+            for (const auto &object_mask: object_masks) {
+
+                const int object_ID = object_mask.first;
+                if (object_class_of_ID.find(object_ID) == object_class_of_ID.end()) {
+                    continue; // a decoded ID that belongs to no labeled object
+                }
+
+                std::map<int, std::vector<std::vector<bool>>> single_object;
+                single_object[object_ID] = object_mask.second;
+
+                std::vector<std::map<std::string, std::vector<float>>> annotations = annotation::maskToAnnotations(single_object, object_class_of_ID.at(object_ID), image_resolution, image_id);
+
+                for (const auto &ann: annotations) {
+                    nlohmann::json json_annotation;
+                    json_annotation["id"] = annotation_id++;
+                    json_annotation["image_id"] = image_id;
+                    json_annotation["category_id"] = (int) ann.at("category_id")[0];
+                    const auto &bbox_values = ann.at("bbox");
+                    json_annotation["bbox"] = {(int) bbox_values[0], (int) bbox_values[1], (int) bbox_values[2], (int) bbox_values[3]};
+                    json_annotation["area"] = (int) ann.at("area")[0];
+                    json_annotation["iscrowd"] = 0;
+                    json_annotation["segmentation"] = {ann.at("segmentation")};
+                    coco_json["annotations"].push_back(json_annotation);
+                }
+            }
+
+            annotation::writeCOCOJson(coco_json, outfile.str());
+
+            if (printmessages) {
+                std::cout << "done." << std::endl;
             }
         }
     }
@@ -517,65 +720,7 @@ void SyntheticAnnotation::render(const char *outputdir) {
 
     vis.clearGeometry();
 
-    /*     if (printmessages) {
-            std::cout << "Occluded objets ... done." << std::endl;
-        } */
-
-    //------ Generate labels for objects without occlusion --------//
-
-    if (instancesegmentation_enabled) {
-
-        int4 bbox;
-
-        for (int view = 0; view < camera_position.size(); view++) {
-
-            if (printmessages) {
-                std::cout << "Performing instance segmentation for view " << view << "... and element: " << std::flush << endl;
-            }
-
-            for (std::map<std::string, std::vector<uint>>::iterator g = labelIDs.begin(); g != labelIDs.end(); ++g) { // looping over labels
-                int counter_object = 0;
-                cout << g->first << endl;
-                for (size_t group = 0; group < g->second.size(); group++) { // looping over objects within each label
-                    counter_object += 1;
-                    gID = g->second.at(group);
-
-                    vis.buildContextGeometry(context, labelUUIDs.at(g->first).at(group));
-
-                    vis.setCameraPosition(camera_position.at(view), camera_lookat.at(view));
-
-                    vis.plotUpdate(true);
-
-                    outfile.clear();
-                    outfile.str("");
-                    outfile << odir << "view" << std::setfill('0') << std::setw(5) << view << "/instance_segmentation_" << g->first.c_str() << "_" << std::setfill('0') << std::setw(7) << ".txt";
-                    // std::snprintf(outfile, odir.size()+96, "%sview%05d/instance_segmentation_%s_%07d.txt",odir.c_str(), view,g->first.c_str(),counter_object);
-
-                    // Extract masks and write to file
-
-                    vis.getWindowPixelsRGB(&pixels[0]);
-
-                    writePixelID(outfile.str().c_str(), labelminpixels, &vis);
-
-                    vis.clearGeometry();
-                }
-            }
-        }
-
-        if (printmessages) {
-            std::cout << "done." << std::endl;
-        }
-    }
-
-    //------- Clean up ---------//
-
-    // set primitive colors back to how they were before
-    for (int p = 0; p < UUIDs_all.size(); p++) {
-        context->setPrimitiveColor(UUIDs_all.at(p), color_original.at(p));
-        if (!textureoverride_original.at(p)) {
-            context->usePrimitiveTextureColor(UUIDs_all.at(p));
-        }
-    }
+    // Primitive colors and "object_label" data are restored by appearance_guard's destructor.
 }
 
 uint SyntheticAnnotation::getGroupRectangularBBox(const uint ID, const std::vector<uint> &pixels, const uint framebuffer_width, const uint framebuffer_height, helios::int4 &bbox) const {
@@ -587,11 +732,15 @@ uint SyntheticAnnotation::getGroupRectangularBBox(const uint ID, const std::vect
     int ymax = 0;
     int pixelcount = 0;
 
+    // The bounding box is reported in image coordinates with the origin at the TOP-left, which is
+    // what the YOLO annotation format requires. getWindowPixelsRGB() returns the framebuffer
+    // bottom-up, so source row (framebuffer_height-1-j) supplies image row j.
     for (int j = 0; j < framebuffer_height; j++) {
         for (int i = 0; i < framebuffer_width; i++) {
 
+            t = 3 * ((framebuffer_height - 1 - j) * framebuffer_width + i);
+
             if (rgb2int(make_RGBcolor(pixels[t] / 255.f, pixels[t + 1] / 255.f, pixels[t + 2] / 255.f)) != ID) {
-                t += 3;
                 continue;
             }
 
@@ -608,7 +757,6 @@ uint SyntheticAnnotation::getGroupRectangularBBox(const uint ID, const std::vect
                 ymax = j;
             }
 
-            t += 3;
             pixelcount++;
         }
     }
@@ -621,6 +769,48 @@ uint SyntheticAnnotation::getGroupRectangularBBox(const uint ID, const std::vect
     } else {
         return pixelcount;
     }
+}
+
+std::map<int, std::vector<std::vector<bool>>> SyntheticAnnotation::buildObjectMasks(const std::vector<uint> &pixels, const uint framebuffer_width, const uint framebuffer_height) const {
+
+    const int background_ID = rgb2int(make_RGBcolor(1, 1, 1));
+
+    std::map<int, std::vector<std::vector<bool>>> object_masks;
+    std::map<int, uint> pixel_counts;
+
+    // Rows are built top-down to match the rendered image, but getWindowPixelsRGB() returns the
+    // framebuffer bottom-up, so source row (framebuffer_height-1-j) supplies image row j.
+    for (uint j = 0; j < framebuffer_height; j++) {
+        for (uint i = 0; i < framebuffer_width; i++) {
+
+            const size_t t = 3 * (size_t(framebuffer_height - 1 - j) * size_t(framebuffer_width) + size_t(i));
+            const int ID = rgb2int(make_RGBcolor(pixels[t] / 255.f, pixels[t + 1] / 255.f, pixels[t + 2] / 255.f));
+
+            if (ID == background_ID) { // background and unlabeled primitives
+                continue;
+            }
+
+            if (object_masks.find(ID) == object_masks.end()) {
+                object_masks[ID] = std::vector<std::vector<bool>>(framebuffer_height, std::vector<bool>(framebuffer_width, false));
+                pixel_counts[ID] = 0;
+            }
+            object_masks.at(ID).at(j).at(i) = true;
+            pixel_counts.at(ID)++;
+        }
+    }
+
+    // Anti-aliasing along an object edge can decode to an ID that belongs to no object, and an
+    // object that is almost entirely occluded carries too few pixels to annotate usefully. Both are
+    // removed by the same minimum-pixel test applied to the bounding boxes.
+    for (auto it = object_masks.begin(); it != object_masks.end();) {
+        if (pixel_counts.at(it->first) < uint(labelminpixels)) {
+            it = object_masks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return object_masks;
 }
 
 helios::RGBcolor SyntheticAnnotation::int2rgb(const int ID) const {
@@ -647,76 +837,4 @@ int SyntheticAnnotation::rgb2int(const helios::RGBcolor color) const {
     int ID = color.r * 255 + color.g * 255 * 256 + color.b * 255 * 256 * 256;
 
     return ID;
-}
-
-void SyntheticAnnotation::writePixelID(const char *filename, const int labelminpixels, Visualizer *vis) const {
-
-    uint framebufferH, framebufferW;
-
-    vis->getFramebufferSize(framebufferW, framebufferH);
-
-    std::vector<uint> pixels;
-    pixels.resize(framebufferH * framebufferW * 3);
-
-    vis->getWindowPixelsRGB(&pixels[0]);
-
-    int t = 0;
-    int xmin = framebufferW;
-    int xmax = 0;
-    int ymin = framebufferH;
-    int ymax = 0;
-    int pixelcount = 0;
-
-    for (int j = 0; j < framebufferH; j++) {
-        for (int i = 0; i < framebufferW; i++) {
-
-            if (pixels[t] == 255 && pixels[t + 1] == 255 && pixels[t + 2] == 255) {
-                t += 3;
-                continue;
-            }
-
-            if (i < xmin) {
-                xmin = i;
-            }
-            if (i > xmax) {
-                xmax = i;
-            }
-            if (j < ymin) {
-                ymin = j;
-            }
-            if (j > ymax) {
-                ymax = j;
-            }
-
-            t += 3;
-            pixelcount++;
-        }
-    }
-
-    if (xmin == framebufferW || xmax == 0 || ymin == framebufferH || ymax == 0 || pixelcount < labelminpixels) {
-        return;
-    }
-
-    std::ofstream file(filename);
-
-    file << xmin << " " << xmax << " " << ymin << " " << ymax << std::endl;
-
-    // t=0;
-    for (int j = framebufferH; j > 0; j--) {
-        for (int i = 0; i < framebufferW; i++) {
-
-            if (i >= xmin && i <= xmax && j >= ymin && j <= ymax) {
-
-                int ID = rgb2int(make_RGBcolor(pixels[t] / 255.f, pixels[t + 1] / 255.f, pixels[t + 2] / 255.f));
-                file << ID << " " << std::flush;
-            }
-
-            // t+=3;
-            t = 3 * ((framebufferW - 1) * j + i + j);
-        }
-        if (j >= ymin && j <= ymax) {
-            file << std::endl;
-        }
-    }
-    file.close();
 }

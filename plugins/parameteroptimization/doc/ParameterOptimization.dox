@@ -543,7 +543,7 @@ auto result = opt.run(penalized_objective, params);
 | INTEGER | GA only | Rounded to nearest integer at every stage |
 | CATEGORICAL | GA only | Restricted to a fixed set of allowed values |
 
-\note L-BFGS, Adam, BOBYQA, and SLSQP require all parameters to be FLOAT. Passing INTEGER or CATEGORICAL parameters to these algorithms will throw a runtime error.
+\note Every algorithm other than GA requires all parameters to be FLOAT. Passing INTEGER or CATEGORICAL parameters to L-BFGS, Adam, BOBYQA, SLSQP, CMA-ES, or Bayesian Optimization will throw a runtime error.
 
 \section PO_TwoStage Two-Stage Optimization (Global + Local Refinement)
 

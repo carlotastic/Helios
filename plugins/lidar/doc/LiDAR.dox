@@ -810,7 +810,7 @@ An often faster way to figure out the dimensions of the voxel grid is to use poi
 
      pointcloud.calculateLeafArea(&context); //Calculate leaf area for each grid cell
 
-     pointcloud.leafReconstructionAlphaMask( 0.001, 0.02, "plugins/visualizer/textures/ElmLeaf.png" ); //Perform the reconstruction
+     pointcloud.leafReconstructionAlphaMask( 0.001, 0.02, 2, "plugins/visualizer/textures/ElmLeaf.png" ); //Perform the reconstruction
 
      pointcloud.addLeafReconstructionToContext( &context );
       

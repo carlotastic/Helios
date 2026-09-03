@@ -54,9 +54,9 @@ Adding global data that has length greater than one (array) requires a little ex
 
      Context context;  //Declare the "Context" class
 
-     float data[5] = {10, 11, 12, 13, 14};
+     std::vector<float> data = {10, 11, 12, 13, 14};
 
-     context.setGlobalData("my_data",HELIOS_TYPE_FLOAT,5,&data); //add global data called my_data to only the first primitive
+     context.setGlobalData("my_data",data); //add global data called my_data
 
      std::vector<float> data_new;
 

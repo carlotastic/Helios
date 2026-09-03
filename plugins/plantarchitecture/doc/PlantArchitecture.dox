@@ -63,19 +63,19 @@ To enable optional output object data, use:
 ~~~~~~
 PlantArchitecture plantarchitecture(&context);
 
-plantarchitecture.optionalOutputData("plantID"); //insert appropriate label from the table above
+plantarchitecture.optionalOutputObjectData("plantID"); //insert appropriate label from the table above
 ~~~~~~
 
 You can also enable multiple fields at the same time:
 
 ~~~~~~
-plantarchitecture.optionalOutputData({"plantID","leafID","flowerID"});
+plantarchitecture.optionalOutputObjectData({"plantID","leafID","flowerID"});
 ~~~~~~
 
 or enable them all by passing the string "all":
 
 ~~~~~~
-plantarchitecture.optionalOutputData("all");
+plantarchitecture.optionalOutputObjectData("all");
 ~~~~~~
 
 \section PlantArchOverview Plug-in Overview
@@ -328,12 +328,12 @@ Plant type string argument | time_to_dormancy_break | time_to_flower_initiation 
 "cowpea" | 0 | 40 | 5 | 5 | 30 | \f$\infty\f$ | 0 | 365 days (1 year)   |
 "easternredbud" | 165 | -1 | 3 | 7 | 30 | 200 | 2 years | 1460 days (4 years) |
 "grapevine_VSP" | 165 | -1 | -1 | 45 | 45 | 200 | 3 years | 365 days (1 year)   |
-"maize" | 0 | -1 | -1 | 4 | 10 | \f$\infty\f$ | 0 | 365 days (1 year)   |
+"maize" | 0 | -1 | -1 | 4 | 58 | \f$\infty\f$ | 0 | 365 days (1 year)   |
 "olive" | 165 | -1 | 3 | 7 | 20 | 200 | 3 years | 1825 days (5 years) |
 "pistachio" | 165 | -1 | 3 | 7 | 20 | 200 | 3 years | 1460 days (4 years) |
 "puncturevine" | 0 | -1 | 14 | -1 | -1 | \f$\infty\f$ | 0 | 45 days             |
-"rice" | 0 | -1 | -1 | 4 | 15 | \f$\infty\f$ | 0 | 365 days (1 year)   |
-"sorghum" | 0 | -1 | -1 | 4 | 10 | \f$\infty\f$ | 0 | 365 days (1 year)   |
+"rice" | 0 | -1 | -1 | 4 | 10 | \f$\infty\f$ | 0 | 365 days (1 year)   |
+"sorghum" | 0 | -1 | -1 | 4 | 35 | \f$\infty\f$ | 0 | 365 days (1 year)   |
 "soybean" | 0 | 40 | 5 | 5 | 30 | \f$\infty\f$ | 0 | 365 days (1 year)   |
 "sugarbeet" | 0 | -1 | -1 | -1 | -1 | \f$\infty\f$ | 0 | 365 days (1 year)   |
 "tomato" | 0 | 40 | 5 | 5 | 30 | \f$\infty\f$ | 0 | 365 days (1 year)   |
@@ -493,7 +493,7 @@ The coordinate system of plant organs is defined with respect to it's parent ele
 
 Nearly all parameters in the architectural model can either be specified as a constant value, or as a random variable following several pre-defined distributions.
 
-Parameters that can be randomized have type of ef RandomParameter_float or ef RandomParameter_int depending on the parameter value type. If the parameters are assigned a constant value, they are set the same as a regular float or int. The ef RandomParameter_float::val() "val()" method is used to get the value of the parameter.
+Parameters that can be randomized have type of \ref RandomParameter_float or \ref RandomParameter_int depending on the parameter value type. If the parameters are assigned a constant value, they are set the same as a regular float or int. The \ref RandomParameter_float::val() "val()" method is used to get the value of the parameter.
 
 ~~~~~~
 // Assign a constant value
@@ -517,16 +517,16 @@ Available distributions for \ref RandomParameter_float are listed below
 
 | Distribution | Method | Parameters |
 | ------| ------ | ------ |
-| Uniform | \ref RandomParameter_float::uniformDistribution | minimum value, maximum value |
-| Normal | \ref RandomParameter_float::normalDistribution | mean, standard deviation |
-| Weibull | \ref RandomParameter_float::weibullDistribution | shape parameter, scale parameter |
+| Uniform | \ref RandomParameter_float::uniformDistribution "uniformDistribution()" | minimum value, maximum value |
+| Normal | \ref RandomParameter_float::normalDistribution "normalDistribution()" | mean, standard deviation |
+| Weibull | \ref RandomParameter_float::weibullDistribution "weibullDistribution()" | shape parameter, scale parameter |
 
 and for \ref RandomParameter_int are:
 
 | Distribution | Method | Parameters |
 | ------| ------ | ------ |
-| Uniform | \ref RandomParameter_int::uniformDistribution | minimum value, maximum value |
-| Discrete Values | \ref RandomParameter_int::discreteValues | vector of discrete int values that will be randomly chosen |
+| Uniform | \ref RandomParameter_int::uniformDistribution "uniformDistribution()" | minimum value, maximum value |
+| Discrete Values | \ref RandomParameter_int::discreteValues "discreteValues()" | vector of discrete int values that will be randomly chosen |
 
 
 \section PlantArchPhytomerParams Defining the Phytomer and its Parameters
@@ -568,7 +568,7 @@ The table below lists the parameters that define the geometry of the phytomer, a
 | prototype | LeafPrototype struct | - | Structure containing information to build leaf prototypes. |
 | --- **peduncle** --- ||||
 | length | RandomParameter_float | meters | Length of the peduncle (inflorescence supporting structure). |
-| radius | RandomParameter_float | meters | Radius of the peduncle. |
+| radius | RandomParameter_float | meters | Radius of the peduncle. Ignored for a terminal inflorescence on a herbaceous stem (a grass panicle or tassel), whose peduncle is sized from the radius of the culm tip it attaches to so that the two tubes meet without a step; used as given for a lateral peduncle or one on a woody stem. |
 | pitch | RandomParameter_float | degrees | Angle of the peduncle axis with respect to its parent internode axis. |
 | roll | RandomParameter_float | degrees | Rotation angle of the peduncle about it's own axis. |
 | curvature | RandomParameter_float | degrees/meter | Curvature angle of the peduncle per unit length of peduncle. If curvature is positive, peduncle curves upward toward vertical. If negative, curvature is downward. |
@@ -640,8 +640,7 @@ The built-in function for procedural leaf generation generates leaf geometries b
 | lateral_curvature | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Curvature factor along y-direction (widthwise). (+curves upward, -curved downward) |
 | wave_period | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Period factor of leaf waves/wrinkles. |
 | wave_amplitude | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Amplitude of leaf waves/wrinkles. |
-| leaf_buckle_length | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Length along the leaf where it buckles due to its weight (as fraction of overall leaf length). |
-| leaf_buckle_angle | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Angle (degrees) formed by the leaf buckling. |
+| flexibility | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Droopiness of the fully-grown leaf blade under its own weight. The leaf points along its growing direction when small and bends over as it expands. =0 gives a rigid leaf that keeps its prototype shape at every size. |
 | unique_prototypes | \htmlonly<span style="font-family: Courier, monospace; color: green;">uint</span>\endhtmlonly | 0 | Number of unique leaf prototypes to generate. If = 0, every leaf will be unique. Increasing this value gives more variability across the plant, but it will take longer to initially generate the plant model. |
 | leaf_offset | \htmlonly<span style="font-family: Courier, monospace; color: green;">helios::vec3</span>\endhtmlonly | (0,0,0) | Offset/translation applied to the leaf prototype. |
 | petiole_roll | \htmlonly<span style="font-family: Courier, monospace; color: green;">float</span>\endhtmlonly | 0.0 | Creates a roll of the leaf near its base to more smoothly meet the petiole. |
@@ -672,6 +671,30 @@ Fruit geometry creation is similar to that of flowers, except the prototype func
 ~~~~~~
 uint(*prototype_function)( helios::Context*, uint subdivisions )
 ~~~~~~
+
+\subsection PlantArch_leafdroop Leaf Droop Under Self-Weight
+
+Leaves are not rigid. A blade that has just been formed points along the direction the shoot is growing, and bends over as it expands and its own weight begins to matter - which is why the lower leaves of a
+maize or sorghum plant arc over while the short upper ones stay erect. Setting the leaf prototype parameter \htmlonly<span style="font-family: Courier, monospace; color: blue;">flexibility</span>\endhtmlonly
+to a non-zero value turns this on. A value of zero, the default, gives a perfectly rigid leaf that keeps its prototype shape at every size, which is the behaviour of every species whose leaves do not visibly droop.
+
+The blade is treated as a cantilever clamped at its base and loaded by its own weight. The bending moment at each point along the midrib is the weight of everything beyond it acting through its horizontal
+lever arm, and the resulting curvature is integrated along the blade to give its deflected shape. Because the moment grows with the cube of blade length while the stiffness does not, and because a longer leaf
+is also a wider and heavier one, the droop of a leaf grows very steeply - roughly with the fifth power of its length. This is what makes the droop follow the plant's growth on its own: there is no age or time
+term anywhere in it, and a leaf that is prevented from growing to full size also stays comparatively straight.
+
+The parameter is dimensionless, describing how far the leaf bends once it is fully grown rather than a stiffness in physical units. This matters because the raw compliance would have to be set per species
+across orders of magnitude to describe the same visual droop; expressed this way, a value near 20 gives any grass blade an arc of roughly a third of its length whether the blade is 20 cm or 90 cm long.
+
+Two practical notes. The deflection is recomputed from the prototype's undeformed shape each time the leaf grows, rather than bending the leaf further from where it already is, so the shape cannot drift over a
+long simulation. And the leaf's prototype shape is its shape at full turgor with no load - so parameters such as \htmlonly<span style="font-family: Courier, monospace; color: blue;">longitudinal_curvature</span>\endhtmlonly
+should describe the leaf before it droops, with the droop left to this parameter.
+
+This replaces the former \htmlonly<span style="font-family: Courier, monospace; color: blue;">leaf_buckle_length</span>\endhtmlonly and \htmlonly<span style="font-family: Courier, monospace; color: blue;">leaf_buckle_angle</span>\endhtmlonly
+parameters, which kinked the leaf by a fixed angle at a fixed station along its length. Those parameters are deprecated but still work: if they are set and
+\htmlonly<span style="font-family: Courier, monospace; color: blue;">flexibility</span>\endhtmlonly is left at zero, they are converted to the flexibility that reproduces the same droop on the fully-grown leaf.
+The mature leaf is shaped much as it was, but now arrives at that shape as it expands rather than starting out with it. Setting \htmlonly<span style="font-family: Courier, monospace; color: blue;">flexibility</span>\endhtmlonly
+explicitly always takes precedence, and the deprecated parameters will be removed in a future version.
 
 \subsection PlantArch_compound Compound Leaves
 
@@ -733,6 +756,8 @@ Parameters defining the geometry and growth of the shoot are given in the \ref S
 \htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes</span>\endhtmlonly is the maximum number of phytomers that a single shoot can grow to have. Leaves will continue to emerge from the terminal bud according to the phyllochron until \htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes</span>\endhtmlonly is reached.
 
 \htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes_per_season</span>\endhtmlonly is the maximum number of phytomers that a shoot can produce in a single growing season, and should be less than or equal to \htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes</span>\endhtmlonly. This parameter is used to limit the number of phytomers that a shoot can produce in a single growing season such that it eventually stops growing for the season, but can still put on additional phytomers in following seasons.
+
+Note that some species place organs relative to \htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes</span>\endhtmlonly rather than at fixed node indices, so changing it moves those organs. For maize, the ear position is measured downward from the tassel -- see \ref PlantArchBuild_maize_ears.
 
 \subsubsection ShootParam_base_roll base_roll
 
@@ -827,7 +852,7 @@ Below is an example of modifying the parameters for all shoot types:
 ~~~~~~
 plantarchitecture.loadPlantModelFromLibrary( "almond" );
 
-std::map<std::string,ShootParameters> shoot_parameters = plantarchitecture.getCurrentShootParameters( "trunk" );
+std::map<std::string,ShootParameters> shoot_parameters = plantarchitecture.getCurrentShootParameters();
 for( auto params : shoot_parameters ){
     std::string shoot_type = params.first;
     ShootParameters P = params.second;
@@ -837,6 +862,49 @@ for( auto params : shoot_parameters ){
 }
 plantarchitecture.buildPlantInstanceFromLibrary( nullorigin, 0 );
 ~~~~~~
+
+<B>Replacing a shoot type replaces it entirely.</B> Both \ref PlantArchitecture::defineShootType() and \ref PlantArchitecture::updateCurrentShootParameters() overwrite the stored entry for a shoot type in its entirety rather than merging into it. In the examples above this is harmless, because the \ref ShootParameters structure was obtained by copying the existing one, and an ordinary C++ copy carries everything along -- including the function pointers that customize the species (the phytomer creation and callback hooks, and the leaf, flower, and fruit prototype functions).
+
+It is <I>not</I> harmless if the \ref ShootParameters is reconstructed from plain values rather than copied. This arises for callers that cannot hold a C++ structure -- for example a scripting-language binding that flattens the parameters to a dictionary, lets the user edit them, and rebuilds the structure from those values. Function pointers cannot survive that round trip, so the rebuilt structure is value-correct but has lost every function pointer, and committing it silently strips the species' customizations. For maize, losing <span style="font-family: Courier, monospace; color: blue;">phytomer_creation_function</span> means ears are never assigned and nearly every node produces a tassel instead.
+
+Such a caller is responsible for re-attaching the function pointers before committing, using \ref ShootParameters::inheritCustomFunctionsFrom():
+
+~~~~~~
+plantarchitecture.loadPlantModelFromLibrary( "maize" );
+
+ShootParameters original = plantarchitecture.getCurrentShootParameters( "mainstem" );
+
+// ...flatten 'original' to values, edit them, and rebuild 'modified' from those values...
+
+modified.inheritCustomFunctionsFrom( original );   // restore the function pointers
+plantarchitecture.updateCurrentShootParameters( "mainstem", modified );
+plantarchitecture.buildPlantInstanceFromLibrary( nullorigin, 0 );
+~~~~~~
+
+Committing a shoot type stores the values it was given: the shoot-level random parameters are not re-drawn, so reading a shoot type and writing it straight back without editing anything leaves the model unchanged. This is not true of the phytomer parameters nested inside it, which are deliberately re-randomized each time a phytomer is created so that phytomers on the same shoot vary.
+
+Note that the map overload of \ref PlantArchitecture::updateCurrentShootParameters() replaces all shoot types at once, so a caller round-tripping the whole map must inherit separately for each entry, matching each rebuilt structure against the original of the same label.
+
+\subsubsection PlantArchBuild_maize_ears Maize Ear Placement and Prolificacy
+
+Maize is monoecious: a single terminal tassel forms from the apical meristem, and axillary ear meristems form at every above-ground node except the upper six to eight below the tassel. Because of apical dominance, only the uppermost eligible node develops into a harvestable ear.
+
+The model follows this convention. The ear-bearing node is defined <I>relative to the top of the shoot</I> rather than by an absolute node index:
+
+~~~~~~
+apical_ear_node = max_nodes - 6
+~~~~~~
+
+So the default maize plant (\htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes</span>\endhtmlonly = 20) bears its ear at node 14, and raising \htmlonly<span style="font-family: Courier, monospace; color: blue;">max_nodes</span>\endhtmlonly to 25 moves the ear to node 19. The ear therefore stays in the correct part of the canopy as plant size changes. A shoot with six or fewer nodes bears no ear.
+
+Commercial hybrids are near-strictly single-eared, so the model bears one ear. Both the offset from the tassel and the number of ears are constants at the top of \htmlonly<span style="font-family: Courier, monospace; color: blue;">MaizePhytomerCreationFunction()</span>\endhtmlonly in <span style="font-family: Courier, monospace;">plugins/plantarchitecture/src/Assets.cpp</span>:
+
+~~~~~~
+constexpr int nodes_below_tassel = 6;
+constexpr int ears_per_plant = 1;
+~~~~~~
+
+Setting \htmlonly<span style="font-family: Courier, monospace; color: blue;">ears_per_plant</span>\endhtmlonly to 2 additionally bears an ear at the node immediately below the apical one, representing the second sub-apical ear seen at low planting density and high nitrogen.
 
 \subsection PlantArchShootTypeDiscovery Discovering Available Shoot Types
 
@@ -919,6 +987,18 @@ uint plantID = plantarchitecture.buildPlantInstanceFromLibrary( nullorigin, 0 );
 plantarchitecture.setPlantPhenologicalThresholds( plantID, 0, 20, 10, 10, 5, 70 );
 ~~~~~~
 
+<b>Default phenology for manually-built plants.</b> Every plant model in the library calls \ref PlantArchitecture::setPlantPhenologicalThresholds() as part of its builder, so library-built plants always have thresholds configured. A plant assembled manually (\ref PlantArchitecture::addPlantInstance() together with \ref PlantArchitecture::addBaseStemShoot(), \ref PlantArchitecture::appendShoot(), and \ref PlantArchitecture::addChildShoot()) does not, and instead keeps the default thresholds, which encode "no phenology scheduled": the plant grows vegetatively and never flowers, sets fruit, or enters dormancy. This is the same configuration produced by \ref PlantArchitecture::disablePlantPhenology(). To give a manually-built plant a reproductive cycle or a dormancy period, call \ref PlantArchitecture::setPlantPhenologicalThresholds() on it explicitly.
+
+<b>Maximum age for manually-built plants.</b> A plant also stops growing once it reaches its maximum age, set with \ref PlantArchitecture::setPlantMaxAge() and read back with \ref PlantArchitecture::getPlantMaxAge(). This follows the same pattern as the phenological thresholds: every library builder sets its own value (the apple model uses 1460 days), while a manually-built plant keeps the default of 999 days. Once that age is reached, \ref PlantArchitecture::advanceTime() stops advancing the plant and its geometry becomes static. No message is issued, so a manually-built plant that needs to grow for longer appears to stop for no reason after roughly 1000 days. Raise the cap before advancing past it:
+
+~~~~~~
+uint plantID = plantarchitecture.addPlantInstance( nullorigin, 0 );
+// ... add shoots ...
+plantarchitecture.setPlantMaxAge( plantID, 1460 );
+~~~~~~
+
+Setting a maximum age below the plant's current age is permitted, and freezes the plant at its current form.
+
 \section PlantArchAddingModels Adding New Plant Models to the Library
 
 The PlantArchitecture plugin includes a streamlined system for adding new plant species to the built-in library. This section describes the workflow for implementing a new plant model.
@@ -929,7 +1009,7 @@ Adding a new plant model to the library involves the following steps:
 
 1. **Create assets (if needed)** - Prepare texture images, OBJ models, or other visual assets if needed.
 2. **Implement the plant-specific methods** - Create the `initialize[*]Shoots()` and `build[*]()` methods that define the plant's architecture and parameters in PlantLibrary.cpp. You can find many examples in this file for existing plants.
-3. **Register the plant model** - Add a single registration line to \ref PlantArchitecture::initializePlantModelRegistrations in PlantLibrary.cpp to make the model available in the library. This can be found at the top of PlantLibrary.cpp, with examples for existing plants.
+3. **Register the plant model** - Add a single registration line to <code>PlantArchitecture::initializePlantModelRegistrations()</code> in PlantLibrary.cpp to make the model available in the library. This can be found at the top of PlantLibrary.cpp, with examples for existing plants.
 
 A good approach is to start with an existing plant model that is similar to the new plant, and copy paste its code `initialize[*]Shoots()` and `build[*]()` for your new plant. You can then tweak parameters to achieve your desired result.
 
@@ -1026,7 +1106,7 @@ uint PlantArchitecture::buildNewPlant(const helios::vec3 &base_position) {
 
 \subsubsection PlantArchAddStep3 Step 3: Register the Plant Model
 
-Add a single registration line to the \ref PlantArchitecture::initializePlantModelRegistrations method in PlantLibrary.cpp:
+Add a single registration line to the <code>PlantArchitecture::initializePlantModelRegistrations()</code> method in PlantLibrary.cpp:
 ~~~~~~{cpp}
 void PlantArchitecture::initializePlantModelRegistrations() {
     // ... existing registrations ...
@@ -1100,6 +1180,34 @@ for (uint descendant : descendants) {
 
 The \\ref PlantArchitecture::getShootIDsByRank() method is particularly useful as it organizes shoots into a vector of vectors where the index represents the branching rank, making it easy to implement systematic pruning based on plant architecture principles.
 
+\note Branching rank and shoot depth are not the same thing. \ref PlantArchitecture::getShootRank() reports the botanical branching order, and a shoot created by \ref PlantArchitecture::appendShoot() continues its parent's axis rather than branching from it, so it keeps the parent's rank. \ref PlantArchitecture::getShootDepth() counts every step through the shoot tree instead, so it increases across such a continuation. For the same reason, an axis continuation is a child of its parent for the purposes of \ref PlantArchitecture::getChildShootIDs(), and a shoot whose axis is continued is not reported by \ref PlantArchitecture::getTerminalShootIDs().
+
+\note These methods describe the plant as it currently stands, so shoots that have been pruned away are left out of all of them -- including \ref PlantArchitecture::getTerminalShootIDs(), since an empty pruned shell has no children but is not a tip of the plant. \ref PlantArchitecture::getAllShootIDs() is the exception: it enumerates the shoot tree itself and so still returns pruned shoot IDs. A pruned shoot does still report the shoot it grew from via \ref PlantArchitecture::getParentShootID(), even though it is no longer listed among that parent's children. See \ref PlantArchPruningState.
+
+\subsection PlantArchPruningState What Happens to a Pruned Shoot
+
+Calling \ref PlantArchitecture::pruneBranch() with a node index of 0 removes the shoot entirely: all of its phytomers, its leaves, its inflorescences, and its internode tube geometry are deleted from the Context, and the same is done recursively to every shoot descending from it.
+
+The shoot is *not* removed from the plant's shoot tree. Shoot IDs are positions in that tree, so removing an entry would renumber every later shoot and invalidate IDs already held by the caller. Instead the shoot keeps its slot and becomes inert:
+
+- Its ID stays valid and is still returned by \ref PlantArchitecture::getAllShootIDs().
+- \ref PlantArchitecture::getShootNodeCount() returns 0 for it, and it contributes no leaf area and no volume.
+- It is no longer listed as a child of its parent shoot, so recursive traversals of the plant structure never reach it.
+- It has no internode geometry, so \ref PlantArchitecture::getShootTaper() throws an error rather than returning a made-up value.
+
+Use \ref PlantArchitecture::isShootPruned() to detect this state when iterating over shoot IDs:
+
+~~~~~~
+for (uint shootID : plantarchitecture.getAllShootIDs(plantID)) {
+    if (plantarchitecture.isShootPruned(plantID, shootID)) {
+        continue; // this shoot was pruned away
+    }
+    float taper = plantarchitecture.getShootTaper(plantID, shootID);
+}
+~~~~~~
+
+Pruning is idempotent: calling \ref PlantArchitecture::pruneBranch() again on a shoot that has already been pruned away does nothing. This matters when pruning a whole branch system, because removing a shoot also empties its descendants and a loop over shoot IDs will reach those descendants again later.
+
 \section PlantArchCarbohydrate Carbohydrate Model
 
 The PlantArchitecture plugin includes an optional carbohydrate model that simulates carbon allocation and its effects on plant growth dynamics. This model tracks photosynthate accumulation, maintenance and growth respiration, carbon transfer between shoots, and dynamically adjusts growth rates based on carbon availability. For detailed information on using the carbohydrate model, see the \subpage CarbohydrateModelDoc.
@@ -1125,7 +1233,7 @@ The Object IDs and Primitive UUIDs of an entire plant, or organ groups in the pl
     <tr> <td>\ref PlantArchitecture::getPlantFlowerObjectIDs()</td><td>Returns a vector of Object IDs for all flower objects.</td> </tr>
     <tr> <td>\ref PlantArchitecture::getPlantFruitObjectIDs()</td><td>Returns a vector of Object IDs for all fruit objects.</td> </tr>
     <tr> <td colspan=2> **Primitive UUIDs** </td> </tr>
-    <tr> <td>\ref PlantArchitecture::getAllPlantUUIDs(uint, bool)</td><td>Returns a vector of UUIDs for all primitives in the entire plant. Optionally includes hidden prototype primitives when \p include_hidden is set to true.</td> </tr>
+    <tr> <td>\ref PlantArchitecture::getAllPlantUUIDs(uint, bool) const "getAllPlantUUIDs()"</td><td>Returns a vector of UUIDs for all primitives in the entire plant. Optionally includes hidden prototype primitives when \p include_hidden is set to true.</td> </tr>
 </table>
 
 Note that individual methods to get UUIDs for all organ types are not provided. Instead, the user can query the Object IDs for each organ type and then get the corresponding UUIDs using the Context method \ref helios::Context::getObjectPrimitiveUUIDs().

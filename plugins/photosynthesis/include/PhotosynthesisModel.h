@@ -108,7 +108,7 @@ struct EmpiricalModelCoefficients {
         Tref = 298; // K
         Ci_ref = 290; // umol CO2/mol air
         Asat = 18.18; // umol/m^2-s
-        theta = 62.03; // W/m^2
+        theta = 62.03; // umol/m^2-s (PPFD; i_PAR is converted from W/m^2 before use)
         Tmin = 290; // K
         Topt = 303; // K
         q = 0.344; // unitless

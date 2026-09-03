@@ -23,16 +23,246 @@ extern "C" {
 
 using namespace helios;
 
+//! Outline, fill and label colors for image annotation overlays
+/**
+ * The same seven colors as the visualizer's COLORMAP_LINES, written out as discrete entries rather than sampled from that Colormap. Colormap resamples its anchors into 100 interpolated entries, so all
+ * but a few queries would return a blend of two adjacent anchors and lose the mutual distinctness that a categorical palette exists to provide. Bounding boxes index this palette by class ID, so that
+ * every box of a class is drawn alike, while segmentation masks index it per annotation, so that two touching objects of the same class stay distinguishable.
+ */
+static const std::vector<helios::RGBcolor> annotation_palette_colors{{0.000f, 0.447f, 0.741f}, {0.850f, 0.325f, 0.098f}, {0.929f, 0.694f, 0.125f}, {0.494f, 0.184f, 0.556f},
+                                                                     {0.466f, 0.674f, 0.188f}, {0.301f, 0.745f, 0.933f}, {0.635f, 0.078f, 0.184f}};
+
+//! One horizontal run of filled pixels within a segmentation mask, in image pixel coordinates
+struct MaskFillSpan {
+    //! Row of pixels the span covers. The span spans the full height of this row, from y to y+1.
+    float y;
+    //! Leftmost and rightmost edge of the run
+    float x_min, x_max;
+};
+
+//! Compute the horizontal runs covering the interior of a polygon, by even-odd scanline fill
+/**
+ * Used to fill segmentation mask contours. These are traced around a pixel mask and are routinely not simple polygons: a traced boundary crosses itself wherever the mask narrows to a one-pixel neck,
+ * which is common for objects with thin or branching parts. A triangulating fill such as ear clipping fails outright on such a contour, so a scanline fill is used instead. The even-odd rule handles a
+ * self-intersecting contour natively, needs no triangulation, and matches how the mask was defined in the first place, since these contours enclose whole pixels rather than describing a true vector shape.
+ *
+ * Scanlines are computed in image pixel space, one per pixel row, so the number of runs is bounded by the height of the mask rather than by its vertex count, and run edges land on the pixel boundaries the
+ * mask actually has.
+ *
+ * \param[in] polygon Polygon vertices in absolute image pixel coordinates. The closing edge is implicit, so the last vertex should not repeat the first.
+ * \return Runs covering the polygon interior, ordered by row. Empty if the polygon has fewer than three vertices.
+ */
+static std::vector<MaskFillSpan> computeMaskFillSpans(const std::vector<helios::vec2> &polygon) {
+
+    std::vector<MaskFillSpan> spans;
+
+    if (polygon.size() < 3) {
+        return spans;
+    }
+
+    float y_min = polygon.front().y;
+    float y_max = polygon.front().y;
+    for (const helios::vec2 &vertex: polygon) {
+        y_min = std::min(y_min, vertex.y);
+        y_max = std::max(y_max, vertex.y);
+    }
+
+    const int first_row = static_cast<int>(std::floor(y_min));
+    const int last_row = static_cast<int>(std::ceil(y_max));
+
+    std::vector<float> crossings;
+
+    for (int row = first_row; row < last_row; row++) {
+
+        // Sampled at the center of the row rather than at its edge, so that a horizontal contour edge lying exactly on a pixel boundary does not register as a crossing.
+        const float row_center = static_cast<float>(row) + 0.5f;
+
+        crossings.clear();
+        for (size_t i = 0; i < polygon.size(); i++) {
+            const helios::vec2 &a = polygon.at(i);
+            const helios::vec2 &b = polygon.at((i + 1) % polygon.size());
+
+            // Half-open comparison, so a vertex touching the scanline is counted for exactly one of the two edges meeting there rather than for both or neither.
+            if ((a.y <= row_center) != (b.y <= row_center)) {
+                const float t = (row_center - a.y) / (b.y - a.y);
+                crossings.push_back(a.x + t * (b.x - a.x));
+            }
+        }
+
+        if (crossings.size() < 2) {
+            continue;
+        }
+
+        std::sort(crossings.begin(), crossings.end());
+
+        // Even-odd: the interior lies between the first and second crossing, the third and fourth, and so on. A self-intersecting contour simply yields more crossings on the affected rows, which is why
+        // this fills correctly where a triangulating method fails.
+        for (size_t i = 0; i + 1 < crossings.size(); i += 2) {
+            if (crossings.at(i + 1) > crossings.at(i)) {
+                spans.push_back({static_cast<float>(row), crossings.at(i), crossings.at(i + 1)});
+            }
+        }
+    }
+
+    return spans;
+}
+
+//! Open a FreeType face for a named visualizer font, sized in framebuffer pixels
+/**
+ * Shared by Visualizer::addTextboxByCenter() and Visualizer::getTextboxSize(). The caller name is used only to build the error messages, so that each reports failures under its own name. FreeType types are
+ * confined to this file so that they do not leak into Visualizer.h.
+ */
+static void openVisualizerFontFace(FT_Library &ft, FT_Face &face, const char *fontname, uint fontsize_pixels, const char *caller_name) {
+    // Load the font
+    std::string font;
+    // std::snprintf(font,100,"plugins/visualizer/fonts/%s.ttf",fontname);
+    font = helios::resolvePluginAsset("visualizer", "fonts/" + (std::string) fontname + ".ttf").string();
+    auto error = FT_New_Face(ft, font.c_str(), 0, &face);
+    if (error != 0) {
+        switch (error) {
+            case FT_Err_Ok:; // do nothing
+            case FT_Err_Cannot_Open_Resource:
+                helios_runtime_error(std::string(caller_name) + ": Cannot open resource.");
+            case FT_Err_Unknown_File_Format:
+                helios_runtime_error(std::string(caller_name) + ": Unknown file format.");
+            case FT_Err_Invalid_File_Format:
+                helios_runtime_error(std::string(caller_name) + ": Invalid file format.");
+            case FT_Err_Invalid_Version:
+                helios_runtime_error(std::string(caller_name) + ": Invalid FreeType version.");
+            case FT_Err_Lower_Module_Version:
+                helios_runtime_error(std::string(caller_name) + ": Lower module version.");
+            case FT_Err_Invalid_Argument:
+                helios_runtime_error(std::string(caller_name) + ": Invalid argument.");
+            case FT_Err_Unimplemented_Feature:
+                helios_runtime_error(std::string(caller_name) + ": Unimplemented feature.");
+            case FT_Err_Invalid_Table:
+                helios_runtime_error(std::string(caller_name) + ": Invalid table.");
+            case FT_Err_Invalid_Offset:
+                helios_runtime_error(std::string(caller_name) + ": Invalid offset.");
+            case FT_Err_Array_Too_Large:
+                helios_runtime_error(std::string(caller_name) + ": Array too large.");
+            case FT_Err_Missing_Module:
+                helios_runtime_error(std::string(caller_name) + ": Missing module.");
+            case FT_Err_Out_Of_Memory:
+                helios_runtime_error(std::string(caller_name) + ": Out of memory.");
+            case FT_Err_Invalid_Face_Handle:
+                helios_runtime_error(std::string(caller_name) + ": Invalid face handle.");
+            case FT_Err_Invalid_Size_Handle:
+                helios_runtime_error(std::string(caller_name) + ": Invalid size handle.");
+            case FT_Err_Invalid_Slot_Handle:
+                helios_runtime_error(std::string(caller_name) + ": Invalid slot handle.");
+            case FT_Err_Invalid_CharMap_Handle:
+                helios_runtime_error(std::string(caller_name) + ": Invalid charmap handle.");
+            case FT_Err_Invalid_Glyph_Index:
+                helios_runtime_error(std::string(caller_name) + ": Invalid glyph index.");
+            case FT_Err_Invalid_Character_Code:
+                helios_runtime_error(std::string(caller_name) + ": Invalid character code.");
+            case FT_Err_Invalid_Glyph_Format:
+                helios_runtime_error(std::string(caller_name) + ": Invalid glyph format.");
+            case FT_Err_Cannot_Render_Glyph:
+                helios_runtime_error(std::string(caller_name) + ": Cannot render glyph.");
+            case FT_Err_Invalid_Outline:
+                helios_runtime_error(std::string(caller_name) + ": Invalid outline.");
+            case FT_Err_Invalid_Composite:
+                helios_runtime_error(std::string(caller_name) + ": Invalid composite glyph.");
+            case FT_Err_Too_Many_Hints:
+                helios_runtime_error(std::string(caller_name) + ": Too many hints.");
+            case FT_Err_Invalid_Pixel_Size:
+                helios_runtime_error(std::string(caller_name) + ": Invalid pixel size.");
+            case FT_Err_Invalid_Library_Handle:
+                helios_runtime_error(std::string(caller_name) + ": Invalid library handle.");
+            case FT_Err_Invalid_Stream_Handle:
+                helios_runtime_error(std::string(caller_name) + ": Invalid stream handle.");
+            case FT_Err_Invalid_Frame_Operation:
+                helios_runtime_error(std::string(caller_name) + ": Invalid frame operation.");
+            case FT_Err_Nested_Frame_Access:
+                helios_runtime_error(std::string(caller_name) + ": Nested frame access.");
+            case FT_Err_Invalid_Frame_Read:
+                helios_runtime_error(std::string(caller_name) + ": Invalid frame read.");
+            case FT_Err_Raster_Uninitialized:
+                helios_runtime_error(std::string(caller_name) + ": Raster uninitialized.");
+            case FT_Err_Raster_Corrupted:
+                helios_runtime_error(std::string(caller_name) + ": Raster corrupted.");
+            case FT_Err_Raster_Overflow:
+                helios_runtime_error(std::string(caller_name) + ": Raster overflow.");
+            case FT_Err_Raster_Negative_Height:
+                helios_runtime_error(std::string(caller_name) + ": Raster negative height.");
+            case FT_Err_Too_Many_Caches:
+                helios_runtime_error(std::string(caller_name) + ": Too many caches.");
+            case FT_Err_Invalid_Opcode:
+                helios_runtime_error(std::string(caller_name) + ": Invalid opcode.");
+            case FT_Err_Too_Few_Arguments:
+                helios_runtime_error(std::string(caller_name) + ": Too few arguments.");
+            case FT_Err_Stack_Overflow:
+                helios_runtime_error(std::string(caller_name) + ": Stack overflow.");
+            case FT_Err_Stack_Underflow:
+                helios_runtime_error(std::string(caller_name) + ": Stack underflow.");
+            case FT_Err_Ignore:
+                helios_runtime_error(std::string(caller_name) + ": Ignore.");
+            case FT_Err_No_Unicode_Glyph_Name:
+                helios_runtime_error(std::string(caller_name) + ": No Unicode glyph name.");
+            case FT_Err_Missing_Property:
+                helios_runtime_error(std::string(caller_name) + ": Missing property.");
+            default:
+                helios_runtime_error(std::string(caller_name) + ": Unknown FreeType error.");
+        }
+    }
+    if (error != 0) {
+        helios_runtime_error(std::string(caller_name) + ": Could not open font '" + std::string(fontname) + "'");
+    }
+
+
+    FT_Set_Pixel_Sizes(face, 0, fontsize_pixels);
+}
+
+//! Extent of a text string in framebuffer pixels, for a face already sized by openVisualizerFontFace()
+/**
+ * The advance is used rather than the bitmap width because it includes the side bearings. Summing bitmap widths underestimates the true extent and biases the text off-center. The '_' and '^'
+ * subscript and superscript markers occupy no width of their own and halve the size of the character that follows.
+ */
+static helios::vec2 measureTextExtentPixels(FT_Face face, const char *textstring) {
+    FT_GlyphSlot gg = face->glyph;
+
+    float wtext = 0;
+    float htext = 0;
+    float measure_scale = 1; // scaling factor for subscript/superscript
+    for (const char *p = textstring; *p; p++) { // looping over each letter in `textstring'
+        if (*p == '_' || *p == '^') { // subscript/superscript marker: occupies no width of its own
+            measure_scale = 0.5f;
+            continue;
+        }
+        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
+            continue;
+        wtext += float(gg->advance.x >> 6) * measure_scale;
+        htext = std::max(float(gg->bitmap.rows) * measure_scale, htext);
+        measure_scale = 1;
+    }
+
+    return helios::make_vec2(wtext, htext);
+}
+
+
+void Visualizer::resetCachedGeometryIDs() {
+    watermark_ID = 0;
+    background_rectangle_ID = 0;
+    background_sky_IDs.clear();
+    coordinate_axes_IDs.clear();
+    navigation_gizmo_IDs.clear();
+    colorbar_IDs.clear();
+}
+
 void Visualizer::clearGeometry() {
     geometry_handler.clearAllGeometry();
+    resetCachedGeometryIDs();
 
     contextUUIDs_build.clear();
+    contextUUIDs_uploaded.clear();
     colorPrimitives_UUIDs.clear();
     colorPrimitives_objIDs.clear();
-    contextUUIDs_build.clear();
     depth_buffer_data.clear();
     colorbar_min = 0;
     colorbar_max = 0;
+    colorbar_range_set = false;
 }
 
 size_t Visualizer::addRectangleByCenter(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const RGBcolor &color, CoordinateSystem coordFlag) {
@@ -207,6 +437,39 @@ size_t Visualizer::addRectangleByVertices(const std::vector<vec3> &vertices, con
 
     size_t UUID = geometry_handler.sampleUUID();
     geometry_handler.addGeometry(UUID, GeometryHandler::GEOMETRY_TYPE_RECTANGLE, vertices, RGBA::black, uvs, textureID, false, false, coordFlag, true, false);
+    return UUID;
+}
+
+size_t Visualizer::addAlphaBlendedRectangleByCenter(const vec3 &center, const vec2 &size, const SphericalCoord &rotation, const char *texture_file, CoordinateSystem coordFlag) {
+    std::vector<vec3> vertices;
+    vertices.resize(4);
+
+    vec3 v0 = make_vec3(-0.5f * size.x, -0.5f * size.y, 0.f);
+    v0 = rotatePointAboutLine(v0, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v0 = rotatePointAboutLine(v0, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(0) = center + v0;
+
+    vec3 v1 = make_vec3(+0.5f * size.x, -0.5f * size.y, 0.f);
+    v1 = rotatePointAboutLine(v1, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v1 = rotatePointAboutLine(v1, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(1) = center + v1;
+
+    vec3 v2 = make_vec3(+0.5f * size.x, +0.5f * size.y, 0.f);
+    v2 = rotatePointAboutLine(v2, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v2 = rotatePointAboutLine(v2, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(2) = center + v2;
+
+    vec3 v3 = make_vec3(-0.5f * size.x, +0.5f * size.y, 0.f);
+    v3 = rotatePointAboutLine(v3, make_vec3(0, 0, 0), make_vec3(1, 0, 0), -rotation.elevation);
+    v3 = rotatePointAboutLine(v3, make_vec3(0, 0, 0), make_vec3(0, 0, 1), -rotation.azimuth);
+    vertices.at(3) = center + v3;
+
+    const std::vector<vec2> uvs{{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+
+    uint textureID = registerTextureImage(texture_file);
+
+    size_t UUID = geometry_handler.sampleUUID();
+    geometry_handler.addGeometry(UUID, GeometryHandler::GEOMETRY_TYPE_RECTANGLE, vertices, RGBA::black, uvs, textureID, false, false, coordFlag, true, false, false, 0, true);
     return UUID;
 }
 
@@ -691,6 +954,27 @@ std::vector<size_t> Visualizer::addSkyDomeByCenter(float radius, const vec3 &cen
     return UUIDs;
 }
 
+vec2 Visualizer::getTextboxSize(const char *textstring, uint fontsize, const char *fontname) const {
+    FT_Library ft;
+    FT_Face face;
+
+    if (FT_Init_FreeType(&ft) != 0) {
+        helios_runtime_error("ERROR (Visualizer::getTextboxSize): Could not init freetype library");
+    }
+
+    // Matches addTextboxByCenter(): glyphs are rasterized at framebuffer resolution, so the point size is scaled by the DPI ratio and the resulting metrics are in framebuffer pixels.
+    const uint fontsize_pixels = std::max(1u, static_cast<uint>(std::lround(fontsize * getDPIScale())));
+
+    openVisualizerFontFace(ft, face, fontname, fontsize_pixels, "ERROR (Visualizer::getTextboxSize)");
+
+    const vec2 extent_pixels = measureTextExtentPixels(face, textstring);
+
+    FT_Done_Face(face);
+    FT_Done_FreeType(ft);
+
+    return make_vec2(extent_pixels.x / float(Wframebuffer), extent_pixels.y / float(Hframebuffer));
+}
+
 std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const vec3 &center, const SphericalCoord &rotation, const RGBcolor &fontcolor, uint fontsize, const char *fontname, CoordinateSystem coordinate_system) {
     FT_Library ft; // FreeType objects
     FT_Face face;
@@ -702,132 +986,26 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
 
     std::vector<std::vector<unsigned char>> maskData; // This will hold the letter mask data
 
-    // Load the font
-    std::string font;
-    // std::snprintf(font,100,"plugins/visualizer/fonts/%s.ttf",fontname);
-    font = helios::resolvePluginAsset("visualizer", "fonts/" + (std::string) fontname + ".ttf").string();
-    auto error = FT_New_Face(ft, font.c_str(), 0, &face);
-    if (error != 0) {
-        switch (error) {
-            case FT_Err_Ok:; // do nothing
-            case FT_Err_Cannot_Open_Resource:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Cannot open resource.");
-            case FT_Err_Unknown_File_Format:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Unknown file format.");
-            case FT_Err_Invalid_File_Format:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid file format.");
-            case FT_Err_Invalid_Version:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid FreeType version.");
-            case FT_Err_Lower_Module_Version:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Lower module version.");
-            case FT_Err_Invalid_Argument:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid argument.");
-            case FT_Err_Unimplemented_Feature:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Unimplemented feature.");
-            case FT_Err_Invalid_Table:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid table.");
-            case FT_Err_Invalid_Offset:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid offset.");
-            case FT_Err_Array_Too_Large:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Array too large.");
-            case FT_Err_Missing_Module:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Missing module.");
-            case FT_Err_Out_Of_Memory:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Out of memory.");
-            case FT_Err_Invalid_Face_Handle:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid face handle.");
-            case FT_Err_Invalid_Size_Handle:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid size handle.");
-            case FT_Err_Invalid_Slot_Handle:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid slot handle.");
-            case FT_Err_Invalid_CharMap_Handle:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid charmap handle.");
-            case FT_Err_Invalid_Glyph_Index:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid glyph index.");
-            case FT_Err_Invalid_Character_Code:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid character code.");
-            case FT_Err_Invalid_Glyph_Format:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid glyph format.");
-            case FT_Err_Cannot_Render_Glyph:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Cannot render glyph.");
-            case FT_Err_Invalid_Outline:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid outline.");
-            case FT_Err_Invalid_Composite:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid composite glyph.");
-            case FT_Err_Too_Many_Hints:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Too many hints.");
-            case FT_Err_Invalid_Pixel_Size:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid pixel size.");
-            case FT_Err_Invalid_Library_Handle:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid library handle.");
-            case FT_Err_Invalid_Stream_Handle:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid stream handle.");
-            case FT_Err_Invalid_Frame_Operation:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid frame operation.");
-            case FT_Err_Nested_Frame_Access:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Nested frame access.");
-            case FT_Err_Invalid_Frame_Read:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid frame read.");
-            case FT_Err_Raster_Uninitialized:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Raster uninitialized.");
-            case FT_Err_Raster_Corrupted:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Raster corrupted.");
-            case FT_Err_Raster_Overflow:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Raster overflow.");
-            case FT_Err_Raster_Negative_Height:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Raster negative height.");
-            case FT_Err_Too_Many_Caches:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Too many caches.");
-            case FT_Err_Invalid_Opcode:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Invalid opcode.");
-            case FT_Err_Too_Few_Arguments:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Too few arguments.");
-            case FT_Err_Stack_Overflow:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Stack overflow.");
-            case FT_Err_Stack_Underflow:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Stack underflow.");
-            case FT_Err_Ignore:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Ignore.");
-            case FT_Err_No_Unicode_Glyph_Name:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): No Unicode glyph name.");
-            case FT_Err_Missing_Property:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Missing property.");
-            default:
-                helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Unknown FreeType error.");
-        }
-    }
-    if (error != 0) {
-        helios_runtime_error("ERROR (Visualizer::addTextboxByCenter): Could not open font '" + std::string(fontname) + "'");
-    }
+    // Glyphs are rasterized at framebuffer resolution rather than at the window size in screen
+    // coordinates. On a high-DPI display the two differ, and a bitmap generated at window
+    // resolution is magnified when drawn into the larger framebuffer, which looks blocky. The quad
+    // the glyph is drawn on is sized in window-normalized coordinates below and is unaffected;
+    // only the resolution of the source bitmap changes.
+    const float dpi_scale = getDPIScale();
+    const uint fontsize_pixels = std::max(1u, static_cast<uint>(std::lround(fontsize * dpi_scale)));
 
-    // Load the font size
-    FT_Set_Pixel_Sizes(face, 0, fontsize);
+    openVisualizerFontFace(ft, face, fontname, fontsize_pixels, "ERROR (Visualizer::addTextboxByCenter)");
 
-    // x- and y- size of a pixel in [0,1] normalized coordinates
-    float sx = 1.f / float(Wdisplay);
-    float sy = 1.f / float(Hdisplay);
-
-    FT_GlyphSlot gg = face->glyph; // FreeType glyph for font `fontname' and size `fontsize'
+    // x- and y- size of a framebuffer pixel in [0,1] normalized coordinates. The FreeType glyph
+    // metrics used below are in framebuffer pixels, so these convert them directly.
+    float sx = 1.f / float(Wframebuffer);
+    float sy = 1.f / float(Hframebuffer);
 
     // first, find out how wide the text is going to be
     // This is because we need to know the width beforehand if we want to center the text
-    float wtext = 0;
-    float htext = 0;
-    const char *textt = textstring;
-    for (const char *p = textt; *p; p++) { // looping over each letter in `textstring'
-        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
-            continue;
-        float scale = 1;
-        if (strncmp(p, "_", 1) == 0) { // subscript
-            scale = 0.5;
-            continue;
-        } else if (strncmp(p, "^", 1) == 0) { // superscript
-            scale = 0.5;
-            continue;
-        }
-        wtext += gg->bitmap.width * sx * scale;
-        htext = std::max(gg->bitmap.rows * sy, htext);
-    }
+    const vec2 text_extent_pixels = measureTextExtentPixels(face, textstring);
+    const float wtext = text_extent_pixels.x * sx;
+    const float htext = text_extent_pixels.y * sy;
 
     // location of the center of our textbox
     float xt = center.x - 0.5f * wtext;
@@ -859,18 +1037,20 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
     float scale = 1; // scaling factor for subscript/superscript
     for (const char *p = text; *p; p++) { // looping over each letter in `textstring'
 
-        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
-            continue;
-
-        if (strncmp(p, "_", 1) == 0) { // subscript
-            offset = -0.3f * sy;
+        // The offset is a fraction of the em size, so that the sub/superscript displacement is
+        // independent of both the DPI scale and the window dimensions.
+        if (*p == '_') { // subscript
+            offset = -0.3f * float(fontsize_pixels) * sy;
             scale = 0.5f;
             continue;
-        } else if (strncmp(p, "^", 1) == 0) { // superscript
-            offset = 0.3f * sy;
+        } else if (*p == '^') { // superscript
+            offset = 0.3f * float(fontsize_pixels) * sy;
             scale = 0.5f;
             continue;
         }
+
+        if (FT_Load_Char(face, *p, FT_LOAD_RENDER)) // load the letter
+            continue;
 
         // Copy the letter's mask into 2D `maskData' structure
         uint2 tsize(g->bitmap.width, g->bitmap.rows);
@@ -882,15 +1062,22 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
             }
         }
 
-        // size of this letter (i.e., the size of the rectangle we're going to make
-        vec2 lettersize = make_vec2(g->bitmap.width * scale * sx, g->bitmap.rows * scale * sy);
+        // size of this letter (i.e., the size of the rectangle we're going to make. The glyph
+        // texture carries a one-texel transparent border on each side (see Visualizer::Texture),
+        // so the rectangle is grown to match, leaving the glyph itself at its true size.
+        constexpr float glyph_texture_border = 1.f;
+        vec2 lettersize = make_vec2((float(g->bitmap.width) + 2.f * glyph_texture_border) * scale * sx, (float(g->bitmap.rows) + 2.f * glyph_texture_border) * scale * sy);
 
-        // position of this letter (i.e., the center of the rectangle we're going to make
-        vec3 letterposition = make_vec3(xt + g->bitmap_left * sx + 0.5 * lettersize.x, yt + g->bitmap_top * (sy + offset) - 0.5 * lettersize.y, center.z);
+        // position of this letter (i.e., the center of the rectangle we're going to make. The
+        // bearings are scaled alongside the glyph so that sub/superscripts are not positioned as
+        // though they were full size, and `offset' translates the baseline rather than scaling it.
+        // The bearings locate the glyph itself, so they are offset by the border to keep the glyph
+        // in the same place now that the rectangle extends beyond it.
+        vec3 letterposition = make_vec3(xt + (float(g->bitmap_left) - glyph_texture_border) * scale * sx + 0.5f * lettersize.x, yt + (float(g->bitmap_top) + glyph_texture_border) * scale * sy + offset - 0.5f * lettersize.y, center.z);
 
         // advance the x- and y- letter position
-        xt += (g->advance.x >> 6) * sx * scale;
-        yt += (g->advance.y >> 6) * sy * scale;
+        xt += float(g->advance.x >> 6) * sx * scale;
+        yt += float(g->advance.y >> 6) * sy * scale;
 
         // reset the offset and scale
         offset = 0;
@@ -908,6 +1095,215 @@ std::vector<size_t> Visualizer::addTextboxByCenter(const char *textstring, const
 
     FT_Done_Face(face);
     FT_Done_FreeType(ft);
+
+    return UUIDs;
+}
+
+std::vector<size_t> Visualizer::addBoundingBoxOverlay(const std::vector<BoundingBox> &bounding_boxes, const std::map<uint, std::string> &class_names, const vec4 &image_extent, float line_width, uint fontsize) {
+
+    // Window-normalized z is passed straight through to normalized device coordinates and the depth test is GL_LEQUAL, so smaller z is nearer the viewer. The image quad sits at z=0, so the overlay needs a
+    // negative z. The label text must be strictly nearer than its own chip: glyphs render in the depth-sorted transparent pass with depth writes disabled, but they still depth-test, so a glyph coplanar
+    // with its chip would be discarded by it.
+    constexpr float z_box_outline = -0.01f;
+    constexpr float z_label_chip = -0.02f;
+    constexpr float z_label_text = -0.03f;
+
+    constexpr char label_font[] = "OpenSans-Regular";
+
+    const float image_width = image_extent.z - image_extent.x;
+    const float image_height = image_extent.w - image_extent.y;
+
+    // One em in window-normalized units. The chip height is derived from this rather than from the measured text height so that every chip in an overlay is the same height. The measured height is that of
+    // the tallest glyph in that particular string, so "corn" would otherwise get a visibly shorter chip than "bunny".
+    const uint fontsize_pixels = std::max(1u, static_cast<uint>(std::lround(fontsize * getDPIScale())));
+    const float em = float(fontsize_pixels) / float(Hframebuffer);
+
+    std::vector<size_t> UUIDs;
+
+    for (const BoundingBox &box: bounding_boxes) {
+
+        std::string label;
+        if (class_names.empty()) {
+            // No class name file was available, so the numeric class ID is all there is to show.
+            label = std::to_string(box.class_ID);
+        } else if (class_names.find(box.class_ID) == class_names.end()) {
+            helios_runtime_error("ERROR (Visualizer::addBoundingBoxOverlay): The bounding boxes contain class ID " + std::to_string(box.class_ID) +
+                                 ", which is not defined in the class name file. The bounding box annotations and the class names do not correspond to each other.");
+        } else {
+            label = class_names.at(box.class_ID);
+        }
+
+        // Map from normalized image coordinates, whose origin is the top-left corner of the image, into window-normalized coordinates, whose origin is the bottom-left corner of the window. Measuring down
+        // from the top edge of the image extent performs the vertical flip.
+        float x_left = image_extent.x + (box.center.x - 0.5f * box.size.x) * image_width;
+        float x_right = image_extent.x + (box.center.x + 0.5f * box.size.x) * image_width;
+        float y_top = image_extent.w - (box.center.y - 0.5f * box.size.y) * image_height;
+        float y_bottom = image_extent.w - (box.center.y + 0.5f * box.size.y) * image_height;
+
+        // A box touching the image border can extend slightly outside it once its center and size are recombined. Clamping to the image rather than to the window also keeps the label off the letterboxed
+        // margin, and keeps every vertex inside the drawable area so that no "outside of drawable area" warnings are emitted.
+        x_left = clamp(x_left, image_extent.x, image_extent.z);
+        x_right = clamp(x_right, image_extent.x, image_extent.z);
+        y_bottom = clamp(y_bottom, image_extent.y, image_extent.w);
+        y_top = clamp(y_top, image_extent.y, image_extent.w);
+
+        const RGBcolor box_color = annotation_palette_colors.at(box.class_ID % annotation_palette_colors.size());
+
+        // The outline is drawn as four lines because there is no unfilled-rectangle primitive, following addColorbarByCenter(), which draws its border the same way. The line width is scaled by the DPI
+        // ratio because the line geometry shader expresses width against the framebuffer, so an unscaled width would draw at half size on a high-DPI display.
+        const std::vector<vec3> outline{make_vec3(x_left, y_bottom, z_box_outline), make_vec3(x_right, y_bottom, z_box_outline), make_vec3(x_right, y_top, z_box_outline), make_vec3(x_left, y_top, z_box_outline),
+                                        make_vec3(x_left, y_bottom, z_box_outline)};
+        for (size_t i = 0; i + 1 < outline.size(); i++) {
+            UUIDs.push_back(addLine(outline.at(i), outline.at(i + 1), box_color, line_width * getDPIScale(), COORDINATES_WINDOW_NORMALIZED));
+        }
+
+        // The label chip is anchored inside the box at its top-left corner. Placing it inside rather than above the box means that a box at the top edge of the image still has somewhere to put its label,
+        // and that a vertical stack of boxes does not draw each label over the box above it.
+        const vec2 text_size = getTextboxSize(label.c_str(), fontsize, label_font);
+        const vec2 chip_size = make_vec2(text_size.x + em, 1.6f * em);
+
+        float chip_x_min = x_left;
+        if (chip_x_min + chip_size.x > image_extent.z) {
+            chip_x_min = image_extent.z - chip_size.x;
+        }
+        chip_x_min = std::max(chip_x_min, image_extent.x);
+        const float chip_x_max = std::min(chip_x_min + chip_size.x, image_extent.z);
+        const float chip_y_max = y_top;
+        const float chip_y_min = std::max(chip_y_max - chip_size.y, image_extent.y);
+
+        // Built from explicit corners rather than from a center and a size, so that the clamped edges survive exactly. Recovering the corners from a center and a half-size can land a rounding step outside
+        // the drawable area, which would emit a warning for a box that is legitimately flush with the image border.
+        const std::vector<vec3> chip_vertices{make_vec3(chip_x_min, chip_y_min, z_label_chip), make_vec3(chip_x_max, chip_y_min, z_label_chip), make_vec3(chip_x_max, chip_y_max, z_label_chip),
+                                              make_vec3(chip_x_min, chip_y_max, z_label_chip)};
+        UUIDs.push_back(addRectangleByVertices(chip_vertices, make_RGBAcolor(box_color, 1.f), COORDINATES_WINDOW_NORMALIZED));
+
+        const vec3 chip_center = make_vec3(0.5f * (chip_x_min + chip_x_max), 0.5f * (chip_y_min + chip_y_max), z_label_chip);
+
+        // Black or white text, whichever contrasts with the chip, so that the label stays readable across the whole palette.
+        const float chip_luminance = 0.299f * box_color.r + 0.587f * box_color.g + 0.114f * box_color.b;
+        const RGBcolor font_color = (chip_luminance > 0.5f) ? RGB::black : RGB::white;
+
+        const std::vector<size_t> label_UUIDs = addTextboxByCenter(label.c_str(), make_vec3(chip_center.x, chip_center.y, z_label_text), make_SphericalCoord(0, 0), font_color, fontsize, label_font,
+                                                                   COORDINATES_WINDOW_NORMALIZED);
+        UUIDs.insert(UUIDs.end(), label_UUIDs.begin(), label_UUIDs.end());
+    }
+
+    return UUIDs;
+}
+
+std::vector<size_t> Visualizer::addSegmentationMaskOverlay(const std::vector<SegmentationMask> &masks, const vec4 &image_extent, float fill_opacity, float line_width, uint fontsize, bool show_labels) {
+
+    // Same depth convention as addBoundingBoxOverlay(): the image quad sits at z=0 and smaller z is nearer the viewer, so the overlay needs a negative z. The fill sits behind the outline so that an
+    // outline is never dimmed by the translucent fill drawn over it, and the label text stays strictly nearer than its own chip because glyphs still depth-test against it.
+    constexpr float z_mask_fill = -0.005f;
+    constexpr float z_mask_outline = -0.01f;
+    constexpr float z_label_chip = -0.02f;
+    constexpr float z_label_text = -0.03f;
+
+    constexpr char label_font[] = "OpenSans-Regular";
+
+    const float image_width = image_extent.z - image_extent.x;
+    const float image_height = image_extent.w - image_extent.y;
+
+    // One em in window-normalized units, giving every chip in an overlay the same height regardless of which glyphs its label happens to contain.
+    const uint fontsize_pixels = std::max(1u, static_cast<uint>(std::lround(fontsize * getDPIScale())));
+    const float em = float(fontsize_pixels) / float(Hframebuffer);
+
+    std::vector<size_t> UUIDs;
+
+    for (size_t mask_index = 0; mask_index < masks.size(); mask_index++) {
+
+        const SegmentationMask &mask = masks.at(mask_index);
+
+        // Colored by position in the file rather than by class ID, so that two touching objects of the same class do not merge into one indistinguishable blob.
+        const RGBcolor mask_color = annotation_palette_colors.at(mask_index % annotation_palette_colors.size());
+
+        const std::string label = mask.class_name.empty() ? std::to_string(mask.class_ID) : mask.class_name;
+
+        // Map from absolute image pixels, whose origin is the top-left corner of the image, into window-normalized coordinates, whose origin is the bottom-left corner of the window. Measuring down from
+        // the top edge of the image extent performs the vertical flip. Clamping to the image keeps every vertex inside the drawable area, so no "outside of drawable area" warnings are emitted.
+        auto toWindowCoordinates = [&](const vec2 &pixel) {
+            const float x = image_extent.x + (pixel.x / mask.image_size.x) * image_width;
+            const float y = image_extent.w - (pixel.y / mask.image_size.y) * image_height;
+            return make_vec2(clamp(x, image_extent.x, image_extent.z), clamp(y, image_extent.y, image_extent.w));
+        };
+
+        // Tracks the top-left-most vertex of the whole mask, where the label chip is anchored.
+        vec2 label_anchor = make_vec2(image_extent.z, image_extent.y);
+        bool label_anchor_set = false;
+
+        for (const std::vector<vec2> &polygon: mask.polygons) {
+
+            std::vector<vec2> vertices;
+            vertices.reserve(polygon.size());
+            for (const vec2 &pixel: polygon) {
+                vertices.push_back(toWindowCoordinates(pixel));
+            }
+
+            for (const vec2 &vertex: vertices) {
+                // Highest vertex wins, and the leftmost of those if several share that height, matching where addBoundingBoxOverlay() puts its chip.
+                if (!label_anchor_set || vertex.y > label_anchor.y || (vertex.y == label_anchor.y && vertex.x < label_anchor.x)) {
+                    label_anchor = vertex;
+                    label_anchor_set = true;
+                }
+            }
+
+            if (fill_opacity > 0.f) {
+                // The fill is computed in image pixel space and mapped afterwards, so that its runs align with the pixel rows the mask is defined on rather than with the window.
+                for (const MaskFillSpan &span: computeMaskFillSpans(polygon)) {
+                    const vec2 top_left = toWindowCoordinates(make_vec2(span.x_min, span.y));
+                    const vec2 bottom_right = toWindowCoordinates(make_vec2(span.x_max, span.y + 1.f));
+
+                    // A run clipped away to nothing by the image extent would otherwise emit a degenerate rectangle.
+                    if (bottom_right.x <= top_left.x || top_left.y <= bottom_right.y) {
+                        continue;
+                    }
+
+                    const std::vector<vec3> span_vertices{make_vec3(top_left.x, bottom_right.y, z_mask_fill), make_vec3(bottom_right.x, bottom_right.y, z_mask_fill),
+                                                          make_vec3(bottom_right.x, top_left.y, z_mask_fill), make_vec3(top_left.x, top_left.y, z_mask_fill)};
+                    UUIDs.push_back(addRectangleByVertices(span_vertices, make_RGBAcolor(mask_color, fill_opacity), COORDINATES_WINDOW_NORMALIZED));
+                }
+            }
+
+            // The outline closes back onto the first vertex, since the contour is a loop whose closing edge is implicit.
+            for (size_t i = 0; i < vertices.size(); i++) {
+                const vec2 &start = vertices.at(i);
+                const vec2 &end = vertices.at((i + 1) % vertices.size());
+                UUIDs.push_back(addLine(make_vec3(start.x, start.y, z_mask_outline), make_vec3(end.x, end.y, z_mask_outline), mask_color, line_width * getDPIScale(), COORDINATES_WINDOW_NORMALIZED));
+            }
+        }
+
+        // The chip and its text are the only geometry the label contributes, so suppressing it is simply a matter of not adding them. The fill and outline above are unaffected.
+        if (!show_labels || !label_anchor_set) {
+            continue;
+        }
+
+        const vec2 text_size = getTextboxSize(label.c_str(), fontsize, label_font);
+        const vec2 chip_size = make_vec2(text_size.x + em, 1.6f * em);
+
+        float chip_x_min = label_anchor.x;
+        if (chip_x_min + chip_size.x > image_extent.z) {
+            chip_x_min = image_extent.z - chip_size.x;
+        }
+        chip_x_min = std::max(chip_x_min, image_extent.x);
+        const float chip_x_max = std::min(chip_x_min + chip_size.x, image_extent.z);
+        const float chip_y_max = label_anchor.y;
+        const float chip_y_min = std::max(chip_y_max - chip_size.y, image_extent.y);
+
+        const std::vector<vec3> chip_vertices{make_vec3(chip_x_min, chip_y_min, z_label_chip), make_vec3(chip_x_max, chip_y_min, z_label_chip), make_vec3(chip_x_max, chip_y_max, z_label_chip),
+                                              make_vec3(chip_x_min, chip_y_max, z_label_chip)};
+        UUIDs.push_back(addRectangleByVertices(chip_vertices, make_RGBAcolor(mask_color, 1.f), COORDINATES_WINDOW_NORMALIZED));
+
+        const vec3 chip_center = make_vec3(0.5f * (chip_x_min + chip_x_max), 0.5f * (chip_y_min + chip_y_max), z_label_chip);
+
+        // Black or white text, whichever contrasts with the chip, so that the label stays readable across the whole palette.
+        const float chip_luminance = 0.299f * mask_color.r + 0.587f * mask_color.g + 0.114f * mask_color.b;
+        const RGBcolor font_color = (chip_luminance > 0.5f) ? RGB::black : RGB::white;
+
+        const std::vector<size_t> label_UUIDs = addTextboxByCenter(label.c_str(), make_vec3(chip_center.x, chip_center.y, z_label_text), make_SphericalCoord(0, 0), font_color, fontsize, label_font,
+                                                                   COORDINATES_WINDOW_NORMALIZED);
+        UUIDs.insert(UUIDs.end(), label_UUIDs.begin(), label_UUIDs.end());
+    }
 
     return UUIDs;
 }
@@ -934,26 +1330,27 @@ std::vector<size_t> Visualizer::addColorbarByCenter(const char *title, const hel
 
     // Generate tick values - either user-specified or auto-generated
     std::vector<float> tick_values;
+    double tick_spacing = 1.0;
     if (!colorbar_ticks.empty()) {
         tick_values = colorbar_ticks;
+        // User-supplied ticks have no generating spacing, so derive it from the values themselves.
+        if (tick_values.size() > 1) {
+            tick_spacing = std::fabs(tick_values[1] - tick_values[0]);
+        }
     } else {
-        // Auto-generate nice tick values with adaptive count based on colorbar size
-        // Estimate: need ~0.04 normalized units per tick label vertically (based on font size)
-        // This accounts for font size, spacing, and readability
-        float estimated_tick_spacing = 0.04f * (colorbar_fontsize / 12.0f); // Scale with font size
-        int max_ticks = std::max(3, static_cast<int>(size.y / estimated_tick_spacing));
+        // Auto-generate nice tick values with adaptive count based on colorbar size.
+        // Tick labels are laid out along the length of the bar, so the space available for them is
+        // set by size.x - size.y is the bar's thickness and does not constrain the label count.
+        // Estimate ~0.06 normalized units of width per label, scaled with the font size.
+        float estimated_tick_spacing = 0.06f * (colorbar_fontsize / 12.0f);
+        int max_ticks = std::max(3, static_cast<int>(size.x / estimated_tick_spacing));
         max_ticks = std::min(max_ticks, 8); // Cap at 8 ticks maximum
 
-        tick_values = generateNiceTicks(cmin, cmax, colorbar_integer_data, max_ticks);
+        // Ticks are confined to [cmin, cmax] as they are generated. Filtering them afterwards -
+        // as this code used to - could delete every tick that generateNiceTicks() placed outside
+        // the range, leaving the colorbar with a single label and no sense of scale.
+        tick_values = generateColorbarTicks(cmin, cmax, colorbar_integer_data, max_ticks, &tick_spacing);
     }
-
-    // Filter out ticks that fall outside the colorbar range [cmin, cmax].
-    // generateNiceTicks() may extend tick bounds to the next "nice" number past the data range,
-    // which is desirable for general axis labeling but produces orphaned labels on a fixed-range colorbar.
-    const float range_epsilon = 1e-4f * std::max(std::fabs(cmax - cmin), 1.0f);
-    tick_values.erase(std::remove_if(tick_values.begin(), tick_values.end(),
-                                     [cmin, cmax, range_epsilon](float v) { return v < cmin - range_epsilon || v > cmax + range_epsilon; }),
-                      tick_values.end());
 
     uint Nticks = tick_values.size();
 
@@ -982,17 +1379,20 @@ std::vector<size_t> Visualizer::addColorbarByCenter(const char *title, const hel
         UUIDs.push_back(addLine(border.at(i), border.at(i + 1), font_color, COORDINATES_WINDOW_NORMALIZED));
     }
 
-    // Calculate tick spacing for formatting
-    double tick_spacing = 1.0;
-    if (Nticks > 1) {
-        tick_spacing = std::fabs(tick_values[1] - tick_values[0]);
-    }
+    // tick_spacing was set alongside tick_values above. It is the spacing used to generate them,
+    // not one recovered from the final vector, so it stays correct when there is only one tick or
+    // when the values are not uniformly spaced.
+
+    // Guard against a degenerate colormap range, which would otherwise divide by zero below and
+    // produce non-finite vertex coordinates.
+    const float colorbar_span = cmax - cmin;
+    const bool has_finite_span = std::isfinite(colorbar_span) && std::fabs(colorbar_span) > 0.f;
 
     std::vector<vec3> ticks;
     ticks.resize(2);
     for (uint i = 0; i < Nticks; i++) {
         float value = tick_values.at(i);
-        float x = center.x - 0.5f * size.x + (value - cmin) / (cmax - cmin) * size.x;
+        float x = has_finite_span ? center.x - 0.5f * size.x + (value - cmin) / colorbar_span * size.x : center.x;
 
         // Format tick label using new formatting function
         std::string label = formatTickLabel(value, tick_spacing, colorbar_integer_data);
@@ -1004,7 +1404,10 @@ std::vector<size_t> Visualizer::addColorbarByCenter(const char *title, const hel
         if (i > 0 && i < Nticks - 1) {
             ticks[0] = make_vec3(x, center.y - 0.25f * size.y, center.z - 0.001f);
             ticks[1] = make_vec3(x, center.y - 0.25f * size.y + 0.05f * size.y, center.z - 0.001f);
-            addLine(ticks[0], ticks[1], make_RGBcolor(0.25, 0.25, 0.25), COORDINATES_WINDOW_NORMALIZED);
+            // The returned UUID must be recorded like every other piece of colorbar geometry:
+            // updateColorbar() deletes the old colorbar by iterating colorbar_IDs, so a tick mark
+            // left out of this list is never deleted and accumulates on every colorbar refresh.
+            UUIDs.push_back(addLine(ticks[0], ticks[1], make_RGBcolor(0.25, 0.25, 0.25), COORDINATES_WINDOW_NORMALIZED));
             ticks[0] = make_vec3(x, center.y + 0.25f * size.y, center.z - 0.001f);
             ticks[1] = make_vec3(x, center.y + 0.25f * size.y - 0.05f * size.y, center.z - 0.001f);
             UUIDs.push_back(addLine(ticks[0], ticks[1], make_RGBcolor(0.25, 0.25, 0.25), COORDINATES_WINDOW_NORMALIZED));
@@ -1278,9 +1681,17 @@ void Visualizer::updateNavigationGizmo() {
 
     SphericalCoord no_rotation = make_SphericalCoord(0, 0);
 
-    size_t x_bubble_id = addRectangleByCenter(x_bubble_pos, calculateBubbleSize(0), no_rotation, "plugins/visualizer/textures/nav_gizmo_x.png", COORDINATES_WINDOW_NORMALIZED);
-    size_t y_bubble_id = addRectangleByCenter(y_bubble_pos, calculateBubbleSize(1), no_rotation, "plugins/visualizer/textures/nav_gizmo_y.png", COORDINATES_WINDOW_NORMALIZED);
-    size_t z_bubble_id = addRectangleByCenter(z_bubble_pos, calculateBubbleSize(2), no_rotation, "plugins/visualizer/textures/nav_gizmo_z.png", COORDINATES_WINDOW_NORMALIZED);
+    // Resolved once rather than on every call: this function runs on each frame the gizmo is
+    // visible, and resolvePluginAsset() stats the filesystem. If resolution throws because an asset
+    // is missing, the static is left uninitialized and the next call retries, so a transient failure
+    // is not cached.
+    static const std::string x_bubble_texture = helios::resolvePluginAsset("visualizer", "textures/nav_gizmo_x.png").string();
+    static const std::string y_bubble_texture = helios::resolvePluginAsset("visualizer", "textures/nav_gizmo_y.png").string();
+    static const std::string z_bubble_texture = helios::resolvePluginAsset("visualizer", "textures/nav_gizmo_z.png").string();
+
+    size_t x_bubble_id = addRectangleByCenter(x_bubble_pos, calculateBubbleSize(0), no_rotation, x_bubble_texture.c_str(), COORDINATES_WINDOW_NORMALIZED);
+    size_t y_bubble_id = addRectangleByCenter(y_bubble_pos, calculateBubbleSize(1), no_rotation, y_bubble_texture.c_str(), COORDINATES_WINDOW_NORMALIZED);
+    size_t z_bubble_id = addRectangleByCenter(z_bubble_pos, calculateBubbleSize(2), no_rotation, z_bubble_texture.c_str(), COORDINATES_WINDOW_NORMALIZED);
 
     navigation_gizmo_IDs.push_back(x_bubble_id);
     navigation_gizmo_IDs.push_back(y_bubble_id);

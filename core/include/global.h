@@ -48,10 +48,30 @@ constexpr float PI_F = 3.14159265358979323846f;
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef USE_OPENMP
 #include <omp.h>
+#endif
+
+//! Begin a region in which uses of deprecated declarations do not warn
+/**
+ * A deprecated member still has to be copied by the assignment and duplication code of the structure holding it, and that code is not the caller the deprecation is aimed at. Wrapping those internal uses
+ * keeps the warning pointed at user code that sets the parameter, rather than firing on the library's own bookkeeping. Pair each use with <code>HELIOS_POP_IGNORE_DEPRECATED</code>.
+ */
+#if defined(__clang__)
+#define HELIOS_PUSH_IGNORE_DEPRECATED _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"")
+#define HELIOS_POP_IGNORE_DEPRECATED _Pragma("clang diagnostic pop")
+#elif defined(__GNUC__)
+#define HELIOS_PUSH_IGNORE_DEPRECATED _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+#define HELIOS_POP_IGNORE_DEPRECATED _Pragma("GCC diagnostic pop")
+#elif defined(_MSC_VER)
+#define HELIOS_PUSH_IGNORE_DEPRECATED __pragma(warning(push)) __pragma(warning(disable : 4996))
+#define HELIOS_POP_IGNORE_DEPRECATED __pragma(warning(pop))
+#else
+#define HELIOS_PUSH_IGNORE_DEPRECATED
+#define HELIOS_POP_IGNORE_DEPRECATED
 #endif
 
 //! Unsigned integer type.
@@ -1124,14 +1144,6 @@ namespace helios {
      * \return Value of y interpolated at location x.
      */
     [[nodiscard]] float interp1(const std::vector<helios::vec2> &points, float x);
-
-    //! Function to calculate the distance between two points
-    /**
-     * \param[in] p1 first point (vec3)
-     * \param[in] p2 second point (vec3)
-     * \return distance between p1 and p2 in three dimensions
-     */
-    [[nodiscard]] float point_distance(const helios::vec3 &p1, const helios::vec3 &p2);
 
     //! Generate linearly spaced values between two endpoints
     /**

@@ -54,7 +54,10 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
         hideNavigationGizmo();
     }
 
-    // Update the plot window to ensure latest rendering
+    // Re-render so that the captured frame reflects the hidden navigation gizmo. This has to be a full plotUpdate():
+    // a caller may hand the Visualizer a Context and capture straight away without an intervening plotUpdate(), and
+    // only the full path builds that geometry. It is no longer the expensive call it once was, because
+    // buildContextGeometry_private() now rebuilds only primitives that actually changed since the last build.
     this->plotUpdate(true);
 
     std::string outfile_str = outfile;
@@ -117,7 +120,9 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
 
         // Bind the appropriate framebuffer
         if (headless && offscreenFramebufferID != 0) {
-            glBindFramebuffer(GL_FRAMEBUFFER, offscreenFramebufferID);
+            // Render into the multisampled framebuffer when one exists; it is blit-resolved into the
+            // single-sampled color texture before any readback.
+            glBindFramebuffer(GL_FRAMEBUFFER, offscreenMultisampleFramebufferID != 0 ? offscreenMultisampleFramebufferID : offscreenFramebufferID);
             glViewport(0, 0, Wframebuffer, Hframebuffer);
         } else {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -140,6 +145,14 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
         primaryShader.enableTextureMasks();
         primaryShader.setLightingModel(primaryLightingModel);
         primaryShader.setLightIntensity(lightintensity);
+        primaryShader.setColorBoost(colorboost);
+        primaryShader.setLinearPipeline(linear_pipeline_enabled);
+        primaryShader.setExposure(exposure);
+        primaryShader.setCameraPositionUniform(camera_eye_location);
+        primaryShader.setPhongMaterial(phong_material.ambient, phong_material.diffuse, phong_material.specular, phong_material.shininess);
+        primaryShader.setAmbientColors(ambient_sky_color, ambient_ground_color);
+        primaryShader.setSmoothShading(smooth_shading_enabled);
+        primaryShader.setPhongMaterialTable(phong_material_table_size);
 
         render(false);
 
@@ -218,7 +231,8 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
             uvs = {helios::make_vec2(0.f, 0.f), helios::make_vec2(1.f, 0.f), helios::make_vec2(1.f, 1.f / aspect_ratio), helios::make_vec2(0.f, 1.f / aspect_ratio)};
         }
 
-        background_rectangle_ID = addRectangleByVertices(vertices, "plugins/visualizer/textures/transparent.jpg", uvs, COORDINATES_WINDOW_NORMALIZED);
+        std::string texture_path = helios::resolvePluginAsset("visualizer", "textures/transparent.jpg").string();
+        background_rectangle_ID = addRectangleByVertices(vertices, texture_path.c_str(), uvs, COORDINATES_WINDOW_NORMALIZED);
     }
 
     // Restore navigation gizmo state
@@ -227,7 +241,7 @@ void Visualizer::printWindow(const char *outfile, const std::string &image_forma
     }
 }
 
-void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
+helios::vec4 Visualizer::buildImageDisplayGeometry(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
     if (pixel_data.empty()) {
         helios_runtime_error("ERROR (Visualizer::displayImage): Pixel data was empty.");
     }
@@ -237,6 +251,8 @@ void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint
 
     // Clear out any existing geometry
     geometry_handler.clearAllGeometry();
+
+    resetCachedGeometryIDs();
 
     // Register the data as a texture
     uint textureID = registerTextureImage(pixel_data, helios::make_uint2(width_pixels, height_pixels));
@@ -267,6 +283,12 @@ void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint
     navigation_gizmo_was_enabled_before_image_display = navigation_gizmo_enabled;
     hideNavigationGizmo();
 
+    return make_vec4(center.x - 0.5f * image_size.x, center.y - 0.5f * image_size.y, center.x + 0.5f * image_size.x, center.y + 0.5f * image_size.y);
+}
+
+void Visualizer::displayImage(const std::vector<unsigned char> &pixel_data, uint width_pixels, uint height_pixels) {
+    buildImageDisplayGeometry(pixel_data, width_pixels, height_pixels);
+
     plotInteractive();
 }
 
@@ -288,6 +310,97 @@ void Visualizer::displayImage(const std::string &file_name) {
     displayImage(image_data, image_width, image_height);
 }
 
+void Visualizer::displayImageWithBoundingBoxes(const std::string &image_file, const std::string &bbox_file, const std::string &classes_file, float line_width, uint fontsize) {
+
+    if (!validateTextureFile(image_file)) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithBoundingBoxes): File " + image_file + " does not exist or is not a valid image file.");
+    }
+
+    // Validated here rather than being left to addLine(), which would report the DPI-scaled width and not the value the caller passed.
+    if (line_width <= 0.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithBoundingBoxes): Line width must be positive (got " + std::to_string(line_width) + ").");
+    }
+    if (line_width * getDPIScale() > 100.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithBoundingBoxes): Line width " + std::to_string(line_width) + " scales to " + std::to_string(line_width * getDPIScale()) +
+                             " framebuffer pixels on this display, which exceeds the maximum supported width of 100. Please specify a smaller line width value.");
+    }
+
+    const std::vector<BoundingBox> bounding_boxes = readBoundingBoxFile(bbox_file);
+
+    // An explicitly given class name file must exist. When none is given, "classes.txt" beside the annotation file is used if it is there, and otherwise boxes are labeled with their numeric class ID.
+    std::map<uint, std::string> class_names;
+    if (!classes_file.empty()) {
+        class_names = readBoundingBoxClassNames(classes_file);
+    } else {
+        const std::string sibling_classes_file = helios::getFilePath(bbox_file, true) + "classes.txt";
+        if (std::filesystem::exists(sibling_classes_file)) {
+            class_names = readBoundingBoxClassNames(sibling_classes_file);
+        }
+    }
+
+    if (message_flag && bounding_boxes.empty()) {
+        std::cout << "Note (Visualizer::displayImageWithBoundingBoxes): The bounding box annotation file '" << bbox_file << "' contains no boxes, so the image is displayed without an overlay." << std::endl;
+    }
+
+    std::vector<unsigned char> image_data;
+    uint image_width, image_height;
+
+    if (image_file.substr(image_file.find_last_of('.') + 1) == "png") {
+        read_png_file(image_file.c_str(), image_data, image_height, image_width);
+    } else { // JPEG
+        read_JPEG_file(image_file.c_str(), image_data, image_height, image_width);
+    }
+
+    const vec4 image_extent = buildImageDisplayGeometry(image_data, image_width, image_height);
+
+    addBoundingBoxOverlay(bounding_boxes, class_names, image_extent, line_width, fontsize);
+
+    plotInteractive();
+}
+
+void Visualizer::displayImageWithSegmentationMasks(const std::string &image_file, const std::string &mask_file, float fill_opacity, float line_width, uint fontsize, bool show_labels) {
+
+    if (!validateTextureFile(image_file)) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): File " + image_file + " does not exist or is not a valid image file.");
+    }
+
+    if (fill_opacity < 0.f || fill_opacity > 1.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): Fill opacity must be between 0 and 1 (got " + std::to_string(fill_opacity) + ").");
+    }
+
+    // Validated here rather than being left to addLine(), which would report the DPI-scaled width and not the value the caller passed.
+    if (line_width <= 0.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): Line width must be positive (got " + std::to_string(line_width) + ").");
+    }
+    if (line_width * getDPIScale() > 100.f) {
+        helios_runtime_error("ERROR (Visualizer::displayImageWithSegmentationMasks): Line width " + std::to_string(line_width) + " scales to " + std::to_string(line_width * getDPIScale()) +
+                             " framebuffer pixels on this display, which exceeds the maximum supported width of 100. Please specify a smaller line width value.");
+    }
+
+    // The image is named so that a mask file describing several images still resolves to the one being displayed.
+    const std::vector<SegmentationMask> masks = readSegmentationMaskFile(mask_file, image_file);
+
+    if (message_flag && masks.empty()) {
+        std::cout << "Note (Visualizer::displayImageWithSegmentationMasks): The segmentation mask file '" << mask_file << "' contains no masks for this image, so the image is displayed without an overlay."
+                  << std::endl;
+    }
+
+    std::vector<unsigned char> image_data;
+    uint image_width, image_height;
+
+    if (image_file.substr(image_file.find_last_of('.') + 1) == "png") {
+        read_png_file(image_file.c_str(), image_data, image_height, image_width);
+    } else { // JPEG
+        read_JPEG_file(image_file.c_str(), image_data, image_height, image_width);
+    }
+
+    const vec4 image_extent = buildImageDisplayGeometry(image_data, image_width, image_height);
+
+    addSegmentationMaskOverlay(masks, image_extent, fill_opacity, line_width, fontsize, show_labels);
+
+    plotInteractive();
+}
+
 void Visualizer::getWindowPixelsRGB(uint *buffer) const {
     // Validate framebuffer completeness
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
@@ -306,6 +419,10 @@ void Visualizer::getWindowPixelsRGB(uint *buffer) const {
         // Bind the offscreen framebuffer to ensure we read from the rendered content
         GLint current_framebuffer;
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &current_framebuffer);
+
+        // Rendering targets a multisampled framebuffer when anti-aliasing is active; resolve it into
+        // the single-sampled color texture before reading, or this reads an unrendered attachment.
+        resolveOffscreenMultisampleFramebuffer();
 
         glBindFramebuffer(GL_FRAMEBUFFER, offscreenFramebufferID);
 
@@ -394,9 +511,21 @@ void Visualizer::getWindowPixelsRGB(uint *buffer) const {
 
     glFinish();
 
-    for (int i = 0; i < 3 * Wframebuffer * Hframebuffer; i++) {
+    for (size_t i = 0; i < size_t(3) * size_t(Wframebuffer) * size_t(Hframebuffer); i++) {
         buffer[i] = (unsigned int) buff[i];
     }
+}
+
+void Visualizer::getWindowPixelsRGB(std::vector<uint> &pixel_data, uint &width_pixels, uint &height_pixels) const {
+    width_pixels = Wframebuffer;
+    height_pixels = Hframebuffer;
+
+    // Sizing the buffer here rather than trusting the caller removes the opportunity to undersize
+    // it: the framebuffer is larger than the requested window on a high-DPI display, so a buffer
+    // sized from the window dimensions is too small by the square of the DPI scale factor.
+    pixel_data.resize(size_t(3) * size_t(Wframebuffer) * size_t(Hframebuffer));
+
+    getWindowPixelsRGB(pixel_data.data());
 }
 
 void Visualizer::getDepthMap(float *buffer) {
@@ -618,6 +747,14 @@ std::vector<helios::vec3> Visualizer::plotInteractive() {
 
         primaryShader.setLightingModel(primaryLightingModel);
         primaryShader.setLightIntensity(lightintensity);
+        primaryShader.setColorBoost(colorboost);
+        primaryShader.setLinearPipeline(linear_pipeline_enabled);
+        primaryShader.setExposure(exposure);
+        primaryShader.setCameraPositionUniform(camera_eye_location);
+        primaryShader.setPhongMaterial(phong_material.ambient, phong_material.diffuse, phong_material.specular, phong_material.shininess);
+        primaryShader.setAmbientColors(ambient_sky_color, ambient_ground_color);
+        primaryShader.setSmoothShading(smooth_shading_enabled);
+        primaryShader.setPhongMaterialTable(phong_material_table_size);
 
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, depthTexture);
@@ -643,6 +780,16 @@ std::vector<helios::vec3> Visualizer::plotInteractive() {
         Hframebuffer = height;
     } while (glfwGetKey((GLFWwindow *) window, GLFW_KEY_ESCAPE) != GLFW_PRESS && glfwWindowShouldClose((GLFWwindow *) window) == 0);
 
+    // Closing the window latches GLFW's should-close flag, and nothing else ever clears it. Leaving
+    // it set would make every later plotInteractive() on this Visualizer fall straight back out of
+    // the loop above, so a program that displays several images in sequence would block on the
+    // first and then flash the rest past in a single frame each. Closing with the escape key did
+    // not have that effect, because that condition is transient -- which made the behavior depend
+    // on how the user dismissed the window.
+    if (window != nullptr) {
+        glfwSetWindowShouldClose((GLFWwindow *) window, GLFW_FALSE);
+    }
+
     glfwPollEvents();
 
     assert(checkerrors());
@@ -658,6 +805,19 @@ std::vector<helios::vec3> Visualizer::plotInteractive() {
 }
 
 void Visualizer::plotOnce(bool getKeystrokes) {
+
+    // plotOnce() is the body of plotInteractive()'s render loop, exposed so an external loop (e.g.
+    // ProjectBuilder's ImGui frame) can drive rendering itself. plotInteractive() uploads geometry
+    // once before entering its loop; an external caller has no such preamble, so the upload has to
+    // happen here. Without it, render() draws using the CPU-side primitive counts against GPU
+    // buffers that were only glGenBuffers'd and never filled - and a freshly constructed Visualizer
+    // always has at least the gradient background rectangle queued by initialize(), so
+    // glMultiDrawArrays() fetches from a zero-byte vertex buffer and the driver faults.
+    //
+    // Unlike plotUpdate(), this deliberately does NOT call buildContextGeometry_private():
+    // plotOnce() is the cheap re-render path and must not re-walk the Context. transferBufferData()
+    // returns immediately when no geometry is dirty, so the steady-state cost is a single branch.
+    transferBufferData();
 
     bool shadow_flag = (primaryLightingModel == Visualizer::LIGHTING_PHONG_SHADOWED);
 
@@ -698,9 +858,18 @@ void Visualizer::plotOnce(bool getKeystrokes) {
 
     assert(checkerrors());
 
-    // Render to the screen
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, Wframebuffer, Hframebuffer);
+    // Render to the screen or offscreen framebuffer depending on headless mode
+    if (headless && offscreenFramebufferID != 0) {
+        // Render into the multisampled framebuffer when one exists; it is blit-resolved into the
+        // single-sampled color texture before any readback. Falls back to rendering directly into
+        // the single-sampled framebuffer when anti-aliasing is off or the driver refused it.
+        glBindFramebuffer(GL_FRAMEBUFFER, offscreenMultisampleFramebufferID != 0 ? offscreenMultisampleFramebufferID : offscreenFramebufferID);
+        glViewport(0, 0, Wframebuffer, Hframebuffer);
+    } else {
+        // Render to the default framebuffer for windowed mode
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, Wframebuffer, Hframebuffer);
+    }
 
     if (background_is_transparent) {
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -727,6 +896,14 @@ void Visualizer::plotOnce(bool getKeystrokes) {
 
     primaryShader.setLightingModel(primaryLightingModel);
     primaryShader.setLightIntensity(lightintensity);
+    primaryShader.setColorBoost(colorboost);
+    primaryShader.setLinearPipeline(linear_pipeline_enabled);
+    primaryShader.setExposure(exposure);
+    primaryShader.setCameraPositionUniform(camera_eye_location);
+    primaryShader.setPhongMaterial(phong_material.ambient, phong_material.diffuse, phong_material.specular, phong_material.shininess);
+    primaryShader.setAmbientColors(ambient_sky_color, ambient_ground_color);
+    primaryShader.setSmoothShading(smooth_shading_enabled);
+    primaryShader.setPhongMaterialTable(phong_material_table_size);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, depthTexture);
@@ -751,17 +928,31 @@ void Visualizer::plotOnce(bool getKeystrokes) {
         }
     }
 
-    int width, height;
-    glfwGetFramebufferSize((GLFWwindow *) window, &width, &height);
-    Wframebuffer = width;
-    Hframebuffer = height;
+    // Only track the window's framebuffer size in windowed mode. The headless context is backed by
+    // a 1x1 dummy window (see createOffscreenContext()), so querying it here would shrink
+    // Wframebuffer/Hframebuffer to 1x1 and corrupt every subsequent getWindowPixelsRGB(),
+    // printWindow() and depth-buffer call, all of which size themselves off these members.
+    if (!headless && window != nullptr) {
+        int width, height;
+        glfwGetFramebufferSize((GLFWwindow *) window, &width, &height);
+        Wframebuffer = width;
+        Hframebuffer = height;
+    }
 }
 
 void Visualizer::transferBufferData() {
     assert(checkerrors());
 
     const auto &dirty = geometry_handler.getDirtyUUIDs();
-    if (dirty.empty()) {
+    if (dirty.empty() && !geometry_handler.doesBufferNeedFullUpdate()) {
+        // No geometry changed, so the buffer rewrites below would all restore identical contents -
+        // skip them. The texture array is tracked by a separate flag and texArray==0 means the array
+        // object does not exist at all, so that check must not be skipped along with them. It is
+        // repeated verbatim after the geometry upload below.
+        if (textures_dirty || texArray == 0) {
+            transferTextureData();
+            textures_dirty = false;
+        }
         return;
     }
 
@@ -801,7 +992,9 @@ void Visualizer::transferBufferData() {
         const auto *face_index_data = geometry_handler.getFaceIndexData_ptr(geometry_type);
         const auto *color_data = geometry_handler.getColorData_ptr(geometry_type);
         const auto *normal_data = geometry_handler.getNormalData_ptr(geometry_type);
+        const auto *vertex_normal_data = geometry_handler.getVertexNormalData_ptr(geometry_type);
         const auto *texture_flag_data = geometry_handler.getTextureFlagData_ptr(geometry_type);
+        const auto *material_index_data = geometry_handler.getMaterialIndexData_ptr(geometry_type);
         const auto *texture_ID_data = geometry_handler.getTextureIDData_ptr(geometry_type);
         const auto *coordinate_flag_data = geometry_handler.getCoordinateFlagData_ptr(geometry_type);
         const auto *sky_geometry_flag_data = geometry_handler.getSkyGeometryFlagData_ptr(geometry_type);
@@ -809,10 +1002,12 @@ void Visualizer::transferBufferData() {
 
         ensureArrayBuffer(vertex_buffer.at(gi), GL_ARRAY_BUFFER, vertex_data->size() * sizeof(GLfloat), vertex_data->data());
         ensureArrayBuffer(uv_buffer.at(gi), GL_ARRAY_BUFFER, uv_data->size() * sizeof(GLfloat), uv_data->data());
+        ensureArrayBuffer(vertex_normal_buffer.at(gi), GL_ARRAY_BUFFER, vertex_normal_data->size() * sizeof(GLfloat), vertex_normal_data->data());
         ensureArrayBuffer(face_index_buffer.at(gi), GL_ARRAY_BUFFER, face_index_data->size() * sizeof(GLint), face_index_data->data());
         ensureTextureBuffer(color_buffer.at(gi), color_texture_object.at(gi), GL_RGBA32F, color_data->size() * sizeof(GLfloat), color_data->data());
         ensureTextureBuffer(normal_buffer.at(gi), normal_texture_object.at(gi), GL_RGB32F, normal_data->size() * sizeof(GLfloat), normal_data->data());
         ensureTextureBuffer(texture_flag_buffer.at(gi), texture_flag_texture_object.at(gi), GL_R32I, texture_flag_data->size() * sizeof(GLint), texture_flag_data->data());
+        ensureTextureBuffer(material_index_buffer.at(gi), material_index_texture_object.at(gi), GL_R32I, material_index_data->size() * sizeof(GLint), material_index_data->data());
         ensureTextureBuffer(texture_ID_buffer.at(gi), texture_ID_texture_object.at(gi), GL_R32I, texture_ID_data->size() * sizeof(GLint), texture_ID_data->data());
         ensureTextureBuffer(coordinate_flag_buffer.at(gi), coordinate_flag_texture_object.at(gi), GL_R32I, coordinate_flag_data->size() * sizeof(GLint), coordinate_flag_data->data());
         ensureTextureBuffer(sky_geometry_flag_buffer.at(gi), sky_geometry_flag_texture_object.at(gi), GL_R8I, sky_geometry_flag_data->size() * sizeof(GLbyte), sky_geometry_flag_data->data());
@@ -840,6 +1035,9 @@ void Visualizer::transferBufferData() {
         glBindBuffer(GL_ARRAY_BUFFER, uv_buffer.at(i));
         glBufferSubData(GL_ARRAY_BUFFER, index_map.uv_index * sizeof(GLfloat), vcount * 2 * sizeof(GLfloat), geometry_handler.getUVData_ptr(geometry_type)->data() + index_map.uv_index);
 
+        glBindBuffer(GL_ARRAY_BUFFER, vertex_normal_buffer.at(i));
+        glBufferSubData(GL_ARRAY_BUFFER, index_map.vertex_normal_index * sizeof(GLfloat), vcount * 3 * sizeof(GLfloat), geometry_handler.getVertexNormalData_ptr(geometry_type)->data() + index_map.vertex_normal_index);
+
         glBindBuffer(GL_ARRAY_BUFFER, face_index_buffer.at(i));
         glBufferSubData(GL_ARRAY_BUFFER, index_map.face_index_index * sizeof(GLint), vcount * sizeof(GLint), geometry_handler.getFaceIndexData_ptr(geometry_type)->data() + index_map.face_index_index);
 
@@ -852,6 +1050,11 @@ void Visualizer::transferBufferData() {
         glBufferSubData(GL_ARRAY_BUFFER, index_map.normal_index * sizeof(GLfloat), 3 * sizeof(GLfloat), geometry_handler.getNormalData_ptr(geometry_type)->data() + index_map.normal_index);
         glBindTexture(GL_TEXTURE_BUFFER, normal_texture_object.at(i));
         glTexBuffer(GL_TEXTURE_BUFFER, GL_RGB32F, normal_buffer.at(i));
+
+        glBindBuffer(GL_ARRAY_BUFFER, material_index_buffer.at(i));
+        glBufferSubData(GL_ARRAY_BUFFER, index_map.material_index_index * sizeof(GLint), sizeof(GLint), geometry_handler.getMaterialIndexData_ptr(geometry_type)->data() + index_map.material_index_index);
+        glBindTexture(GL_TEXTURE_BUFFER, material_index_texture_object.at(i));
+        glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, material_index_buffer.at(i));
 
         glBindBuffer(GL_ARRAY_BUFFER, texture_flag_buffer.at(i));
         glBufferSubData(GL_ARRAY_BUFFER, index_map.texture_flag_index * sizeof(GLint), sizeof(GLint), geometry_handler.getTextureFlagData_ptr(geometry_type)->data() + index_map.texture_flag_index);
@@ -908,11 +1111,47 @@ void Visualizer::transferBufferData() {
 
 void Visualizer::transferTextureData() {
 
+    // Glyphs are drawn with linear filtering so that the antialiased coverage mask FreeType
+    // produces is interpolated rather than point sampled. The rest of the texture array keeps
+    // GL_NEAREST, so this is applied through a sampler object bound only for glyph draws.
+    if (glyph_sampler == 0) {
+        glGenSamplers(1, &glyph_sampler);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(glyph_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    // The watermark is drawn well below the resolution of its source image, and point sampling a
+    // minified image keeps one source texel per output pixel and discards the rest, which is what
+    // makes its edges look jagged. Mipmaps are deliberately not used: every texture shares a layer
+    // with the unused remainder of that layer, and glGenerateMipmap reduces the layer as a whole,
+    // so each successive level would blend a texture with the region outside it.
+    if (image_sampler == 0) {
+        glGenSamplers(1, &image_sampler);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(image_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
     const size_t layers = std::max<size_t>(1, texture_manager.size());
 
+    // Every layer of a texture array has the same dimensions, so they are sized to the largest
+    // texture present rather than to maximum_texture_size. The latter is a clamp applied to
+    // oversized images when they are loaded, not a statement about what needs to be allocated:
+    // using it here gave every glyph a 2048x2048 RGBA8 layer, so a colorbar's worth of text cost
+    // hundreds of megabytes of VRAM to store a few kilobytes of coverage masks.
+    uint2 required_layer_size = make_uint2(1, 1);
+    for (const auto &[textureID, texture]: texture_manager) {
+        required_layer_size.x = std::max(required_layer_size.x, texture.texture_resolution.x);
+        required_layer_size.y = std::max(required_layer_size.y, texture.texture_resolution.y);
+    }
+
     // Check if texture needs recreation (Windows requires deleting and recreating texture
-    // when layer count changes due to glTexStorage3D immutable format restrictions)
-    if (texArray == 0 || layers != texture_array_layers) {
+    // when layer count changes due to glTexStorage3D immutable format restrictions). The storage
+    // is immutable, so a layer that no longer fits forces the same reallocation.
+    if (texArray == 0 || layers != texture_array_layers || required_layer_size.x != texture_array_layer_size.x || required_layer_size.y != texture_array_layer_size.y) {
         // Delete existing texture if it exists
         if (texArray != 0) {
             glDeleteTextures(1, &texArray);
@@ -921,8 +1160,20 @@ void Visualizer::transferTextureData() {
         // Create new texture
         glGenTextures(1, &texArray);
         glBindTexture(GL_TEXTURE_2D_ARRAY, texArray);
-        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, maximum_texture_size.x, maximum_texture_size.y, layers);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, required_layer_size.x, required_layer_size.y, layers);
+
+        // Textures smaller than the layer occupy only its lower-left corner, and glTexStorage3D
+        // leaves the remainder undefined. Nearest-neighbour sampling never reaches those texels
+        // because the UV rescale factors stop at the texture's own edge, but a linear filter taps
+        // one texel beyond it, so the array is cleared to fully transparent first. This makes the
+        // region outside every texture well defined rather than whatever the driver left there.
+        const std::vector<unsigned char> transparent_layer(size_t(required_layer_size.x) * size_t(required_layer_size.y) * 4, 0);
+        for (size_t layer = 0; layer < layers; layer++) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, GLint(layer), required_layer_size.x, required_layer_size.y, 1, GL_RGBA, GL_UNSIGNED_BYTE, transparent_layer.data());
+        }
+
         texture_array_layers = layers;
+        texture_array_layer_size = required_layer_size;
     } else {
         glBindTexture(GL_TEXTURE_2D_ARRAY, texArray);
     }
@@ -954,8 +1205,10 @@ void Visualizer::transferTextureData() {
 
         glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, textureID, texture.texture_resolution.x, texture.texture_resolution.y, 1, externalFormat, GL_UNSIGNED_BYTE, texture.texture_data.data());
 
-        uv_rescale.at(textureID * 2 + 0) = float(texture.texture_resolution.x) / float(maximum_texture_size.x);
-        uv_rescale.at(textureID * 2 + 1) = float(texture.texture_resolution.y) / float(maximum_texture_size.y);
+        // Confines sampling to the sub-rectangle this texture occupies within its layer. The
+        // divisor is the layer size actually allocated above, not maximum_texture_size.
+        uv_rescale.at(textureID * 2 + 0) = float(texture.texture_resolution.x) / float(texture_array_layer_size.x);
+        uv_rescale.at(textureID * 2 + 1) = float(texture.texture_resolution.y) / float(texture_array_layer_size.y);
     }
 
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
@@ -1029,6 +1282,12 @@ void Visualizer::render(bool shadow) const {
         glBindTexture(GL_TEXTURE_BUFFER, hidden_flag_texture_object.at(triangle_ind));
         // Note: Uniform location already set during shader initialization
 
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_BUFFER, material_index_texture_object.at(triangle_ind));
+
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_BUFFER, phong_material_table_texture);
+
         glBindVertexArray(primaryShader.vertex_array_IDs.at(triangle_ind));
         assert(checkerrors());
         glDrawArrays(GL_TRIANGLES, 0, triangle_count * 3);
@@ -1067,6 +1326,12 @@ void Visualizer::render(bool shadow) const {
         glBindTexture(GL_TEXTURE_BUFFER, hidden_flag_texture_object.at(rectangle_ind));
         // Note: Uniform location already set during shader initialization
 
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_BUFFER, material_index_texture_object.at(rectangle_ind));
+
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_BUFFER, phong_material_table_texture);
+
         glBindVertexArray(primaryShader.vertex_array_IDs.at(rectangle_ind));
 
         std::vector<GLint> opaque_firsts;
@@ -1076,6 +1341,8 @@ void Visualizer::render(bool shadow) const {
             float depth;
         };
         std::vector<TransparentRect> transparent_rects;
+        //! Opaque rectangles drawn individually so that a linear-filtering sampler can be bound
+        std::vector<size_t> linear_filtered_rects;
 
         const auto &texFlags = *geometry_handler.getTextureFlagData_ptr(GeometryHandler::GEOMETRY_TYPE_RECTANGLE);
         const auto &colors = *geometry_handler.getColorData_ptr(GeometryHandler::GEOMETRY_TYPE_RECTANGLE);
@@ -1094,7 +1361,15 @@ void Visualizer::render(bool shadow) const {
 
             bool isGlyph = texFlags.at(i) == 3;
             float alpha = colors.at(i * 4 + 3);
-            if (!isGlyph && alpha >= 1.f) {
+            // Alpha-blended image overlays are translucent at their edges, so like glyphs they are
+            // held out of the batched opaque draw. They are also drawn with linear filtering,
+            // which the rest of the batch must not use: everything else textured is alpha-masked
+            // against a fixed threshold, and interpolating those samples moves where that
+            // threshold falls and would alter leaf and bark cutouts.
+            const bool isBlendedImage = texFlags.at(i) == 4;
+            if (isBlendedImage) {
+                linear_filtered_rects.push_back(i);
+            } else if (!isGlyph && alpha >= 1.f) {
                 opaque_firsts.push_back(static_cast<GLint>(i * 4));
                 opaque_counts.push_back(4);
             } else {
@@ -1114,14 +1389,44 @@ void Visualizer::render(bool shadow) const {
             glMultiDrawArrays(GL_TRIANGLE_FAN, opaque_firsts.data(), opaque_counts.data(), static_cast<GLsizei>(opaque_firsts.size()));
         }
 
+        // Alpha-blended image overlays. Drawn after the opaque batch and with depth writes
+        // disabled, since their edges are partially transparent: writing depth would let an edge
+        // pixel occlude whatever is behind it and leave a halo. These are window-normalized
+        // overlays drawn in front of the scene, so they need no depth sorting among themselves.
+        if (!linear_filtered_rects.empty()) {
+            glDepthMask(GL_FALSE);
+            if (image_sampler != 0) {
+                glBindSampler(0, image_sampler);
+            }
+            for (const size_t index: linear_filtered_rects) {
+                glDrawArrays(GL_TRIANGLE_FAN, static_cast<GLint>(index * 4), 4);
+            }
+            if (image_sampler != 0) {
+                glBindSampler(0, 0);
+            }
+            glDepthMask(GL_TRUE);
+        }
+
         if (!transparent_rects.empty()) {
             std::sort(transparent_rects.begin(), transparent_rects.end(), [](const TransparentRect &a, const TransparentRect &b) {
                 return a.depth > b.depth; // farthest first
             });
 
             glDepthMask(GL_FALSE);
+            // Glyphs need linear filtering to keep their antialiased edges smooth, while the image
+            // textures interleaved with them in this list must stay point sampled. The sampler is
+            // bound and unbound as the list crosses between the two rather than per draw.
+            bool glyph_sampler_bound = false;
             for (const auto &tr: transparent_rects) {
+                const bool needs_glyph_sampler = glyph_sampler != 0 && texFlags.at(tr.index) == 3;
+                if (needs_glyph_sampler != glyph_sampler_bound) {
+                    glBindSampler(0, needs_glyph_sampler ? glyph_sampler : 0);
+                    glyph_sampler_bound = needs_glyph_sampler;
+                }
                 glDrawArrays(GL_TRIANGLE_FAN, static_cast<GLint>(tr.index * 4), 4);
+            }
+            if (glyph_sampler_bound) {
+                glBindSampler(0, 0);
             }
             glDepthMask(GL_TRUE);
         }
@@ -1140,6 +1445,14 @@ void Visualizer::render(bool shadow) const {
             lineShader.setLightDirection(light_direction);
             lineShader.setLightingModel(primaryLightingModel);
             lineShader.setLightIntensity(lightintensity);
+            lineShader.setColorBoost(colorboost);
+            lineShader.setLinearPipeline(linear_pipeline_enabled);
+            lineShader.setExposure(exposure);
+            lineShader.setCameraPositionUniform(camera_eye_location);
+            lineShader.setPhongMaterial(phong_material.ambient, phong_material.diffuse, phong_material.specular, phong_material.shininess);
+            lineShader.setAmbientColors(ambient_sky_color, ambient_ground_color);
+            lineShader.setSmoothShading(smooth_shading_enabled);
+            lineShader.setPhongMaterialTable(phong_material_table_size);
 
             // Set viewport size for geometry shader
             GLint viewportSizeLoc = glGetUniformLocation(lineShader.shaderID, "viewportSize");
@@ -1179,6 +1492,12 @@ void Visualizer::render(bool shadow) const {
             glActiveTexture(GL_TEXTURE8);
             glBindTexture(GL_TEXTURE_BUFFER, hidden_flag_texture_object.at(line_ind));
             // Note: Uniform location already set during shader initialization
+
+            glActiveTexture(GL_TEXTURE10);
+            glBindTexture(GL_TEXTURE_BUFFER, material_index_texture_object.at(line_ind));
+
+            glActiveTexture(GL_TEXTURE11);
+            glBindTexture(GL_TEXTURE_BUFFER, phong_material_table_texture);
 
             glBindVertexArray(lineShader.vertex_array_IDs.at(line_ind));
 
@@ -1224,6 +1543,14 @@ void Visualizer::render(bool shadow) const {
             primaryShader.setDepthBiasMatrix(computeShadowDepthMVP());
             primaryShader.setLightDirection(light_direction);
             primaryShader.setLightIntensity(lightintensity);
+            primaryShader.setColorBoost(colorboost);
+            primaryShader.setLinearPipeline(linear_pipeline_enabled);
+            primaryShader.setExposure(exposure);
+            primaryShader.setCameraPositionUniform(camera_eye_location);
+            primaryShader.setPhongMaterial(phong_material.ambient, phong_material.diffuse, phong_material.specular, phong_material.shininess);
+            primaryShader.setAmbientColors(ambient_sky_color, ambient_ground_color);
+            primaryShader.setSmoothShading(smooth_shading_enabled);
+            primaryShader.setPhongMaterialTable(phong_material_table_size);
 
             // Rebind texture array and uv_rescale for primary shader
             glActiveTexture(GL_TEXTURE0);
@@ -1265,6 +1592,12 @@ void Visualizer::render(bool shadow) const {
             glActiveTexture(GL_TEXTURE8);
             glBindTexture(GL_TEXTURE_BUFFER, hidden_flag_texture_object.at(point_ind));
             // Note: Uniform location already set during shader initialization
+
+            glActiveTexture(GL_TEXTURE10);
+            glBindTexture(GL_TEXTURE_BUFFER, material_index_texture_object.at(point_ind));
+
+            glActiveTexture(GL_TEXTURE11);
+            glBindTexture(GL_TEXTURE_BUFFER, phong_material_table_texture);
 
             glBindVertexArray(primaryShader.vertex_array_IDs.at(point_ind));
 
@@ -1419,8 +1752,10 @@ void Visualizer::plotUpdate(bool hide_window) {
 
     // Render to the screen or offscreen framebuffer depending on headless mode
     if (headless && offscreenFramebufferID != 0) {
-        // Render to offscreen framebuffer for headless mode
-        glBindFramebuffer(GL_FRAMEBUFFER, offscreenFramebufferID);
+        // Render into the multisampled framebuffer when one exists; it is blit-resolved into the
+        // single-sampled color texture before any readback. Falls back to rendering directly into
+        // the single-sampled framebuffer when anti-aliasing is off or the driver refused it.
+        glBindFramebuffer(GL_FRAMEBUFFER, offscreenMultisampleFramebufferID != 0 ? offscreenMultisampleFramebufferID : offscreenFramebufferID);
         glViewport(0, 0, Wframebuffer, Hframebuffer);
     } else {
         // Render to the default framebuffer for windowed mode
@@ -1453,6 +1788,14 @@ void Visualizer::plotUpdate(bool hide_window) {
 
     primaryShader.setLightingModel(primaryLightingModel);
     primaryShader.setLightIntensity(lightintensity);
+    primaryShader.setColorBoost(colorboost);
+    primaryShader.setLinearPipeline(linear_pipeline_enabled);
+    primaryShader.setExposure(exposure);
+    primaryShader.setCameraPositionUniform(camera_eye_location);
+    primaryShader.setPhongMaterial(phong_material.ambient, phong_material.diffuse, phong_material.specular, phong_material.shininess);
+    primaryShader.setAmbientColors(ambient_sky_color, ambient_ground_color);
+    primaryShader.setSmoothShading(smooth_shading_enabled);
+    primaryShader.setPhongMaterialTable(phong_material_table_size);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, depthTexture);
@@ -1755,6 +2098,10 @@ void Shader::initialize(const char *vertex_shader_file, const char *fragment_sha
         glEnableVertexAttribArray(2); // face index
         glVertexAttribIPointer(2, 1, GL_INT, 0, nullptr);
 
+        glBindBuffer(GL_ARRAY_BUFFER, visualizer_ptr->vertex_normal_buffer.at(i));
+        glEnableVertexAttribArray(3); // per-vertex normal
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
         i++;
     }
 
@@ -1800,6 +2147,35 @@ void Shader::initialize(const char *vertex_shader_file, const char *fragment_sha
     lightIntensityUniform = glGetUniformLocation(shaderID, "lightIntensity");
     glUniform1f(lightIntensityUniform, 1.f);
 
+    // Multiplier applied to vertex-interpolated primitive colors
+    colorBoostUniform = glGetUniformLocation(shaderID, "colorBoost");
+    glUniform1f(colorBoostUniform, 1.5f); // Default brightens ordinary renders
+
+    linearPipelineUniform = glGetUniformLocation(shaderID, "linearPipeline");
+    glUniform1i(linearPipelineUniform, 1); // Default on; matches Visualizer::linear_pipeline_enabled
+
+    exposureUniform = glGetUniformLocation(shaderID, "exposure");
+    glUniform1f(exposureUniform, 1.f);
+
+    cameraPositionUniform = glGetUniformLocation(shaderID, "cameraPosition");
+    materialAmbientUniform = glGetUniformLocation(shaderID, "materialAmbient");
+    materialDiffuseUniform = glGetUniformLocation(shaderID, "materialDiffuse");
+    materialSpecularUniform = glGetUniformLocation(shaderID, "materialSpecular");
+    materialShininessUniform = glGetUniformLocation(shaderID, "materialShininess");
+    ambientSkyColorUniform = glGetUniformLocation(shaderID, "ambientSkyColor");
+    ambientGroundColorUniform = glGetUniformLocation(shaderID, "ambientGroundColor");
+    smoothShadingUniform = glGetUniformLocation(shaderID, "smoothShading");
+    glUniform1i(smoothShadingUniform, 1); // Default on; matches Visualizer::smooth_shading_enabled
+
+    // Defaults match Visualizer::PhongMaterial and the default ambient colors, so that a shader
+    // used before any per-frame uniform push still shades sensibly.
+    glUniform1f(materialAmbientUniform, 1.0f);
+    glUniform1f(materialDiffuseUniform, 0.8f);
+    glUniform1f(materialSpecularUniform, 0.2f);
+    glUniform1f(materialShininessUniform, 32.f);
+    glUniform3f(ambientSkyColorUniform, 0.5f, 0.6f, 0.75f);
+    glUniform3f(ambientGroundColorUniform, 0.35f, 0.3f, 0.22f);
+
     // Texture (u,v) rescaling factor
     uvRescaleUniform = glGetUniformLocation(shaderID, "uv_rescale");
 
@@ -1828,6 +2204,17 @@ void Shader::initialize(const char *vertex_shader_file, const char *fragment_sha
         glUniform1i(skyGeometryFlagTextureObjectUniform, 2);
     if (hiddenFlagTextureObjectUniform >= 0)
         glUniform1i(hiddenFlagTextureObjectUniform, 8);
+
+    materialIndexTextureObjectUniform = glGetUniformLocation(shaderID, "material_index_texture_object");
+    if (materialIndexTextureObjectUniform >= 0)
+        glUniform1i(materialIndexTextureObjectUniform, 10);
+
+    phongMaterialTableUniform = glGetUniformLocation(shaderID, "phongMaterialTable");
+    if (phongMaterialTableUniform >= 0)
+        glUniform1i(phongMaterialTableUniform, 11);
+
+    phongMaterialTableSizeUniform = glGetUniformLocation(shaderID, "phongMaterialTableSize");
+    glUniform1i(phongMaterialTableSizeUniform, 0);
 
     assert(checkerrors());
 
@@ -1903,6 +2290,42 @@ void Shader::setLightIntensity(float lightintensity) const {
     glUniform1f(lightIntensityUniform, lightintensity);
 }
 
+void Shader::setLinearPipeline(bool enabled) const {
+    glUniform1i(linearPipelineUniform, enabled ? 1 : 0);
+}
+
+void Shader::setExposure(float exposure) const {
+    glUniform1f(exposureUniform, exposure);
+}
+
+void Shader::setCameraPositionUniform(const helios::vec3 &position) const {
+    glUniform3f(cameraPositionUniform, position.x, position.y, position.z);
+}
+
+void Shader::setPhongMaterial(float ambient, float diffuse, float specular, float shininess) const {
+    glUniform1f(materialAmbientUniform, ambient);
+    glUniform1f(materialDiffuseUniform, diffuse);
+    glUniform1f(materialSpecularUniform, specular);
+    glUniform1f(materialShininessUniform, shininess);
+}
+
+void Shader::setAmbientColors(const helios::RGBcolor &sky_color, const helios::RGBcolor &ground_color) const {
+    glUniform3f(ambientSkyColorUniform, sky_color.r, sky_color.g, sky_color.b);
+    glUniform3f(ambientGroundColorUniform, ground_color.r, ground_color.g, ground_color.b);
+}
+
+void Shader::setPhongMaterialTable(GLint table_size) const {
+    glUniform1i(phongMaterialTableSizeUniform, table_size);
+}
+
+void Shader::setSmoothShading(bool enabled) const {
+    glUniform1i(smoothShadingUniform, enabled ? 1 : 0);
+}
+
+void Shader::setColorBoost(float colorboost) const {
+    glUniform1f(colorBoostUniform, colorboost);
+}
+
 void Shader::useShader() const {
     glUseProgram(shaderID);
 }
@@ -1924,17 +2347,20 @@ void Visualizer::windowResizeCallback(GLFWwindow *window, int width, int height)
     }
     auto *viz = static_cast<Visualizer *>(glfwGetWindowUserPointer(window));
     if (viz != nullptr) {
+        // The window size is in screen coordinates while the framebuffer is in pixels. On a
+        // high-DPI display the two differ by the display's content scale, which is a property of
+        // the monitor and cannot be changed by resizing the window, so the framebuffer size is
+        // queried rather than assumed to match.
         int fbw, fbh;
         glfwGetFramebufferSize(window, &fbw, &fbh);
-        if (fbw != width || fbh != height) {
-            glfwSetWindowSize(window, width, height);
-            fbw = width;
-            fbh = height;
-        }
         viz->Wdisplay = static_cast<uint>(width);
         viz->Hdisplay = static_cast<uint>(height);
-        viz->Wframebuffer = static_cast<uint>(fbw);
-        viz->Hframebuffer = static_cast<uint>(fbh);
+        // A minimized window reports a zero-sized framebuffer, which would otherwise be stored and
+        // used as a divisor by the DPI scale and the watermark/colorbar aspect calculations.
+        if (fbw > 0 && fbh > 0) {
+            viz->Wframebuffer = static_cast<uint>(fbw);
+            viz->Hframebuffer = static_cast<uint>(fbh);
+        }
         viz->updateWatermark();
         viz->updateNavigationGizmo();
         viz->transferBufferData();
@@ -1958,7 +2384,11 @@ void Visualizer::updateWatermark() {
         geometry_handler.deleteGeometry(watermark_ID);
     }
     std::string watermarkPath = helios::resolvePluginAsset("visualizer", "textures/Helios_watermark.png").string();
-    watermark_ID = addRectangleByCenter(make_vec3(0.75f * width, 0.95f, 0), make_vec2(width, 0.07), make_SphericalCoord(0, 0), watermarkPath.c_str(), COORDINATES_WINDOW_NORMALIZED);
+    // The watermark image is antialiased, so its alpha is blended rather than tested against a
+    // threshold. Testing it discards exactly the partially-transparent pixels that smooth the
+    // logo's edges, which is what made both the outer border and the black-on-white boundary
+    // inside it look jagged.
+    watermark_ID = addAlphaBlendedRectangleByCenter(make_vec3(0.75f * width, 0.95f, 0), make_vec2(width, 0.07), make_SphericalCoord(0, 0), watermarkPath.c_str(), COORDINATES_WINDOW_NORMALIZED);
 }
 
 void Visualizer::updateColorbar() {

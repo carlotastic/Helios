@@ -236,7 +236,7 @@ The Photosynthesis plugin can read the nitrogen stress factor and scale photosyn
 float N_stress = 1.0f;  // Default: no stress
 
 if (context->doesObjectDataExist(objID, "nitrogen_stress_factor")) {
-    N_stress = context->getObjectData<float>(objID, "nitrogen_stress_factor");
+    context->getObjectData(objID, "nitrogen_stress_factor", N_stress);
     N_stress = std::clamp(N_stress, 0.0f, 1.0f);
 }
 
@@ -251,16 +251,16 @@ This integration is <b>optional</b> - the Photosynthesis plugin works with or wi
 
 <b>Direct compatibility:</b> The PROSPECT model requires area-based nitrogen (Leaf Nitrogen Density), which is exactly what this model provides.
 
-~~~~~~
-// Get leaf nitrogen content per area directly
-float leaf_N_area = shoot->leaf_nitrogen_gN_m2[leaf_objID];  // g N/m²
+The nitrogen model writes object data "leaf_nitrogen_gN_m2" (g N/m\f$^2\f$) for each leaf, and \ref LeafOptics::run() "LeafOptics::run()" reads that object data directly, so no manual conversion is required:
 
-// Convert to PROSPECT units (µg/cm² = 0.1 g/m²)
-float leaf_N_PROSPECT = leaf_N_area * 10.0f;  // µg/cm²
-
-// Use in PROSPECT model
-PROSPECT_model.setLeafNitrogen(leaf_N_PROSPECT);
+~~~~~~{.cpp}
+// PlantArchitecture writes "leaf_nitrogen_gN_m2" object data when the nitrogen model is enabled.
+LeafOptics leafoptics(&context);
+LeafOpticsProperties_Nauto params;
+leafoptics.run( plantarch.getAllLeafUUIDs(), params );
 ~~~~~~
+
+Internally the conversion to the PROSPECT chlorophyll input is \f$C_{ab}\,(\mu g/cm^2) = N_{area}\,(g/m^2)\times 100\times f_{photosynthetic}\times k_{N\rightarrow C_{ab}}\f$.
 
 <b>Why this matters:</b> PROSPECT and other leaf optical models work with area-based properties because reflectance is determined by the amount of absorbing material per unit leaf area, not per unit mass. Using area-based nitrogen eliminates the need for SLA-based conversions that introduce additional uncertainty.
 
@@ -272,7 +272,7 @@ PlantArchitecture growth calculations can read the stress factor:
 // In shoot elongation calculation
 float N_stress = 1.0f;
 if (context_ptr->doesObjectDataExist(shoot_objID, "nitrogen_stress_factor")) {
-    N_stress = context_ptr->getObjectData<float>(shoot_objID, "nitrogen_stress_factor");
+    context_ptr->getObjectData(shoot_objID, "nitrogen_stress_factor", N_stress);
 }
 
 // Apply to growth rate
@@ -314,7 +314,7 @@ int main() {
 
     // Setup photosynthesis (automatically uses N stress factor if available)
     PhotosynthesisModel photosynthesis(&context);
-    photosynthesis.setModelCoefficientsFromLibrary("bean");
+    photosynthesis.setFarquharCoefficientsFromLibrary("bean");
 
     // Time loop
     for (int day = 100; day <= 250; day++) {
@@ -337,8 +337,8 @@ int main() {
         // Optional: query nitrogen status
         std::vector<uint> plant_objIDs = plantarch.getAllPlantObjectIDs(plantIDs[0]);
         if (!plant_objIDs.empty()) {
-            float N_stress = context.getObjectData<float>(plant_objIDs[0],
-                                                          "nitrogen_stress_factor");
+            float N_stress;
+            context.getObjectData(plant_objIDs[0], "nitrogen_stress_factor", N_stress);
             std::cout << "Day " << day << " N stress factor: " << N_stress << std::endl;
         }
     }
@@ -436,7 +436,7 @@ The nitrogen model implementation is based on published research:
 - Verify the nitrogen model is enabled using \ref PlantArchitecture::isNitrogenModelEnabled()
 - Ensure \ref PlantArchitecture::advanceTime() has been called at least once after enabling
 - Check that plants have leaves (stress factor is not calculated for plants without leaves)
-- Use \ref Context::doesObjectDataExist() to verify the data exists before reading
+- Use \ref helios::Context::doesObjectDataExist() "doesObjectDataExist()" to verify the data exists before reading
 
 \subsection NitroInstant Nitrogen Uptake Too Fast/Slow
 
@@ -465,7 +465,7 @@ The nitrogen model implementation is based on published research:
 <b>Solutions:</b>
 - All nitrogen parameters use area basis (g N/m²), not mass basis (g N/g DW)
 - To convert from mass basis: N_area (g/m²) = N_mass (g/g) × LMA (g/m²)
-- Typical crop leaf N_area: 1.0-2.5 g N/m² (equivalent to 2-5% N at LMA = 0.04-0.05 g/m²)
-- For PROSPECT: multiply by 10 to get µg/cm² (1 g/m² = 10 µg/cm²)
+- Typical crop leaf N_area: 1.0-2.5 g N/m² (equivalent to 2-5% N at LMA = 40-50 g/m²)
+- For PROSPECT: multiply by 100 to get µg/cm² (1 g/m² = 100 µg/cm²)
 
 */

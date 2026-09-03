@@ -171,7 +171,14 @@ uint traverse_bvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim_i
 
 // ========== CWBVH (8-wide BVH with quantized AABBs) Traversal ==========
 
-const uint MAX_CWBVH_STACK_DEPTH = 24;
+// Traversal stack size.
+//
+// Each pop can push up to 8 children (7 more entries than it removed), and the BVH8 is at most
+// ceil(MAX_DEPTH / 3) levels deep because the collapse folds three BVH2 levels into one BVH8
+// level. With MAX_DEPTH = 32 that is 11 levels, so the worst case is 11 * 7 + 1 = 78 entries.
+// The previous value of 24 could be exceeded by a deep, unbalanced canopy BVH, and the overflow
+// path simply discarded the node - geometry vanished from the trace with no diagnostic.
+const uint MAX_CWBVH_STACK_DEPTH = 80;
 
 // Bitmask lookup table: slot_masks[i] = (1 << i) - 1, for popcount-based child indexing
 const uint slot_masks[8] = uint[8](0x00u, 0x01u, 0x03u, 0x07u, 0x0Fu, 0x1Fu, 0x3Fu, 0x7Fu);
@@ -185,7 +192,12 @@ const uint slot_masks[8] = uint[8](0x00u, 0x01u, 0x03u, 0x07u, 0x0Fu, 0x1Fu, 0x3
 // - Step 2: Read metadata + leaf data only for survivors (deferred reads)
 // - No sort arrays — process children in slot order, push internal nodes in near-first order
 // - Branchless byte extraction via bitfieldExtract
-uint traverse_cwbvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim_idx, inout float closest_t) {
+// This overload also reports where on the facet the closest hit landed, which the camera shader interpolates a per-vertex quantity with. For a triangle the components are the barycentric weights of the
+// second and third vertices; for a patch they run from zero at the first vertex to one at the second and fourth.
+uint traverse_cwbvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim_idx, inout float closest_t, out vec2 closest_uv) {
+
+    closest_uv = vec2(0.0);
+
 
     vec3 ray_dir_inv = safe_inv_dir(ray_dir);
 
@@ -286,16 +298,20 @@ uint traverse_cwbvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim
                 if (stack_ptr < int(MAX_CWBVH_STACK_DEPTH)) {
                     stack[stack_ptr++] = child_array_idx;
                 }
+                // No else: the stack is sized for the worst case the builder can produce, and
+                // BVHBuilder::convertToCWBVH() refuses to emit a tree deeper than that bound, so
+                // this cannot overflow. The check is retained only so that a future change to
+                // MAX_DEPTH degrades into dropped nodes rather than out-of-bounds stack writes.
             } else {
                 // ---- Step 3: Read leaf data on demand (words 20+slot, 28-31) ----
                 uint first_prim = floatBitsToUint(bvh_buf.data[base + 20u + child_slot]);
 
-                // Read prim_count from packed byte arrays. Per-prim type is read via
-                // prim_types_buf below (line ~296) — the BVH-packed prim_type word is
-                // intentionally not used here, so don't load it.
-                uint pc_word = floatBitsToUint(bvh_buf.data[base + 28u + (child_slot >> 2u)]);
-                int bit_off = int((child_slot & 3u) * 8u);
-                uint prim_count = bitfieldExtract(pc_word, bit_off, 8);
+                // Read prim_count from the packed 16-bit-per-child array occupying words 28-31
+                // (CWBVH_Node::child_prim_count). Per-prim type is read via prim_types_buf
+                // below — the node carries no prim_type array.
+                uint pc_word = floatBitsToUint(bvh_buf.data[base + 28u + (child_slot >> 1u)]);
+                int bit_off = int((child_slot & 1u) * 16u);
+                uint prim_count = bitfieldExtract(pc_word, bit_off, 16);
 
                 if (prim_count == 0u) continue;
 
@@ -331,6 +347,7 @@ uint traverse_cwbvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim
                         }
                         closest_t = hit.t;
                         closest_prim = prim_idx;
+                        closest_uv = hit.uv;
                     }
                 }
             }
@@ -338,6 +355,12 @@ uint traverse_cwbvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim
     }
 
     return closest_prim;
+}
+
+// Callers that do not need the surface parameters keep the shorter signature.
+uint traverse_cwbvh(vec3 ray_origin, vec3 ray_dir, float t_min, uint origin_prim_idx, inout float closest_t) {
+    vec2 unused_uv;
+    return traverse_cwbvh(ray_origin, ray_dir, t_min, origin_prim_idx, closest_t, unused_uv);
 }
 
 #endif // BVH_TRAVERSAL_GLSL

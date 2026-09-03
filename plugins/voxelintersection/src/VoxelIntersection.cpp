@@ -1147,7 +1147,7 @@ std::vector<uint> VoxelIntersection::slicePrimitive(uint UUID, std::vector<helio
     for (uint i = 0; i < resulting_UUIDs.size(); i++) {
         context->copyPrimitiveData(UUID, resulting_UUIDs.at(i));
         uint parentID = context->getPrimitiveParentObjectID(UUID);
-        if (parentID > 0 && context->getObjectType(parentID) == helios::OBJECT_TYPE_TILE) {
+        if (parentID > 0 && (context->getObjectType(parentID) == helios::OBJECT_TYPE_TILE || context->getObjectType(parentID) == helios::OBJECT_TYPE_ADAPTIVE_TILE)) {
             context->setPrimitiveParentObjectID(resulting_UUIDs.at(i), 0);
         } else {
             context->setPrimitiveParentObjectID(resulting_UUIDs.at(i), parentID);

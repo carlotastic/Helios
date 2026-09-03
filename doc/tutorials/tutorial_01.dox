@@ -39,9 +39,9 @@ In the code example below, we'll make an int3, and set is data values to x=1, y=
      //Set the data values
      a = make_int3(1,2,3);
 
-     //Alternatively, we could have initialized data values in the following equivalent ways
+     //Alternatively, we could have initialized data values in either of the following equivalent ways
      int3 b(1,2,3);
-     int3 b = make_int3(1,2,3);
+     int3 c = make_int3(1,2,3);
 
   }
   ~~~~~~

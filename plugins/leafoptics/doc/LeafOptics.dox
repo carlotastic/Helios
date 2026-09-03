@@ -631,7 +631,7 @@ N_optics.Car_to_Cab_ratio = 0.25f;
 N_optics.num_bins = 20;
 
 // Get leaf primitives and run
-std::vector<uint> leaf_UUIDs = plantarch.getAllLeafUUIDs(plantIDs);
+std::vector<uint> leaf_UUIDs = plantarch.getAllLeafUUIDs();
 leafoptics.run(leaf_UUIDs, N_optics);
 ~~~~~~
 
@@ -741,7 +741,7 @@ int main() {
     N_optics.reassignment_threshold = 0.30f;
 
     // === Initial leaf optics assignment ===
-    std::vector<uint> leaf_UUIDs = plantarch.getAllLeafUUIDs(plantIDs);
+    std::vector<uint> leaf_UUIDs = plantarch.getAllLeafUUIDs();
     leafoptics.run(leaf_UUIDs, N_optics);
 
     // === Setup radiation ===
@@ -761,7 +761,7 @@ int main() {
         plantarch.advanceTime(1.0f);
 
         // Update leaf optics (handles new leaves, removed leaves, N changes)
-        leaf_UUIDs = plantarch.getAllLeafUUIDs(plantIDs);
+        leaf_UUIDs = plantarch.getAllLeafUUIDs();
         leafoptics.run(leaf_UUIDs, N_optics);
 
         // Alternative: fast update when primitive set is unchanged

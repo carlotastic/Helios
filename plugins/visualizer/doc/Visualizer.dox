@@ -105,7 +105,7 @@
     <li>\ref Visualizer::plotUpdate() "plotUpdate()" - Open a window and update it with the current visualization, then continue the program.  This does not allow for any user input, since it continues on without checking for input.  This is useful when generating a large number of visualization images for a movie.  
   </ul>
 
-  If \ref Visualizer::plotUpdate() "plotUpdate()" is issued, another command \ref Visualizer::printWindow() "printWindow()" can be used to output the current visualization to file (JPEG files only).
+  If \ref Visualizer::plotUpdate() "plotUpdate()" is issued, another command \ref Visualizer::printWindow() "printWindow()" can be used to output the current visualization to file (JPEG or PNG).
 
   The current window can be closed using the \ref Visualizer::closeWindow() "closeWindow()" command.
 
@@ -131,9 +131,13 @@
  Headless mode is enabled through the constructor by setting the `headless` parameter to `true`:
 
  ~~~~~~{.cpp}
+ #include "Context.h"
  #include "Visualizer.h"
+ using namespace helios;
 
  int main(){
+     Context context;
+
      // Enable headless mode (5th parameter = true)
      Visualizer vis( 1200, 800, 8, true, true );
 
@@ -155,8 +159,8 @@
  \note Shadowed lighting in headless mode requires Helios v1.3.80 or later. Earlier versions created the shadow-map framebuffer only in windowed mode, so headless renders using \ref Visualizer::LIGHTING_PHONG_SHADOWED "LIGHTING_PHONG_SHADOWED" came out with no shadows at all.
 
  <b>Important Notes:</b>
- - When in headless mode, calling \ref Visualizer::plotUpdate(false) "plotUpdate(false)" (requesting visible window) will issue a warning and continue with offscreen rendering
- - Always use \ref Visualizer::plotUpdate(true) "plotUpdate(true)" for headless workflows to avoid warnings
+ - When in headless mode, calling \ref Visualizer::plotUpdate(bool) "plotUpdate(false)" (requesting visible window) will issue a warning and continue with offscreen rendering
+ - Always use \ref Visualizer::plotUpdate(bool) "plotUpdate(true)" for headless workflows to avoid warnings
  - \ref Visualizer::plotInteractive() "plotInteractive()" is not available in headless mode
 
  <b>Use Cases:</b>
@@ -320,8 +324,6 @@
       <td>Point</td>
       <td>Single point in 3D space with configurable size.</td>
       <td><ul>
-	  <li>\ref Visualizer::addPoint( const helios::vec3 &position, const helios::RGBcolor &color, Visualizer::CoordinateSystem coordFlag )</li>
-	  <li>\ref Visualizer::addPoint( const helios::vec3 &position, const helios::RGBAcolor &color, Visualizer::CoordinateSystem coordFlag )</li>
 	  <li>\ref Visualizer::addPoint( const helios::vec3 &position, const helios::RGBcolor &color, float pointsize, Visualizer::CoordinateSystem coordFlag )</li>
 	  <li>\ref Visualizer::addPoint( const helios::vec3 &position, const helios::RGBAcolor &color, float pointsize, Visualizer::CoordinateSystem coordFlag )</li>
 	</ul>
@@ -434,7 +436,7 @@
       <td>Set the level-of-detail scaling factor for distant points.</td>
    </tr>
    <tr>
-      <td>\ref Visualizer::getPointRenderingMetrics( size_t &total_points, size_t &rendered_points, float &culling_time_ms ) "getPointRenderingMetrics(...)"</td>
+      <td>\ref Visualizer::getPointRenderingMetrics( size_t &total_points, size_t &rendered_points, float &culling_time_ms ) const "getPointRenderingMetrics(...)"</td>
       <td>Retrieve real-time performance metrics including total points, rendered points, and culling computation time.</td>
    </tr>
  </table>
@@ -466,6 +468,95 @@
    }
   ~~~~~~
 
+  \subsection DisplayImage Displaying Images and Bounding Boxes
+
+  Rather than rendering 3D geometry, the %Visualizer can display an existing image file. This is most often used to inspect a synthetic camera image produced by the radiation plug-in. Use the \ref Visualizer::displayImage( const std::string & ) "displayImage()" command:
+
+  ~~~~~~{.cpp}
+   int main(){
+      Visualizer vis(1000);
+
+      vis.displayImage( "../output/bunnycam_RGB.jpeg" );
+   }
+  ~~~~~~
+
+  The image is scaled to fill the window while preserving its aspect ratio, so an image whose shape differs from the window is letterboxed. Note that this command clears any existing geometry, and, like \ref Visualizer::plotInteractive() "plotInteractive()", it does not return until the window is closed.
+
+  \subsubsection DisplayBoundingBoxes Overlaying bounding box annotations
+
+  The radiation plug-in's \ref RadiationModel::writeImageBoundingBoxes() "writeImageBoundingBoxes()" command writes object detection annotations alongside a rendered camera image. The \ref Visualizer::displayImageWithBoundingBoxes() "displayImageWithBoundingBoxes()" command displays the image with those annotations drawn on top of it, which is the quickest way to check that a synthetic imagery pipeline is producing sensible boxes:
+
+  ~~~~~~{.cpp}
+   int main(){
+      Visualizer vis(1000);
+
+      // Display the image with the boxes from its annotation file overlaid.
+      // "classes.txt" in the same directory is found automatically.
+      vis.displayImageWithBoundingBoxes( "../output/bunnycam_RGB.jpeg", "../output/bunnycam_RGB.txt" );
+   }
+  ~~~~~~
+
+  Each box is drawn as an outline in a color determined by its class ID, with the class name on a filled chip inside the box's top-left corner. The palette holds seven colors, so classes whose IDs differ by a multiple of seven share a color.
+
+  The annotation file is in Ultralytics YOLO format: one box per line, with five whitespace-separated fields.
+
+  ~~~~~~
+   <class_ID> <x_center> <y_center> <width> <height>
+  ~~~~~~
+
+  The four geometry fields are normalized to [0,1] by the image width and height, and are measured from the <b>top-left</b> corner of the image, with y increasing downward. Note that this differs from \ref Visualizer::COORDINATES_WINDOW_NORMALIZED "COORDINATES_WINDOW_NORMALIZED", whose origin is the bottom-left corner of the window.
+
+  Class names come from a separate file, whose path may be given explicitly as the third argument. When it is omitted, a file named `classes.txt` in the same directory as the annotation file is used if one exists; when none exists, each box is labeled with its numeric class ID instead. Two formats are accepted, and are detected line by line:
+
+  <table>
+    <tr><th>Format</th><th>Example</th><th>Written by</th></tr>
+    <tr><td>`<class_ID> <class_name>`</td><td>`0 bunny`</td><td>\ref RadiationModel::writeImageBoundingBoxes() "writeImageBoundingBoxes()"</td></tr>
+    <tr><td>`<class_name>`, with the class ID implied by the line number</td><td>`bunny`</td><td>Standard Ultralytics tools</td></tr>
+  </table>
+
+  A class name may contain spaces, because the name is taken as the remainder of the line rather than as a single token. One consequence of accepting both formats is that a name beginning with a number, such as `2007 chevrolet`, is indistinguishable from the explicit format and will be read as a class ID followed by a name.
+
+  The annotation and class name files can also be read on their own, without displaying anything, using \ref Visualizer::readBoundingBoxFile() "readBoundingBoxFile()" and \ref Visualizer::readBoundingBoxClassNames() "readBoundingBoxClassNames()".
+
+  \subsubsection DisplaySegmentationMasks Overlaying segmentation masks
+
+  The radiation plug-in's \ref RadiationModel::writeImageSegmentationMasks() "writeImageSegmentationMasks()" command writes pixel-level object annotations alongside a rendered camera image. The \ref Visualizer::displayImageWithSegmentationMasks() "displayImageWithSegmentationMasks()" command displays the image with those masks drawn on top of it:
+
+  ~~~~~~{.cpp}
+   int main(){
+      Visualizer vis(1000);
+
+      vis.displayImageWithSegmentationMasks( "../output/bunnycam_RGB.jpeg", "../output/bunnycam_segmentation.json" );
+   }
+  ~~~~~~
+
+  Each mask is drawn as a translucent filled polygon with a solid outline, and the class name on a filled chip at the top-left corner of the mask. The fill opacity can be changed with the third argument, and passing 0 draws the outline alone. The class labels can be turned off entirely with the last argument, which is useful in a busy scene where many overlapping chips would cover the image:
+
+  ~~~~~~{.cpp}
+   // Show the mask shapes without their class name chips.
+   vis.displayImageWithSegmentationMasks( "../output/bunnycam_RGB.jpeg", "../output/bunnycam_segmentation.json", 0.4f, 2.f, 12, false );
+  ~~~~~~
+
+  Unlike \ref Visualizer::displayImageWithBoundingBoxes() "displayImageWithBoundingBoxes()", no separate class name file is needed: the COCO file carries its own <code>categories</code> array, and class names are read from it. Masks are colored by their position in the file rather than by class ID, so two touching objects of the same class remain distinguishable, which is what makes the overlay useful for checking instance segmentation. The palette holds seven colors, so a file with more than seven masks reuses them.
+
+  The annotation file is in COCO JSON format. The fields the %Visualizer reads are:
+
+  <table>
+    <tr><th>Field</th><th>Meaning</th></tr>
+    <tr><td><code>images</code></td><td>The images the file describes. Each entry supplies <code>id</code>, <code>file_name</code>, <code>width</code> and <code>height</code>.</td></tr>
+    <tr><td><code>categories</code></td><td>Maps each <code>id</code> to the class <code>name</code> shown on the label chip.</td></tr>
+    <tr><td><code>annotations</code></td><td>One entry per mask, holding <code>image_id</code>, <code>category_id</code> and <code>segmentation</code>.</td></tr>
+    <tr><td><code>segmentation</code></td><td>An array of polygons, each a flat list of alternating x and y coordinates.</td></tr>
+  </table>
+
+  Polygon coordinates are <b>absolute pixel</b> positions measured from the <b>top-left</b> corner of the image, with y increasing downward. Note that this differs from the bounding box annotation format, whose coordinates are normalized to [0,1], and from \ref Visualizer::COORDINATES_WINDOW_NORMALIZED "COORDINATES_WINDOW_NORMALIZED", whose origin is the bottom-left corner of the window.
+
+  Because the writer appends, one file can describe several images. The image being displayed selects its own annotations automatically, so a file accumulated over many frames can be passed as-is.
+
+  Segmentation contours are traced around a pixel mask and are routinely not simple polygons: a traced boundary crosses itself wherever the mask narrows to a one-pixel neck, which is common for objects with thin or branching parts. The fill is therefore computed by an even-odd scanline fill in image pixel space rather than by triangulating the contour, which handles a self-intersecting contour correctly and keeps the fill aligned to the pixel rows the mask is defined on.
+
+  The mask file can also be read on its own, without displaying anything, using \ref Visualizer::readSegmentationMaskFile() "readSegmentationMaskFile()".
+
   \subsection PlotWindow Plotting Geometry
 
   To this point, we have not actually plotted anything in the %Visualizer window.  A final command is neede to display all of the geometry added to the %Visualizer in the window we have opened.  There are two functions for doing this, which are detailed below.
@@ -485,7 +576,7 @@
 
       vec3 center = make_vec3(0,0,0);
       vec2 size = make_vec2(1,1);
-      context.addRectangleByCenter(center,size);
+      context.addPatch(center,size);
       
       Visualizer vis( 1200 );
 
@@ -693,7 +784,7 @@
    ctable_positions.push_back( 0.75f );
    ctable_positions.push_back( 1.f );
 	  
-   vis.setColormap( Visualizer::COLORMAP_CUSTOM, ctable_colors, ctable_positions );
+   vis.setColormap( ctable_colors, ctable_positions );
   ~~~~~~
   
   \subsubsection Cbar Colorbar
@@ -727,7 +818,7 @@
    </tr>
    <tr>
       <td>\ref Visualizer::setColorbarTicks( const std::vector<float> &ticks ) "setColorbarTicks( const std::vector<float> &ticks )" </td>
-      <td>Set locations of data tick along colorbar.</td>
+      <td>Set locations of data tick along colorbar. Ticks outside the current colorbar range expand that range to fit them, which also changes the colors shown; call <code>setColorbarRange()</code> afterwards to keep an explicit range.</td>
    </tr>
    <tr>
       <td>\ref Visualizer::setColorbarTitle( const char* title ) "setColorbarTitle( const char* title )" </td>
@@ -747,12 +838,16 @@
 
   When custom ticks are not specified using \ref Visualizer::setColorbarTicks, the visualizer automatically generates tick positions and labels using Heckbert's "nice numbers" algorithm. This algorithm selects tick values that are "clean" multiples of 1, 2, or 5 times a power of 10, making the colorbar easier to read.
 
-  <b>Adaptive Tick Count:</b> The number of ticks is automatically determined based on the colorbar size and font size to prevent overcrowding. Smaller colorbars will have fewer ticks to maintain readability.
+  All generated ticks lie within the colorbar range, and at least two are always produced so that the colorbar conveys a sense of scale. Where no "nice" spacing places two ticks inside the range, progressively finer spacings are tried, falling back to the range endpoints if none fits.
 
-  For example:
+  <b>Adaptive Tick Count:</b> The number of ticks is determined from the colorbar's width and font size to prevent overcrowding, since the labels are laid out along the length of the bar. A wider colorbar, or a smaller font, allows more ticks. The default colorbar is narrow enough to target three ticks; use \ref Visualizer::setColorbarSize to widen it if more are wanted.
+
+  For example, with a colorbar wide enough to target five ticks:
   - A colorbar ranging from 0 to 1 will generate ticks at 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
-  - A colorbar ranging from 0 to 600 (with limited space) will generate ticks at 0, 200, 400, 600
+  - A colorbar ranging from 0 to 600 will generate ticks at 0, 200, 400, 600
   - A colorbar ranging from 0 to 20 with integer data will generate ticks at 0, 5, 10, 15, 20
+
+  At the default width the same ranges yield fewer, coarser ticks — 0.0, 0.5, 1.0 and 0, 10, 20 respectively.
 
   The tick label formatting automatically adapts based on the data type and range:
   - <b>Integer data</b>: Tick labels are formatted as integers with no decimal places (e.g., 0, 5, 10). For values ≥10,000, scientific notation is used (e.g., 1e+04)
@@ -801,7 +896,7 @@
       vec3 center = make_vec3(0,0,0);
       vec2 size = make_vec2(1,1);
       SphericalCoord rotation = make_SphericalCoord(0,0);
-      vis.addRectangleByCenter(center,size,rotation,RGB::red,Visualizer::COORDINATES_CARTESIAN,0);
+      vis.addRectangleByCenter(center,size,rotation,RGB::red,Visualizer::COORDINATES_CARTESIAN);
 
       vec3 light_direction = make_vec3(1,1,1);
 
@@ -809,6 +904,234 @@
       vis.setLightDirection( light_direction );
    }
   ~~~~~~
+
+  \subsubsection PhongMaterial Material properties and ambient light
+
+  The shading model combines three terms: a hemispheric ambient term, a Lambertian diffuse term,
+  and a Blinn-Phong specular highlight. Their relative weights are controlled with
+  \ref Visualizer::setPhongMaterial(), which takes a \ref Visualizer::PhongMaterial struct.
+
+ <table>
+   <tr><th>Parameter</th><th>Meaning</th><th>Default</th></tr>
+   <tr><td><code>ambient</code></td><td>Weight of the hemispheric ambient contribution</td><td>1.0</td></tr>
+   <tr><td><code>diffuse</code></td><td>Weight of the Lambertian diffuse contribution</td><td>0.8</td></tr>
+   <tr><td><code>specular</code></td><td>Weight of the specular highlight. Zero removes it entirely.</td><td>0.2</td></tr>
+   <tr><td><code>shininess</code></td><td>Specular exponent. Larger values give a tighter highlight.</td><td>32</td></tr>
+ </table>
+
+  The specular highlight is what makes foliage read as living tissue rather than matte paper, and
+  is most effective in combination with \ref Visualizer::enableLinearPipeline(), which lets bright
+  highlights roll off smoothly rather than clipping to white.
+
+  Ambient light is modeled hemispherically rather than as a single constant. Light is taken to
+  arrive as one color from above (the sky) and another from below (bounce off the ground), blended
+  according to the vertical component of the surface normal. Surfaces facing away from the sun
+  therefore retain soft directional shading instead of the flat, uniform fill a constant ambient
+  term produces. The two colors are set with \ref Visualizer::setAmbientColors(); setting both to
+  the same value recovers a constant ambient term.
+
+  ~~~~~~{.cpp}
+   #include "Visualizer.h"
+
+   int main(){
+      Visualizer vis( 1200 );
+
+      vis.setLightingModel( Visualizer::LIGHTING_PHONG_SHADOWED );
+      vis.setLightDirection( make_vec3(1,1,1) );
+
+      // A glossier surface, as for a wet or waxy leaf
+      Visualizer::PhongMaterial material;
+      material.ambient = 1.0f;
+      material.diffuse = 0.8f;
+      material.specular = 0.6f;
+      material.shininess = 64.f;
+      vis.setPhongMaterial( material );
+
+      // Cool skylight from above, warm soil bounce from below
+      vis.setAmbientColors( make_RGBcolor(0.5f,0.6f,0.75f), make_RGBcolor(0.35f,0.3f,0.22f) );
+   }
+  ~~~~~~
+
+  \subsubsection HeadlessAntiAliasing Anti-aliasing in headless mode
+
+  The number of anti-aliasing samples is given as the third argument to the \ref Visualizer
+  constructor. In windowed mode these samples come from the window's own framebuffer; in headless
+  mode the Visualizer renders into a multisampled framebuffer of its own and resolves it before the
+  image is read back, so saved figures are anti-aliased rather than hard-edged.
+
+  The requested sample count is clamped to what the driver reports as its maximum, and if the driver
+  will not provide multisampled attachments at all the Visualizer falls back to rendering without
+  them. \ref Visualizer::isHeadlessMultisamplingActive() reports which of those happened, since the
+  fallback is otherwise silent.
+
+  ~~~~~~{.cpp}
+   #include "Visualizer.h"
+
+   int main(){
+      Context context;
+      // ... build geometry ...
+
+      Visualizer vis( 1200, 800, 8, true, true ); // 8 samples, headless
+      vis.buildContextGeometry( &context );
+      vis.plotUpdate();
+      vis.printWindow( "figure.jpeg" );
+   }
+  ~~~~~~
+
+  \note On macOS, OpenGL is a deprecated translation layer over Metal that accepts multisampled
+  framebuffer attachments but does not rasterize into them: the resolved image is identical to an
+  unantialiased one. \ref Visualizer::isHeadlessMultisamplingActive() still reports true there,
+  because the attachments were created successfully. Headless anti-aliasing is effective on drivers
+  with native OpenGL support.
+
+  \subsubsection PerMaterialPhong Per-material Phong parameters
+
+  \ref Visualizer::setPhongMaterial() sets the parameters used for the whole scene. Individual
+  material groups can override them by attaching material data with the labels below, so that
+  glossy leaves, matte soil and wet fruit can coexist in one render.
+
+ <table>
+   <tr><th>Material data label</th><th>Type</th><th>Meaning</th></tr>
+   <tr><td><code>phong_ambient</code></td><td><code>float</code></td><td>Ambient reflectance weight</td></tr>
+   <tr><td><code>phong_diffuse</code></td><td><code>float</code></td><td>Diffuse reflectance weight</td></tr>
+   <tr><td><code>phong_specular</code></td><td><code>float</code></td><td>Specular reflectance weight</td></tr>
+   <tr><td><code>phong_shininess</code></td><td><code>float</code></td><td>Specular exponent</td></tr>
+ </table>
+
+  These are ordinary material data, set with \ref helios::Context::setMaterialData(), so no special
+  API is required and any material can carry them.
+
+  The override is per parameter, not per material: a material that specifies only
+  <code>phong_specular</code> inherits the other three from the global Phong material, so a glossier
+  surface can be described without restating the whole set. A material that specifies none of them
+  uses the global values entirely, which is why existing scenes are unaffected.
+
+  ~~~~~~{.cpp}
+   #include "Visualizer.h"
+
+   int main(){
+      Context context;
+      uint leaf = context.addPatch( make_vec3(0,0,0), make_vec2(1,1) );
+
+      context.addMaterial( "wet_leaf" );
+      context.assignMaterialToPrimitive( leaf, "wet_leaf" );
+
+      // Only the specular lobe is overridden; ambient, diffuse and the light response are inherited.
+      context.setMaterialData( "wet_leaf", "phong_specular", 0.8f );
+      context.setMaterialData( "wet_leaf", "phong_shininess", 64.f );
+
+      Visualizer vis( 1200 );
+      vis.setLightingModel( Visualizer::LIGHTING_PHONG_SHADOWED );
+      vis.buildContextGeometry( &context );
+      vis.plotInteractive();
+   }
+  ~~~~~~
+
+  \note Primitive color is stored on the material, and \ref helios::Context::addMaterial() creates a
+  material with a black color. Set the primitive color *after* assigning the material, or the color
+  is discarded and the primitive renders black.
+
+  Parameters are resolved once per material rather than once per primitive, so attaching them to a
+  material shared by millions of primitives costs no more than attaching them to one.
+
+  \subsubsection SmoothShading Smooth and flat shading
+
+  Each fragment is shaded using a normal interpolated across the primitive from its vertices, rather
+  than the single geometric normal of the face. On a tessellated curved surface this removes the
+  faceted appearance, so a stem, fruit or trunk reads as smoothly curved rather than as a series of
+  flat panels. Smooth shading is the default; \ref Visualizer::disableSmoothShading() selects flat
+  shading, and \ref Visualizer::enableSmoothShading() restores it.
+
+  Smooth shading only changes the appearance of geometry that actually supplies distinct vertex
+  normals. Primitives added without them carry the face normal replicated across every vertex, so
+  they shade identically either way, and the default is a no-op for much of Helios geometry:
+  patches, triangles and voxels added directly to the Context are flat surfaces whose face normal is
+  already correct, as are the faces of a tile, box or disk.
+
+  Vertex normals reach the Visualizer by two routes, which differ in where the normal comes from.
+
+  The curved compound object types -- `Sphere`, `Tube` and `Cone` -- are tessellations of a surface
+  whose true normal is known in closed form, so the normal is evaluated directly from the shape's own
+  definition at each vertex. These normals are exact rather than inferred, they require no action
+  from the user, and they follow the object automatically when it is transformed or its geometry is
+  modified. This is what allows a stem, trunk or fruit to read as smoothly curved. Note that the
+  normal accounts for taper, so a tube or cone whose radius changes along its length is shaded as the
+  cone it is rather than as a cylinder. The values are available outside the Visualizer through
+  \ref helios::Context::getObjectPrimitiveVertexNormals() "getObjectPrimitiveVertexNormals()".
+
+  A `Polymesh` has no such closed-form definition -- an arbitrary mesh is only what its faces say it
+  is -- so its normals must instead be retained from the source data: a mesh loaded from an OBJ or
+  PLY file that supplies vertex normals (see \ref helios::Context::loadOBJ() "loadOBJ()" and
+  \ref helios::Context::loadPLY() "loadPLY()"), or one whose normals were generated explicitly with
+  \ref helios::Context::computePolymeshObjectVertexNormals() "computePolymeshObjectVertexNormals()".
+  Helios never synthesizes the normals of a mesh implicitly, so a mesh whose source file provided
+  none is shaded flat until they are computed.
+
+  ~~~~~~{.cpp}
+   #include "Visualizer.h"
+
+   int main(){
+      Context context;
+      std::vector<uint> UUIDs = context.loadOBJ( "mesh.obj", true );
+
+      // If the file supplied no vertex normals, generate them. The crease angle keeps edges sharper
+      // than 30 degrees hard, so a chamfered or boxy model does not turn into a rounded blob.
+      uint objID = context.getPrimitiveParentObjectID( UUIDs.front() );
+      if( context.getPolymeshObjectVertexNormalSource(objID) == NORMAL_SOURCE_NONE ){
+         context.computePolymeshObjectVertexNormals( objID, 30.f );
+      }
+
+      Visualizer vis( 1200 );
+      vis.setLightingModel( Visualizer::LIGHTING_PHONG_SHADOWED );
+      vis.buildContextGeometry( &context );
+      vis.plotInteractive();
+   }
+  ~~~~~~
+
+  \note On alpha-masked cutouts such as leaf textures, smooth shading can look worse than flat
+  shading: the interpolated normal no longer agrees with the visible silhouette, which the alpha mask
+  rather than the geometry defines. Use \ref Visualizer::disableSmoothShading() for such scenes.
+
+  \subsubsection LinearPipeline Linear-light rendering and tone mapping
+
+  Rendering is physically based by default: albedo is decoded from sRGB to linear light before
+  shading, the shaded radiance is multiplied by the exposure, passed through an ACES filmic tone
+  curve, and re-encoded to sRGB for display. Highlights roll off smoothly instead of clipping, and
+  mid-tone gradients are correct.
+
+  The alternative, selected with \ref Visualizer::disableLinearPipeline(), performs the lighting
+  arithmetic directly on sRGB-encoded color values and writes the result straight to the
+  framebuffer. This is how the Visualizer rendered prior to v1.3.83, and is not physically
+  meaningful: sRGB values are non-linear in radiance, so adding an ambient and a diffuse term in
+  that space yields mid-tones that are too dark and shadow terminators that are unnaturally abrupt,
+  while bright surfaces clip against the 8-bit framebuffer and flatten to pure white. Use it to
+  reproduce images generated by earlier versions.
+
+  Overall image brightness is controlled with \ref Visualizer::setExposure(). Because the tone curve
+  compresses rather than clips, increasing exposure brightens the image while retaining detail in
+  sunlit regions.
+
+  ~~~~~~{.cpp}
+   #include "Visualizer.h"
+
+   int main(){
+      Visualizer vis( 1200 );
+
+      vis.setLightingModel( Visualizer::LIGHTING_PHONG_SHADOWED );
+      vis.setLightDirection( make_vec3(1,1,1) );
+
+      // The linear pipeline is already active by default; only the exposure needs setting.
+      vis.setExposure( 1.2f );
+   }
+  ~~~~~~
+
+  \note This mode is mutually exclusive with \ref Visualizer::enableExactColorMode(). That mode is
+  used when the framebuffer carries data rather than an image (for example object ID codes decoded
+  from rendered pixels, as the synthetic annotation plug-in does), and tone mapping would corrupt
+  those values. Enabling exact color mode therefore disables the linear pipeline.
+
+  Text and blended image overlays are authored in display space and are deliberately excluded from
+  the tone-mapping stage, as is all 2D screen-space geometry.
 
   \subsection Options View Options
 

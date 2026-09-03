@@ -187,15 +187,6 @@ __device__ __forceinline__ bool rayTriangleIntersect(const float3 &ray_origin, c
     }
 }
 
-/**
- * \brief Warp-efficient ray-AABB intersection for GPU optimization
- * \param[in] ray_origin Ray starting point
- * \param[in] ray_dir Ray direction vector (normalized)
- * \param[in] aabb_min AABB minimum corner
- * \param[in] aabb_max AABB maximum corner
- * \param[in] max_dist Maximum ray distance
- * \return True if ray intersects AABB within max_dist
- */
 //! Sign-preserving reciprocal of a ray direction for slab-method AABB tests. Clamps each near-zero component to
 //! +/-PARALLEL_EPS before the reciprocal so an axis-aligned ray lying exactly on a box face computes
 //! (bound - origin == 0) * huge == 0 (finite) instead of (bound - origin == 0) * inf == NaN, which would corrupt the
@@ -243,24 +234,6 @@ __device__ __forceinline__ bool warpRayAABBIntersect(const float3 &ray_origin, c
     return (t_enter <= t_exit) && (t_exit >= 0.0f) && (t_enter <= max_dist);
 }
 
-/**
- * \brief High-performance GPU ray-triangle intersection kernel using BVH traversal
- *
- * This kernel implements proper ray-triangle intersection with BVH acceleration,
- * using the Möller-Trumbore algorithm optimized for GPU warp efficiency.
- *
- * \param[in] d_bvh_nodes BVH nodes on GPU
- * \param[in] d_primitive_indices Primitive indices on GPU
- * \param[in] d_triangle_vertices Triangle vertex data on GPU (3 vertices per triangle)
- * \param[in] d_ray_origins Ray origins on GPU
- * \param[in] d_ray_directions Ray directions on GPU
- * \param[in] d_ray_max_distances Ray maximum distances on GPU
- * \param[in] num_rays Number of rays to process
- * \param[out] d_hit_distances Closest hit distances per ray
- * \param[out] d_hit_primitive_ids Hit primitive IDs per ray
- * \param[out] d_hit_counts Number of hits per ray
- * \param[in] find_closest_hit If true, return only closest hit
- */
 // Device function for ray-triangle intersection (same algorithm as CPU)
 __device__ __forceinline__ bool rayTriangleIntersectCPU(const float3 &origin, const float3 &direction, const float3 &v0, const float3 &v1, const float3 &v2, float &distance) {
 
